@@ -14,33 +14,6 @@ expensive tool calls. PoolAct lets them share what they have already
 seen, through a shared cache, ledger, and graph, so one agent's work
 helps the others.
 
-## Quick check: do the paper's numbers come from the shipped data?
-
-The full experiment in the paper is about a day of LLM API calls. A
-reviewer cannot redo that, so the actual outputs from that experiment
-are saved and shipped with this repo as a small file of traces. A short
-script then reads those traces and recomputes the metrics, so you can
-verify that the numbers in the paper really come from the data we
-provide. It is a pipeline check, not a rerun of the LLM experiments.
-
-From the repo root:
-
-```bash
-python reproduce.py
-```
-
-The script reads `data/repro/v17_search_whois_traces.json`, recomputes
-the 18 search-F1 numbers in the *whois* column of Table 2, and prints
-each one next to the value reported in the paper. If everything matches
-you will see:
-
-```
-ALL 18 CELLS MATCH the paper to within 0.0005
-```
-
-It finishes in a few seconds. No LLM calls, no API key, no internet
-needed.
-
 ## Install
 
 ```bash
@@ -138,8 +111,7 @@ Implementation: `expgym/extras/parallel_cache.py`.
 
 ## Datasets
 
-Only needed beyond `reproduce.py`. Phantom Wiki and HPOBench
-auto-download; ContractNLI is manual.
+Phantom Wiki and HPOBench auto-download; ContractNLI is manual.
 
 ```bash
 python scripts/download_data.py            # fetches Phantom Wiki + HPOBench
@@ -149,9 +121,9 @@ python scripts/download_data.py --check    # layout-only, no network
 | Dataset | Used by | Source | Lands at |
 |---|---|---|---|
 | HPOBench code | tuning | `git clone` (auto) | `data/hpo_tuning/HPOBench/` |
+| HPOBench oracle | tuning, β presets | shipped | `data/hpo_tuning/oracle3.json` |
 | Phantom Wiki | search | HuggingFace (auto) | `$PHANTOM_WIKI_ROOT/...` |
 | ContractNLI | audit | manual (see below) | `$EXPGYM_DATA_ROOT/contract-nli/` |
-| HPOBench oracle, repro fixture | tuning, β presets, `reproduce.py` | shipped | `data/hpo_tuning/oracle3.json`, `data/repro/...` |
 
 **HPOBench Python deps** (run after the HPOBench source clone — this is
 the biggest reproducibility hazard if you skip it):

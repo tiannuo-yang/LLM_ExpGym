@@ -7,8 +7,7 @@ PoolAct markers at N=4 and N=8. Outputs go to
 The script reads pre-computed traces from ``budget_sweep_results/``
 (Haiku and DSV3.2 N=1..8 sweeps). That directory is gitignored and is
 not shipped with the open-source release; running this script requires
-the experiment outputs from the dev repo. For headline-number
-reproduction without those traces, use ``reproduce.py`` at the repo root.
+the experiment outputs from the dev repo.
 """
 from __future__ import annotations
 
