@@ -1,9 +1,5 @@
 # ExpGym: Evaluating LLM Agents in Expensive Worlds
 
-> This is the supplementary material for an anonymous double-blind
-> paper. License, citation, and contact information are left out on
-> purpose during review, and will be added back afterwards.
-
 ExpGym is for testing LLM agents on tasks where each tool call is slow,
 seconds to minutes per call. There are three scenarios: hyperparameter
 tuning (using HPOBench surrogates), multi-hop search (Phantom Wiki
@@ -18,25 +14,32 @@ expensive tool calls. PoolAct lets them share what they have already
 seen, through a shared cache, ledger, and graph, so one agent's work
 helps the others.
 
-## How to check the paper numbers
+## Quick check: do the paper's numbers come from the shipped data?
 
-From the repo root, run:
+The full experiment in the paper is about a day of LLM API calls. A
+reviewer cannot redo that, so the actual outputs from that experiment
+are saved and shipped with this repo as a small file of traces. A short
+script then reads those traces and recomputes the metrics, so you can
+verify that the numbers in the paper really come from the data we
+provide. It is a pipeline check, not a rerun of the LLM experiments.
+
+From the repo root:
 
 ```bash
 python reproduce.py
 ```
 
-This reads a small file of saved traces that ships with the repo
-(`data/repro/v17_search_whois_traces.json`), recomputes the 18 search-F1
-numbers in the *whois* column of Table 2, and prints each one next to
-the value reported in the paper. If everything matches you will see:
+The script reads `data/repro/v17_search_whois_traces.json`, recomputes
+the 18 search-F1 numbers in the *whois* column of Table 2, and prints
+each one next to the value reported in the paper. If everything matches
+you will see:
 
 ```
 ALL 18 CELLS MATCH the paper to within 0.0005
 ```
 
-The script takes a few seconds. It does not call any LLM, and you do
-not need an API key or an internet connection.
+It finishes in a few seconds. No LLM calls, no API key, no internet
+needed.
 
 ## Install
 
