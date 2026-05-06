@@ -1,30 +1,42 @@
 # ExpGym: Evaluating LLM Agents in Expensive Worlds
 
-> Anonymous double-blind submission. License, citation, and contact are
-> omitted during the review period.
+> This is the supplementary material for an anonymous double-blind
+> paper. License, citation, and contact information are left out on
+> purpose during review, and will be added back afterwards.
 
-ExpGym evaluates LLM agents whose tools are slow: seconds to minutes per
-call. The three scenarios cover hyperparameter tuning (HPOBench surrogate
-evaluations), restricted multi-hop search (Phantom Wiki document fetches),
-and evidence audit (simulated human verification). All expensive calls
-run against pre-cached surrogates, so a six-model, three-regime sweep
-finishes overnight on a workstation. It also includes `expgym.poolact`,
-a parallel-agent layer (shared cache, ledger, graph) that amortizes tool
-calls across N workers.
+ExpGym is for testing LLM agents on tasks where each tool call is slow,
+seconds to minutes per call. There are three scenarios: hyperparameter
+tuning (using HPOBench surrogates), multi-hop search (Phantom Wiki
+documents), and evidence audit (simulated human review). The slow tool
+calls are replaced with pre-cached results, so a full run across six
+models and three cost settings finishes overnight on one machine instead
+of taking weeks.
 
-## Reproduce paper Table 2 (no API key, no downloads)
+The repo also includes PoolAct (`expgym.poolact`). When several agents
+work on the same problem at the same time, they often repeat each other's
+expensive tool calls. PoolAct lets them share what they have already
+seen, through a shared cache, ledger, and graph, so one agent's work
+helps the others.
+
+## How to check the paper numbers
+
+From the repo root, run:
 
 ```bash
 python reproduce.py
 ```
 
+This reads a small file of saved traces that ships with the repo
+(`data/repro/v17_search_whois_traces.json`), recomputes the 18 search-F1
+numbers in the *whois* column of Table 2, and prints each one next to
+the value reported in the paper. If everything matches you will see:
+
 ```
 ALL 18 CELLS MATCH the paper to within 0.0005
 ```
 
-- **Inputs**: 55 KB trace fixture at `data/repro/v17_search_whois_traces.json` (shipped).
-- **Output**: 6 × 3 cell table vs. paper Table 2, search-F1 (whois) column.
-- **Runtime**: a few seconds.
+The script takes a few seconds. It does not call any LLM, and you do
+not need an API key or an internet connection.
 
 ## Install
 
