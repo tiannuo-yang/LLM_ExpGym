@@ -39,9 +39,12 @@ HPOBENCH_GIT_URL = "https://github.com/automl/HPOBench.git"
 HPOBENCH_GIT_REF_DEFAULT = "master"
 
 CONTRACT_NLI_PAGE = "https://stanfordnlp.github.io/contract-nli/"
+# Only test_segments.json needs the manual Stanford download.
+# test_nda_span_dims.json (the hints file) ships with this repo at
+# data/contract-nli/test_nda_span_dims.json and is loaded from there
+# automatically; the script does not check for it here.
 CONTRACT_NLI_FILES = [
     "test_segments.json",
-    "test_nda_span_dims.json",
 ]
 
 

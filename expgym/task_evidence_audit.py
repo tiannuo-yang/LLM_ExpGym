@@ -10,12 +10,18 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from expgym.react_loop import build_system_prompt as build_react_system_prompt
 
-_DATA_ROOT = os.environ.get(
-    "EXPGYM_DATA_ROOT",
-    os.path.join(os.path.dirname(__file__), "..", "data"),
-)
+_REPO_DATA = os.path.join(os.path.dirname(__file__), "..", "data")
+_DATA_ROOT = os.environ.get("EXPGYM_DATA_ROOT", _REPO_DATA)
 EVIDENCE_PATH = os.path.join(_DATA_ROOT, "contract-nli", "test_segments.json")
+
+# The hints file is shipped with the repo (it is not part of the upstream
+# ContractNLI release). Resolution order: a copy under EXPGYM_DATA_ROOT
+# wins if present, otherwise fall back to the bundled file at
+# ``data/contract-nli/test_nda_span_dims.json``.
 HINTS_PATH = os.path.join(_DATA_ROOT, "contract-nli", "test_nda_span_dims.json")
+_BUNDLED_HINTS_PATH = os.path.join(_REPO_DATA, "contract-nli", "test_nda_span_dims.json")
+if not os.path.isfile(HINTS_PATH) and os.path.isfile(_BUNDLED_HINTS_PATH):
+    HINTS_PATH = _BUNDLED_HINTS_PATH
 
 HUMAN_OVERHEAD_SECONDS = 300.0  # nominal; actual per-call cost uses _stable_overhead
 OVERHEAD_LOW = 280.0

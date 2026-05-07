@@ -1,7 +1,7 @@
 # ExpGym: Evaluating LLM Agents in Expensive Worlds
 
 ExpGym is for testing LLM agents on tasks where each tool call is slow,
-seconds to minutes per call. There are three scenarios: hyperparameter
+minutes to hours per call. There are three scenarios: hyperparameter
 tuning (using HPOBench surrogates), multi-hop search (Phantom Wiki
 documents), and evidence audit (simulated human review). The slow tool
 calls are replaced with pre-cached results, so a full run across six
@@ -148,7 +148,8 @@ python scripts/download_data.py --check    # layout-only, no network
 | HPOBench code | tuning | `git clone` (auto) | `data/hpo_tuning/HPOBench/` |
 | HPOBench oracle | tuning, β presets | shipped | `data/hpo_tuning/oracle3.json` |
 | Phantom Wiki | search | HuggingFace (auto) | `$PHANTOM_WIKI_ROOT/...` |
-| ContractNLI | audit | manual (see below) | `$EXPGYM_DATA_ROOT/contract-nli/` |
+| ContractNLI segments | audit | manual (see below) | `$EXPGYM_DATA_ROOT/contract-nli/test_segments.json` |
+| ContractNLI hints | audit | shipped | `data/contract-nli/test_nda_span_dims.json` |
 
 **HPOBench Python deps** (run after the HPOBench source clone — this is
 the biggest reproducibility hazard if you skip it):
@@ -159,11 +160,19 @@ bash scripts/recreate_expgym_env.sh
 # scikit-learn==0.23.2, automl/nas_benchmarks, google-research/nasbench
 ```
 
-**ContractNLI** (manual): Stanford's release page requires accepting
-data-use terms that cannot be auto-clicked. Download from
-[stanfordnlp/contract-nli](https://stanfordnlp.github.io/contract-nli/),
-extract, then copy `test_segments.json` and `test_nda_span_dims.json`
-into `$EXPGYM_DATA_ROOT/contract-nli/`.
+**ContractNLI** (partly manual): the audit scenario reads two files. The
+hints file `test_nda_span_dims.json` (which drives the `human_feedback`
+"Evidence Incomplete | missing: ..." messages) ships with this repo at
+`data/contract-nli/test_nda_span_dims.json`. The document segments
+`test_segments.json` come from Stanford and require manual download
+because their release page asks you to accept data-use terms that cannot
+be auto-clicked. Steps:
+
+1. Open [stanfordnlp/contract-nli](https://stanfordnlp.github.io/contract-nli/)
+   and download the dataset archive.
+2. Extract it.
+3. Copy only `test_segments.json` into `$EXPGYM_DATA_ROOT/contract-nli/`,
+   alongside the bundled hints file.
 
 ## Extending
 
