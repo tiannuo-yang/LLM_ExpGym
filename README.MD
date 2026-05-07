@@ -24,7 +24,7 @@ pip install -r requirements.txt
 
 ```bash
 python -m unittest discover tests
-# Ran 129 tests, OK (skipped=31; external-data tests skip cleanly)
+# Ran 123 tests, OK (skipped=31; external-data tests skip cleanly)
 ```
 
 ## Run a scenario
@@ -49,6 +49,31 @@ python demo_experiment.py --scenario evidence_audit --max-steps 20
 | Hyperparameter tuning | `expgym/task_tuning.py` | HPOBench surrogate eval (`--list-tuning-tasks` for the menu) | 8–50,000 s |
 | Restricted search | `expgym/task_restricted_search.py` | Phantom Wiki document fetch | 300 ± 20 s |
 | Evidence audit | `expgym/task_evidence_audit.py` | Simulated human verification | 300 ± 20 s |
+
+The paper evaluates six frontier LLMs (DeepSeek-V3.2, GPT-5.2, GPT-4.1,
+Gemini-3-Flash, Claude-Haiku-4.5, Mistral-Large) through OpenRouter, with
+extended reasoning disabled. The code is model-agnostic: pass any model
+identifier with `--backend openrouter --model <name>` and your own key.
+The OpenRouter client disables extended reasoning by default
+(`reasoning: {enabled: false}`); for the reasoning-enabled ablation,
+construct the client with `disable_thinking=False`.
+
+<!-- ### How the simulated human reviewer works (audit scenario)
+
+The audit scenario does not call a second LLM for verification. Instead,
+the `human_feedback` tool returns one of three deterministic responses
+based on the agent's proposed evidence IDs and the ground-truth
+annotations:
+
+- **`Evidence Correct`** — the proposed evidence set exactly matches the
+  ground-truth set, or both are empty for a `NotMentioned` hypothesis.
+- **`Evidence Incomplete | missing: <hint>`** — the proposed set is a
+  proper subset of ground truth; the hint lists semantic dimensions of
+  the missing pieces (e.g. "termination clause").
+- **`Contain Irrelevant Evidences`** — the proposed set contains IDs not
+  in ground truth.
+
+The full ruleset is in `expgym/task_evidence_audit.py:human_feedback`. -->
 
 ## Cost regimes
 
