@@ -7,8 +7,6 @@ import os
 import re
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-import pyarrow.parquet as pq
-
 from expgym.react_loop import build_system_prompt as build_react_system_prompt
 
 # ---------------------------------------------------------------------------
@@ -69,6 +67,18 @@ def _parse_payload(payload: str) -> Dict[str, object]:
     return data
 
 
+def _read_parquet_table(path: str, columns: List[str]):
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:  # pragma: no cover - depends on optional data deps
+        raise RuntimeError(
+            "Restricted search needs pyarrow to read Phantom Wiki parquet files. "
+            "Install it with `python -m pip install pyarrow`, or run "
+            "`bash scripts/smoke.sh --with-auto-data`."
+        ) from exc
+    return pq.read_table(path, columns=columns)
+
+
 # ---------------------------------------------------------------------------
 # Data source parsing & loading
 # ---------------------------------------------------------------------------
@@ -100,7 +110,7 @@ def _load_corpus(seed: int) -> Dict[str, str]:
         CORPUS_DIR,
         f"depth_20_size_5000_seed_{seed}-00000-of-00001.parquet",
     )
-    table = pq.read_table(path, columns=["title", "article"])
+    table = _read_parquet_table(path, columns=["title", "article"])
     corpus = {row["title"]: row["article"] for row in table.to_pylist()}
     _CORPUS_CACHE[seed] = corpus
     return corpus
@@ -117,7 +127,9 @@ def _load_qa(seed: int) -> List[dict]:
         QA_DIR,
         f"depth_20_size_5000_seed_{seed}-00000-of-00001.parquet",
     )
-    table = pq.read_table(path, columns=["question", "answer", "type", "difficulty"])
+    table = _read_parquet_table(
+        path, columns=["question", "answer", "type", "difficulty"]
+    )
     all_rows = table.to_pylist()
     filtered = [
         r for r in all_rows

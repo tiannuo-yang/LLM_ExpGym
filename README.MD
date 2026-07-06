@@ -16,6 +16,42 @@ helps the others.
 
 ## Install
 
+Fastest real end-to-end smoke path after cloning:
+
+```bash
+bash scripts/smoke.sh
+```
+
+This creates/reuses `.venv-smoke`, installs the light dependencies, runs the
+unit tests, and executes a real OpenRouter-backed tuning trace. The script reads
+`OPENROUTER_API_KEY` if set, otherwise it looks for `../openrouter.key` next to
+the cloned repo. It does not require external datasets.
+
+To also install data dependencies and fetch auto-downloadable datasets:
+
+```bash
+bash scripts/smoke.sh --with-auto-data
+```
+
+ContractNLI is still manual because its Stanford release page requires
+accepting data-use terms.
+
+### Smoke coverage
+
+`scripts/smoke.sh` is a fast framework smoke, not a full paper
+reproduction. It verifies the core ExpGym path used by the paper:
+
+1. A real OpenRouter model is called.
+2. The model enters the ReAct loop in `expgym/react_loop.py`.
+3. The model emits `Action: evaluate_config {...}` for the built-in tuning
+   world in `expgym/task_tuning.py`.
+4. ExpGym executes the tool, returns `Observation: perf=..., cost=...`,
+   asks for a final answer, and scores it as `answer_perf`.
+
+It does not run the full six-model sweep, the three cost-regime sweep,
+HPOBench surrogate tasks, Phantom Wiki search, ContractNLI audit, or PoolAct
+parallel-agent experiments.
+
 ```bash
 conda env create -f environment.yml && conda activate expgym
 # or:
@@ -29,10 +65,10 @@ python -m unittest discover tests
 
 ## Run a scenario
 
-One trace, FakeLLM, no API key:
+One real OpenRouter trace:
 
 ```bash
-python demo_experiment.py --baseline both --max-evals 6
+python scripts/openrouter_smoke.py
 ```
 
 The full menu:
@@ -139,8 +175,9 @@ Implementation: `expgym/extras/parallel_cache.py`.
 Phantom Wiki and HPOBench auto-download; ContractNLI is manual.
 
 ```bash
-python scripts/download_data.py            # fetches Phantom Wiki + HPOBench
-python scripts/download_data.py --check    # layout-only, no network
+python scripts/download_data.py --auto-only # fetch Phantom Wiki + HPOBench
+python scripts/download_data.py --check     # layout-only, no network
+python scripts/download_data.py             # full readiness check; reports ContractNLI manual step if missing
 ```
 
 | Dataset | Used by | Source | Lands at |

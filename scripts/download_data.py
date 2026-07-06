@@ -3,6 +3,8 @@
 Usage:
     python scripts/download_data.py            # download everything that is missing
     python scripts/download_data.py --check    # only verify the layout, do not fetch
+    python scripts/download_data.py --auto-only
+                                              # skip manually licensed ContractNLI
 
 Three datasets are needed for the full experiment sweep:
     1. Phantom Wiki    (auto-download from HuggingFace)
@@ -204,6 +206,11 @@ def main() -> int:
         action="store_true",
         help="Only verify the layout; do not download anything.",
     )
+    parser.add_argument(
+        "--auto-only",
+        action="store_true",
+        help="Only prepare auto-downloadable datasets; skip manual ContractNLI.",
+    )
     args = parser.parse_args()
 
     print(f"EXPGYM_DATA_ROOT   = {_data_root()}")
@@ -211,8 +218,14 @@ def main() -> int:
     print(f"HPOBench checkout  = {_hpobench_dir()}")
     print()
 
+    steps = STEPS
+    result_label = "all datasets"
+    if args.auto_only:
+        steps = [(name, step) for name, step in STEPS if name != "ContractNLI"]
+        result_label = "all auto-downloadable datasets"
+
     failures: List[str] = []
-    for name, step in STEPS:
+    for name, step in steps:
         print(f"[{name}] ...")
         ok, message = step(args.check)
         prefix = "  OK  " if ok else "  ERR "
@@ -225,7 +238,7 @@ def main() -> int:
     if failures:
         print(f"Result: {len(failures)} dataset(s) not ready: {', '.join(failures)}.")
         return 1
-    print("Result: all datasets ready.")
+    print(f"Result: {result_label} ready.")
     return 0
 
 
