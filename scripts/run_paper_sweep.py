@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Run the paper reproduction sweep.
+"""Run a parameterized ExpGym reproduction sweep.
 
-Default matrix matches the main ExpGym ranking experiment in the paper:
-6 models x 3 cost regimes x (9 tuning tasks x 3 reps + 35 search questions
+By default this runs one low-friction real E2E trace:
+one cheap OpenRouter model, the built-in tuning scenario, one cost regime.
+Expand the matrix explicitly with --models, --scenarios, --cost-regimes,
+--tuning-tasks, --search-indices, --audit-indices, and the rep counts.
+
+The paper's main ranking matrix is expressible with explicit selector values:
+6 models x 3 cost regimes x (9 HPOBench tasks x 3 reps + 35 search questions
 + 13 audit docs x 3 reps) = 1,818 traces.
-
-Use --dry-run first. Actual runs require the external datasets and HPOBench
-environment described in README.MD.
 """
 from __future__ import annotations
 
@@ -61,6 +63,12 @@ PAPER_TUNING_TASKS = [
 
 PAPER_COST_REGIMES = ["cost_free", "cost_moderate", "cost_tight"]
 SCENARIOS = ["tuning", "restricted_search", "evidence_audit"]
+DEFAULT_MODEL = os.environ.get("EXPGYM_OPENROUTER_MODEL", "openai/gpt-4.1-nano")
+DEFAULT_SCENARIOS = os.environ.get("EXPGYM_SCENARIOS", "tuning")
+DEFAULT_COST_REGIMES = os.environ.get("EXPGYM_COST_REGIMES", "cost_tight")
+DEFAULT_TUNING_TASKS = os.environ.get("EXPGYM_TUNING_TASKS", "neural_network_training")
+DEFAULT_SEARCH_INDICES = os.environ.get("EXPGYM_SEARCH_INDICES", "0")
+DEFAULT_AUDIT_INDICES = os.environ.get("EXPGYM_AUDIT_INDICES", "0")
 REGIME_DIR = {
     "cost_free": "cost_free",
     "cost_moderate": "cost_moderate",
@@ -150,7 +158,9 @@ def _build_jobs(args: argparse.Namespace) -> List[Job]:
     scenarios = _split_csv(args.scenarios)
     cost_regimes = _split_csv(args.cost_regimes)
     tuning_tasks = (
-        PAPER_TUNING_TASKS if args.tuning_tasks == "paper" else _split_csv(args.tuning_tasks)
+        PAPER_TUNING_TASKS
+        if args.tuning_tasks == "all-hpobench"
+        else _split_csv(args.tuning_tasks)
     )
     search_indices = _parse_indices(args.search_indices)
     audit_indices = _parse_indices(args.audit_indices)
@@ -463,7 +473,7 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
     counts: Dict[str, int] = {}
     for job in jobs:
         counts[job.scenario] = counts.get(job.scenario, 0) + 1
-    print("Paper sweep dry-run")
+    print("ExpGym sweep dry-run")
     print(f"output_dir: {args.output_dir}")
     print(f"jobs: {len(jobs)}")
     for scenario in SCENARIOS:
@@ -476,11 +486,18 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=Path("budget_sweep_results/paper"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(os.environ.get("EXPGYM_OUTPUT_DIR", "budget_sweep_results/e2e")),
+    )
     parser.add_argument(
         "--models",
-        default=",".join(PAPER_MODELS.keys()),
-        help="Comma-separated aliases or OpenRouter IDs. Defaults to the six paper models.",
+        default=os.environ.get("EXPGYM_MODELS", DEFAULT_MODEL),
+        help=(
+            "Comma-separated aliases or OpenRouter IDs. Default: "
+            f"{DEFAULT_MODEL}. Paper aliases: {','.join(PAPER_MODELS.keys())}."
+        ),
     )
     parser.add_argument(
         "--model-alias",
@@ -488,30 +505,40 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Override/add model alias as NAME=OPENROUTER_MODEL_ID.",
     )
-    parser.add_argument("--scenarios", default=",".join(SCENARIOS))
-    parser.add_argument("--cost-regimes", default=",".join(PAPER_COST_REGIMES))
-    parser.add_argument("--tuning-tasks", default="paper")
-    parser.add_argument("--search-indices", default="0:35")
+    parser.add_argument("--scenarios", default=DEFAULT_SCENARIOS)
+    parser.add_argument("--cost-regimes", default=DEFAULT_COST_REGIMES)
+    parser.add_argument(
+        "--tuning-tasks",
+        default=DEFAULT_TUNING_TASKS,
+        help=(
+            "Comma-separated tuning tasks. Default: neural_network_training. "
+            "Use all-hpobench for the 9 HPOBench tasks from the paper."
+        ),
+    )
+    parser.add_argument("--search-indices", default=DEFAULT_SEARCH_INDICES)
     parser.add_argument("--search-data-source", default="phantom_seed1")
-    parser.add_argument("--audit-indices", default="0:13")
+    parser.add_argument("--audit-indices", default=DEFAULT_AUDIT_INDICES)
     parser.add_argument("--cc-split", default="cc-large")
     parser.add_argument(
         "--audit-orders",
         type=Path,
         default=REPO_ROOT / "configs" / "audit_hypothesis_orders.json",
     )
-    parser.add_argument("--tuning-reps", type=int, default=3)
+    parser.add_argument("--tuning-reps", type=int, default=1)
     parser.add_argument("--search-reps", type=int, default=1)
-    parser.add_argument("--audit-reps", type=int, default=3)
+    parser.add_argument("--audit-reps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1206)
-    parser.add_argument("--max-steps", type=int, default=30)
-    parser.add_argument("--max-evals", type=int, default=999999)
+    parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--max-evals", type=int, default=30)
     parser.add_argument("--temperature-tuning", type=float, default=0.7)
     parser.add_argument("--temperature-eval", type=float, default=0.0)
     parser.add_argument("--api-key-file", type=Path, default=_default_key_file())
-    parser.add_argument("--base-url", default=None)
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("OPENROUTER_BASE_URL") or os.environ.get("EXPGYM_BASE_URL"),
+    )
     parser.add_argument("--openrouter-referer", default=None)
-    parser.add_argument("--openrouter-title", default="ExpGym paper sweep")
+    parser.add_argument("--openrouter-title", default="ExpGym sweep")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--skip-preflight", action="store_true")

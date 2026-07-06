@@ -5,10 +5,12 @@ verify the layout-detection logic. The real download is exercised by
 running the script by hand.
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 # Load the script as a module without polluting sys.path permanently.
@@ -30,6 +32,9 @@ class CheckOnlyNoNetworkTest(unittest.TestCase):
         self._old_env = {
             "EXPGYM_DATA_ROOT": os.environ.get("EXPGYM_DATA_ROOT"),
             "PHANTOM_WIKI_ROOT": os.environ.get("PHANTOM_WIKI_ROOT"),
+            download_data.CONTRACT_NLI_ARCHIVE_ENV: os.environ.get(
+                download_data.CONTRACT_NLI_ARCHIVE_ENV
+            ),
         }
         os.environ["EXPGYM_DATA_ROOT"] = os.path.join(self._tmp, "data")
         os.environ["PHANTOM_WIKI_ROOT"] = os.path.join(self._tmp, "data", "phantom-wiki")
@@ -74,6 +79,35 @@ class CheckOnlyNoNetworkTest(unittest.TestCase):
         ok, msg = download_data.fetch_contract_nli(check_only=True)
         self.assertTrue(ok, msg)
         self.assertIn("already present", msg)
+
+    def test_contract_nli_archive_extracts_public_test_json_name(self):
+        archive = os.path.join(self._tmp, "contract-nli.zip")
+        payload = {
+            "documents": [
+                {
+                    "id": 1,
+                    "text": "alpha beta",
+                    "spans": [[0, 5], [6, 10]],
+                    "annotation_sets": [{"annotations": {}}],
+                }
+            ],
+            "labels": {},
+        }
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("contract-nli/test.json", json.dumps(payload))
+        os.environ[download_data.CONTRACT_NLI_ARCHIVE_ENV] = archive
+
+        ok, msg = download_data.fetch_contract_nli(check_only=False)
+
+        self.assertTrue(ok, msg)
+        self.assertIn("test_segments.json", msg)
+        target = os.path.join(
+            os.environ["EXPGYM_DATA_ROOT"], "contract-nli", "test_segments.json"
+        )
+        with open(target, encoding="utf-8") as handle:
+            extracted = json.load(handle)
+        self.assertEqual(extracted["documents"][0]["segments"][0]["text"], "alpha")
+        self.assertEqual(extracted["documents"][0]["segments"][1]["span_index"], 1)
 
 
 class StepsRegistrationTest(unittest.TestCase):

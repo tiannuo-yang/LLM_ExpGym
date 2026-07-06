@@ -7,29 +7,29 @@ from scripts import run_paper_sweep
 
 def _args(**overrides):
     defaults = dict(
-        output_dir=Path("budget_sweep_results/paper"),
-        models=",".join(run_paper_sweep.PAPER_MODELS.keys()),
+        output_dir=Path("budget_sweep_results/e2e"),
+        models="openai/gpt-4.1-nano",
         model_alias=[],
-        scenarios=",".join(run_paper_sweep.SCENARIOS),
-        cost_regimes=",".join(run_paper_sweep.PAPER_COST_REGIMES),
-        tuning_tasks="paper",
-        search_indices="0:35",
+        scenarios="tuning",
+        cost_regimes="cost_tight",
+        tuning_tasks="neural_network_training",
+        search_indices="0",
         search_data_source="phantom_seed1",
-        audit_indices="0:13",
+        audit_indices="0",
         cc_split="cc-large",
         audit_orders=Path("configs/audit_hypothesis_orders.json"),
-        tuning_reps=3,
+        tuning_reps=1,
         search_reps=1,
-        audit_reps=3,
+        audit_reps=1,
         seed=1206,
-        max_steps=30,
-        max_evals=999999,
+        max_steps=10,
+        max_evals=30,
         temperature_tuning=0.7,
         temperature_eval=0.0,
         api_key_file=Path("../openrouter.key"),
         base_url=None,
         openrouter_referer=None,
-        openrouter_title="ExpGym paper sweep",
+        openrouter_title="ExpGym sweep",
         dry_run=True,
         resume=False,
         skip_preflight=False,
@@ -41,8 +41,30 @@ def _args(**overrides):
 
 
 class PaperSweepMatrixTest(unittest.TestCase):
-    def test_default_matrix_matches_paper_trace_count(self):
+    def test_default_matrix_is_one_low_friction_smoke_job(self):
         jobs = run_paper_sweep._build_jobs(_args())
+        self.assertEqual(len(jobs), 1)
+        job = jobs[0]
+        self.assertEqual(job.model_id, "openai/gpt-4.1-nano")
+        self.assertEqual(job.scenario, "tuning")
+        self.assertEqual(job.cost_regime, "cost_tight")
+        self.assertEqual(job.tuning_task, "neural_network_training")
+
+    def test_explicit_paper_matrix_matches_trace_count(self):
+        jobs = run_paper_sweep._build_jobs(
+            _args(
+                models=",".join(run_paper_sweep.PAPER_MODELS.keys()),
+                scenarios=",".join(run_paper_sweep.SCENARIOS),
+                cost_regimes=",".join(run_paper_sweep.PAPER_COST_REGIMES),
+                tuning_tasks="all-hpobench",
+                search_indices="0:35",
+                audit_indices="0:13",
+                tuning_reps=3,
+                audit_reps=3,
+                max_steps=30,
+                max_evals=999999,
+            )
+        )
         self.assertEqual(len(jobs), 1818)
         counts = {}
         for job in jobs:

@@ -5,11 +5,13 @@ Usage:
     python scripts/download_data.py --check    # only verify the layout, do not fetch
     python scripts/download_data.py --auto-only
                                               # skip manually licensed ContractNLI
+    python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
+                                              # extract ContractNLI after accepting terms
 
 Three datasets are needed for the full experiment sweep:
     1. Phantom Wiki    (auto-download from HuggingFace)
     2. HPOBench code   (auto-download from GitHub)
-    3. ContractNLI     (manual — see printed instructions)
+    3. ContractNLI     (manual terms, scripted extraction from local zip)
 
 The script reads ``EXPGYM_DATA_ROOT`` and ``PHANTOM_WIKI_ROOT`` from the
 environment if set; otherwise it places the data under ``./data/`` relative
@@ -19,10 +21,12 @@ expected files are already present.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from typing import Callable, List, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,6 +51,15 @@ CONTRACT_NLI_PAGE = "https://stanfordnlp.github.io/contract-nli/"
 # automatically; the script does not check for it here.
 CONTRACT_NLI_FILES = [
     "test_segments.json",
+]
+CONTRACT_NLI_ARCHIVE_ENV = "CONTRACT_NLI_ARCHIVE"
+CONTRACT_NLI_ARCHIVE_MEMBERS = [
+    "contract-nli/test_segments.json",
+    "test_segments.json",
+    # The public ContractNLI archive names the test split this way; ExpGym
+    # consumes the same JSON schema under the historical test_segments.json name.
+    "contract-nli/test.json",
+    "test.json",
 ]
 
 
@@ -170,6 +183,13 @@ def fetch_contract_nli(check_only: bool) -> Tuple[bool, str]:
     if have_all:
         return True, f"ContractNLI already present at {target_dir}"
 
+    archive = os.environ.get(CONTRACT_NLI_ARCHIVE_ENV)
+    if archive and not check_only:
+        ok, message = _extract_contract_nli_archive(archive, target_dir)
+        if ok:
+            return ok, message
+        return False, message
+
     missing = [
         f for f in CONTRACT_NLI_FILES
         if not os.path.isfile(os.path.join(target_dir, f))
@@ -181,11 +201,68 @@ def fetch_contract_nli(check_only: bool) -> Tuple[bool, str]:
         f"  Steps:\n"
         f"    1. Open {CONTRACT_NLI_PAGE} and download the dataset archive.\n"
         f"    2. Extract it.\n"
-        f"    3. Copy at least these files into {target_dir}/:\n"
+        f"    3. Either run:\n"
+        f"         python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip\n"
+        f"       or copy at least these files into {target_dir}/:\n"
         + "".join(f"         - {f}\n" for f in CONTRACT_NLI_FILES)
         + f"  Currently missing: {', '.join(missing)}"
     )
     return False, msg
+
+
+def _extract_contract_nli_archive(archive: str, target_dir: str) -> Tuple[bool, str]:
+    if not os.path.isfile(archive):
+        return False, f"ContractNLI archive not found: {archive}"
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            names = set(zf.namelist())
+            member = next((name for name in CONTRACT_NLI_ARCHIVE_MEMBERS if name in names), None)
+            if member is None:
+                return False, (
+                    "ContractNLI archive did not contain a supported test JSON. "
+                    f"Looked for: {', '.join(CONTRACT_NLI_ARCHIVE_MEMBERS)}"
+                )
+            raw = zf.read(member)
+    except zipfile.BadZipFile as exc:
+        return False, f"ContractNLI archive is not a valid zip file: {exc}"
+    except OSError as exc:
+        return False, f"Failed to read ContractNLI archive: {exc}"
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+        data = _normalize_contract_nli_schema(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return False, f"ContractNLI test JSON could not be parsed: {exc}"
+    except (TypeError, ValueError) as exc:
+        return False, f"ContractNLI test JSON has unexpected schema: {exc}"
+
+    os.makedirs(target_dir, exist_ok=True)
+    target = os.path.join(target_dir, "test_segments.json")
+    with open(target, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    return True, f"ContractNLI extracted {member} -> {target}"
+
+
+def _normalize_contract_nli_schema(data: object) -> dict:
+    if not isinstance(data, dict) or "documents" not in data or "labels" not in data:
+        raise ValueError("expected top-level documents and labels")
+    documents = data["documents"]
+    if not isinstance(documents, list):
+        raise ValueError("documents must be a list")
+    for doc in documents:
+        if not isinstance(doc, dict):
+            raise ValueError("each document must be an object")
+        if "segments" in doc:
+            continue
+        spans = doc.get("spans")
+        text = doc.get("text")
+        if spans is None or text is None:
+            raise ValueError("document must contain segments or spans+text")
+        doc["segments"] = [
+            {"span_index": idx, "text": text[int(start):int(end)]}
+            for idx, (start, end) in enumerate(spans)
+        ]
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +288,15 @@ def main() -> int:
         action="store_true",
         help="Only prepare auto-downloadable datasets; skip manual ContractNLI.",
     )
+    parser.add_argument(
+        "--contract-nli-archive",
+        default=None,
+        help="Path to the manually downloaded ContractNLI zip archive.",
+    )
     args = parser.parse_args()
+
+    if args.contract_nli_archive:
+        os.environ[CONTRACT_NLI_ARCHIVE_ENV] = args.contract_nli_archive
 
     print(f"EXPGYM_DATA_ROOT   = {_data_root()}")
     print(f"PHANTOM_WIKI_ROOT  = {_phantom_wiki_root()}")

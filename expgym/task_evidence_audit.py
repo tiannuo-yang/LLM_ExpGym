@@ -96,9 +96,24 @@ def _get_doc(row_index: int) -> Document:
     return Document(
         doc_id=int(doc["id"]),
         file_name=doc["file_name"],
-        segments=doc["segments"],
+        segments=_segments_for_doc(doc),
         annotations=annotations,
     )
+
+
+def _segments_for_doc(doc: dict) -> List[dict]:
+    if "segments" in doc:
+        return doc["segments"]
+    if "spans" not in doc:
+        raise KeyError("segments")
+    text = doc.get("text", "")
+    segments = []
+    for idx, bounds in enumerate(doc["spans"]):
+        if not isinstance(bounds, list) or len(bounds) != 2:
+            continue
+        start, end = int(bounds[0]), int(bounds[1])
+        segments.append({"span_index": idx, "text": text[start:end]})
+    return segments
 
 
 def _get_labels(cc_split: str = "cc-large") -> Dict[str, dict]:

@@ -16,30 +16,40 @@ helps the others.
 
 ## Install
 
-Fastest real end-to-end smoke path after cloning:
+Fastest real end-to-end path after cloning:
 
 ```bash
-bash scripts/smoke.sh
+cp .env.example .env
+# edit .env if your key file, server URL, or data root differs
+bash scripts/run_paper_sweep.sh
 ```
 
-This creates/reuses `.venv-smoke`, installs the light dependencies, runs the
-unit tests, and executes a real OpenRouter-backed tuning trace. The script reads
-`OPENROUTER_API_KEY` if set, otherwise it looks for `../openrouter.key` next to
-the cloned repo. It does not require external datasets.
+This creates/reuses `.venv-expgym`, installs light dependencies, reads
+`OPENROUTER_API_KEY` or `OPENROUTER_API_KEY_FILE`, and runs one real
+OpenRouter-backed ExpGym trace. The default is intentionally small:
 
-To also install data dependencies and fetch auto-downloadable datasets:
+- scenario: `tuning`
+- model: `openai/gpt-4.1-nano`
+- task: `neural_network_training`
+- cost regime: `cost_tight`
+
+It does not require external datasets. To also install data dependencies and
+fetch auto-downloadable data:
 
 ```bash
-bash scripts/smoke.sh --with-auto-data
+bash scripts/run_paper_sweep.sh --with-auto-data
 ```
 
-ContractNLI is still manual because its Stanford release page requires
-accepting data-use terms.
+If you have accepted Stanford's ContractNLI terms and downloaded their zip:
+
+```bash
+bash scripts/run_paper_sweep.sh --contract-nli-archive /path/to/contract-nli.zip
+```
 
 ### Smoke coverage
 
-`scripts/smoke.sh` is a fast framework smoke, not a full paper
-reproduction. It verifies the core ExpGym path used by the paper:
+The default run is a fast framework smoke, not a full paper reproduction. It
+verifies the core ExpGym path used by the paper:
 
 1. A real OpenRouter model is called.
 2. The model enters the ReAct loop in `expgym/react_loop.py`.
@@ -48,9 +58,9 @@ reproduction. It verifies the core ExpGym path used by the paper:
 4. ExpGym executes the tool, returns `Observation: perf=..., cost=...`,
    asks for a final answer, and scores it as `answer_perf`.
 
-It does not run the full six-model sweep, the three cost-regime sweep,
-HPOBench surrogate tasks, Phantom Wiki search, ContractNLI audit, or PoolAct
-parallel-agent experiments.
+It does not run the full model sweep, all cost regimes, HPOBench surrogate
+tasks, Phantom Wiki search, ContractNLI audit, or PoolAct parallel-agent
+experiments unless you request those selectors explicitly.
 
 ```bash
 conda env create -f environment.yml && conda activate expgym
@@ -65,70 +75,93 @@ python -m unittest discover tests
 
 ## Run a scenario
 
-One real OpenRouter trace:
+The sweep runner is parameterized by scenario/model/question/task/budget
+selectors. The shell wrapper handles env setup; all remaining flags are passed
+to `scripts/run_paper_sweep.py`.
 
 ```bash
-python scripts/openrouter_smoke.py
-```
-
-The full menu:
-
-```bash
-python demo_experiment.py --backend openai --model gpt-4o-mini
-python demo_experiment.py --scenario tuning --tuning-task hpobench:svm_surrogate
-python demo_experiment.py --scenario restricted_search --question-index 5
-python demo_experiment.py --scenario evidence_audit --max-steps 20
-```
-
-## Paper Reproduction
-
-Use `scripts/run_paper_sweep.py` for the main paper sweep. Its default job
-matrix matches the ranking experiment in the paper:
-
-- 6 OpenRouter models: DeepSeek-V3.2, GPT-5.2, GPT-4.1,
-  Gemini-3-Flash, Claude-Haiku-4.5, Mistral-Large.
-- 3 cost regimes: `cost_free`, `cost_moderate`, `cost_tight`.
-- 9 HPOBench tuning tasks x 3 reps.
-- 35 Phantom Wiki restricted-search questions.
-- 13 ContractNLI audit documents x 3 randomized hypothesis orders.
-
-That is `486 + 630 + 702 = 1,818` traces. Start with dry-run:
-
-```bash
-python scripts/run_paper_sweep.py --dry-run
-```
-
-Run a small real slice:
-
-```bash
-python scripts/run_paper_sweep.py \
+bash scripts/run_paper_sweep.sh \
   --models openai/gpt-4.1-nano \
   --scenarios tuning \
   --tuning-tasks neural_network_training \
-  --cost-regimes cost_tight \
-  --tuning-reps 1 \
-  --limit 1
-```
+  --cost-regimes cost_tight
 
-Run the full main sweep once external datasets and HPOBench dependencies are
-ready:
+bash scripts/run_paper_sweep.sh --with-auto-data \
+  --models openai/gpt-4.1-nano \
+  --scenarios restricted_search \
+  --search-indices 0 \
+  --cost-regimes cost_tight
 
-```bash
-python scripts/run_paper_sweep.py --resume
+bash scripts/run_paper_sweep.sh \
+  --contract-nli-archive /path/to/contract-nli.zip \
+  --models openai/gpt-4.1-nano \
+  --scenarios evidence_audit \
+  --audit-indices 0 \
+  --cc-split cc-small \
+  --cost-regimes cost_tight
 ```
 
 Useful selectors:
 
 ```bash
-python scripts/run_paper_sweep.py --models dsv32,gpt52 --scenarios tuning,restricted_search
-python scripts/run_paper_sweep.py --cost-regimes cost_free,cost_tight
-python scripts/run_paper_sweep.py --tuning-tasks hpobench:paramnet:adult:steps
-python scripts/run_paper_sweep.py --search-indices 0:10
-python scripts/run_paper_sweep.py --audit-indices 0,1,2 --audit-reps 3
-python scripts/run_paper_sweep.py --model-alias gpt52=openai/gpt-5.2
+bash scripts/run_paper_sweep.sh --models openai/gpt-4.1-nano,mistralai/mistral-large
+bash scripts/run_paper_sweep.sh --scenarios tuning,restricted_search
+bash scripts/run_paper_sweep.sh --cost-regimes cost_free,cost_moderate,cost_tight
+bash scripts/run_paper_sweep.sh --search-indices 0:10
+bash scripts/run_paper_sweep.sh --audit-indices 0,1,2 --audit-reps 3
+bash scripts/run_paper_sweep.sh --tuning-tasks hpobench:paramnet:adult:steps
+bash scripts/run_paper_sweep.sh --model-alias fast=openai/gpt-4.1-nano --models fast
 ```
 
-Every trace is saved under `budget_sweep_results/paper/` with `job`,
+## Paper Reproduction
+
+The main paper ranking matrix is not hidden behind a preset. Build it with
+explicit selectors:
+
+- 6 OpenRouter models: DeepSeek-V3.2, GPT-5.2, GPT-4.1,
+  Gemini-3-Flash, Claude-Haiku-4.5, Mistral-Large.
+- 3 cost regimes: `cost_free`, `cost_moderate`, `cost_tight`.
+- 9 HPOBench tuning tasks x 3 reps (`--tuning-tasks all-hpobench`).
+- 35 Phantom Wiki restricted-search questions.
+- 13 ContractNLI audit documents x 3 randomized hypothesis orders.
+
+That is `486 + 630 + 702 = 1,818` traces. Dry-run the exact matrix:
+
+```bash
+bash scripts/run_paper_sweep.sh --dry-run \
+  --models dsv32,gpt52,gpt41,gemini3flash,haiku45,mistral_large \
+  --scenarios tuning,restricted_search,evidence_audit \
+  --cost-regimes cost_free,cost_moderate,cost_tight \
+  --tuning-tasks all-hpobench \
+  --search-indices 0:35 \
+  --audit-indices 0:13 \
+  --tuning-reps 3 \
+  --search-reps 1 \
+  --audit-reps 3 \
+  --max-steps 30 \
+  --max-evals 999999 \
+  --output-dir budget_sweep_results/paper
+```
+
+Run the same matrix with resumable writes:
+
+```bash
+bash scripts/run_paper_sweep.sh --resume \
+  --models dsv32,gpt52,gpt41,gemini3flash,haiku45,mistral_large \
+  --scenarios tuning,restricted_search,evidence_audit \
+  --cost-regimes cost_free,cost_moderate,cost_tight \
+  --tuning-tasks all-hpobench \
+  --search-indices 0:35 \
+  --audit-indices 0:13 \
+  --tuning-reps 3 \
+  --search-reps 1 \
+  --audit-reps 3 \
+  --max-steps 30 \
+  --max-evals 999999 \
+  --output-dir budget_sweep_results/paper
+```
+
+Every trace is saved under `--output-dir` with `job`,
 `cost_regime_resolved`, and `score_check` metadata. `score_check` recomputes
 the score from the scenario evaluator or tool and fails the run if the reported
 score disagrees.
@@ -225,10 +258,12 @@ Implementation: `expgym/extras/parallel_cache.py`.
 
 ## Datasets
 
-Phantom Wiki and HPOBench auto-download; ContractNLI is manual.
+Phantom Wiki and HPOBench source auto-download; ContractNLI requires the user
+to accept Stanford's terms and provide the downloaded zip path.
 
 ```bash
 python scripts/download_data.py --auto-only # fetch Phantom Wiki + HPOBench
+python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
 python scripts/download_data.py --check     # layout-only, no network
 python scripts/download_data.py             # full readiness check; reports ContractNLI manual step if missing
 ```
@@ -241,16 +276,30 @@ python scripts/download_data.py             # full readiness check; reports Cont
 | ContractNLI segments | audit | manual (see below) | `$EXPGYM_DATA_ROOT/contract-nli/test_segments.json` |
 | ContractNLI hints | audit | shipped | `data/contract-nli/test_nda_span_dims.json` |
 
-**HPOBench Python deps** (run after the HPOBench source clone — this is
-the biggest reproducibility hazard if you skip it):
+**HPOBench Python deps** (needed only for `hpobench:*` tuning tasks):
 
 ```bash
 bash scripts/recreate_expgym_env.sh
-# installs HPOBench (editable) + tensorflow==1.15, protobuf<4,
-# scikit-learn==0.23.2, automl/nas_benchmarks, google-research/nasbench
+# creates conda env expgym-hpobench with HPOBench (editable),
+# tensorflow==1.15, scikit-learn==0.23.2, NASBench deps, and ConfigSpace.
 ```
 
-**ContractNLI** (partly manual): the audit scenario reads two files. The
+The default smoke does not need these dependencies. The full HPOBench/NASBench
+stack includes TensorFlow 1.15 and is intended for Linux/x86_64-style legacy
+Python environments; Apple Silicon/macOS cannot run the NASBench101 dependency
+stack natively.
+
+Run HPOBench sweeps from that env:
+
+```bash
+conda run -n expgym-hpobench python scripts/run_paper_sweep.py \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks hpobench:paramnet:adult:steps \
+  --cost-regimes cost_tight
+```
+
+**ContractNLI** (manual terms, scripted extraction): the audit scenario reads two files. The
 hints file `test_nda_span_dims.json` (which drives the `human_feedback`
 "Evidence Incomplete | missing: ..." messages) ships with this repo at
 `data/contract-nli/test_nda_span_dims.json`. The document segments
@@ -260,9 +309,9 @@ be auto-clicked. Steps:
 
 1. Open [stanfordnlp/contract-nli](https://stanfordnlp.github.io/contract-nli/)
    and download the dataset archive.
-2. Extract it.
-3. Copy only `test_segments.json` into `$EXPGYM_DATA_ROOT/contract-nli/`,
-   alongside the bundled hints file.
+2. Run `python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip`.
+3. The script extracts `contract-nli/test.json` as
+   `$EXPGYM_DATA_ROOT/contract-nli/test_segments.json`.
 
 ## Extending
 
@@ -289,5 +338,8 @@ should compute a budget for it.
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `VLLM_API_KEY` | LLM backends |
+| `OPENROUTER_API_KEY_FILE` | one-line OpenRouter key file, default `../openrouter.key` |
+| `OPENROUTER_BASE_URL`, `EXPGYM_BASE_URL` | OpenRouter/OpenAI-compatible server override |
+| `EXPGYM_OPENROUTER_MODEL` | default smoke model |
 | `EXPGYM_DATA_ROOT` | parent of `contract-nli/` |
 | `PHANTOM_WIKI_ROOT` | Phantom Wiki cache directory |
