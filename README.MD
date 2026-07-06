@@ -1,83 +1,77 @@
 # ExpGym: Evaluating LLM Agents in Expensive Worlds
 
-ExpGym is for testing LLM agents on tasks where each tool call is slow,
-minutes to hours per call. There are three scenarios: hyperparameter
-tuning (using HPOBench surrogates), multi-hop search (Phantom Wiki
-documents), and evidence audit (simulated human review). The slow tool
-calls are replaced with pre-cached results, so a full run across six
-models and three cost settings finishes overnight on one machine instead
-of taking weeks.
+ExpGym evaluates LLM agents in tasks where each tool call represents an
+expensive real-world action: training a model, searching a restricted corpus,
+or asking a human auditor for feedback. ExpGym replaces the slow operation with
+deterministic cached/surrogate feedback, so real LLM agents can be tested
+end-to-end without waiting hours per tool call.
 
-The repo also includes PoolAct (`expgym.poolact`). When several agents
-work on the same problem at the same time, they often repeat each other's
-expensive tool calls. PoolAct lets them share what they have already
-seen, through a shared cache, ledger, and graph, so one agent's work
-helps the others.
+The repository currently covers three scenarios:
 
-## Install
+| Scenario | What the agent does | Data/deps needed for the default run |
+|---|---|---|
+| `tuning` | Tune a configuration and submit the best config | none for the built-in task |
+| `restricted_search` | Search Phantom Wiki and answer a multi-hop question | auto-downloadable Phantom Wiki |
+| `evidence_audit` | Audit ContractNLI labels/evidence with simulated human feedback | manually downloaded ContractNLI zip |
 
-Fastest real end-to-end path after cloning:
+The runner always calls a real model by default. There is no fake-LLM smoke in
+the main path.
+
+## Quickstart
+
+Clone, configure a key, and run one real end-to-end trace:
 
 ```bash
 cp .env.example .env
-# edit .env if your key file, server URL, or data root differs
+# edit .env if your key file, server URL, model, or data root differs
 bash scripts/run_paper_sweep.sh
 ```
 
-This creates/reuses `.venv-expgym`, installs light dependencies, reads
-`OPENROUTER_API_KEY` or `OPENROUTER_API_KEY_FILE`, and runs one real
-OpenRouter-backed ExpGym trace. The default is intentionally small:
+Default run:
 
-- scenario: `tuning`
 - model: `openai/gpt-4.1-nano`
-- task: `neural_network_training`
+- scenario: `tuning`
+- tuning task: `neural_network_training`
 - cost regime: `cost_tight`
+- output: `budget_sweep_results/e2e/`
 
-It does not require external datasets. To also install data dependencies and
-fetch auto-downloadable data:
+The wrapper creates/reuses `.venv-expgym`, installs light Python dependencies,
+loads `.env`, calls OpenRouter, runs the ReAct loop, executes the ExpGym tool,
+and writes a trace whose `score_check.ok` must be `true`.
 
-```bash
-bash scripts/run_paper_sweep.sh --with-auto-data
-```
+## Configuration
 
-If you have accepted Stanford's ContractNLI terms and downloaded their zip:
-
-```bash
-bash scripts/run_paper_sweep.sh --contract-nli-archive /path/to/contract-nli.zip
-```
-
-### Smoke coverage
-
-The default run is a fast framework smoke, not a full paper reproduction. It
-verifies the core ExpGym path used by the paper:
-
-1. A real OpenRouter model is called.
-2. The model enters the ReAct loop in `expgym/react_loop.py`.
-3. The model emits `Action: evaluate_config {...}` for the built-in tuning
-   world in `expgym/task_tuning.py`.
-4. ExpGym executes the tool, returns `Observation: perf=..., cost=...`,
-   asks for a final answer, and scores it as `answer_perf`.
-
-It does not run the full model sweep, all cost regimes, HPOBench surrogate
-tasks, Phantom Wiki search, ContractNLI audit, or PoolAct parallel-agent
-experiments unless you request those selectors explicitly.
+Most users only need these `.env` entries:
 
 ```bash
-conda env create -f environment.yml && conda activate expgym
-# or:
-pip install -r requirements.txt
+# Direct key, or a file containing one key.
+# OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_API_KEY_FILE=../openrouter.key
+
+# Optional OpenAI-compatible endpoint override.
+# OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+
+# Optional data locations. Defaults are inside ./data.
+# EXPGYM_DATA_ROOT=/absolute/path/to/expgym-data
+# PHANTOM_WIKI_ROOT=/absolute/path/to/expgym-data/phantom-wiki
+
+EXPGYM_OPENROUTER_MODEL=openai/gpt-4.1-nano
 ```
+
+`scripts/run_paper_sweep.sh` accepts wrapper options first, then passes all
+remaining options to `scripts/run_paper_sweep.py`.
 
 ```bash
-python -m unittest discover tests
-# Ran 123 tests, OK (skipped=31; external-data tests skip cleanly)
+bash scripts/run_paper_sweep.sh --help
+python scripts/run_paper_sweep.py --help
 ```
 
-## Run a scenario
+## Run Scenarios
 
-The sweep runner is parameterized by scenario/model/question/task/budget
-selectors. The shell wrapper handles env setup; all remaining flags are passed
-to `scripts/run_paper_sweep.py`.
+All expansion is explicit. Select scenarios, models, questions, tasks, budgets,
+and repetitions with CLI flags.
+
+Built-in tuning smoke, no external datasets:
 
 ```bash
 bash scripts/run_paper_sweep.sh \
@@ -85,13 +79,22 @@ bash scripts/run_paper_sweep.sh \
   --scenarios tuning \
   --tuning-tasks neural_network_training \
   --cost-regimes cost_tight
+```
 
+Restricted search, with auto-downloadable data:
+
+```bash
 bash scripts/run_paper_sweep.sh --with-auto-data \
   --models openai/gpt-4.1-nano \
   --scenarios restricted_search \
   --search-indices 0 \
   --cost-regimes cost_tight
+```
 
+Evidence audit, after accepting Stanford ContractNLI terms and downloading the
+zip:
+
+```bash
 bash scripts/run_paper_sweep.sh \
   --contract-nli-archive /path/to/contract-nli.zip \
   --models openai/gpt-4.1-nano \
@@ -101,31 +104,78 @@ bash scripts/run_paper_sweep.sh \
   --cost-regimes cost_tight
 ```
 
-Useful selectors:
+Common selectors:
 
 ```bash
 bash scripts/run_paper_sweep.sh --models openai/gpt-4.1-nano,mistralai/mistral-large
+bash scripts/run_paper_sweep.sh --model-alias fast=openai/gpt-4.1-nano --models fast
 bash scripts/run_paper_sweep.sh --scenarios tuning,restricted_search
 bash scripts/run_paper_sweep.sh --cost-regimes cost_free,cost_moderate,cost_tight
 bash scripts/run_paper_sweep.sh --search-indices 0:10
 bash scripts/run_paper_sweep.sh --audit-indices 0,1,2 --audit-reps 3
 bash scripts/run_paper_sweep.sh --tuning-tasks hpobench:paramnet:adult:steps
-bash scripts/run_paper_sweep.sh --model-alias fast=openai/gpt-4.1-nano --models fast
+bash scripts/run_paper_sweep.sh --resume --output-dir budget_sweep_results/my_run
+```
+
+## Data
+
+Prepare and verify data independently:
+
+```bash
+python scripts/download_data.py --auto-only
+python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
+python scripts/download_data.py --check
+```
+
+| Dataset | Used by | How to prepare | Expected location |
+|---|---|---|---|
+| HPOBench source | `tuning` HPOBench tasks | auto via `--auto-only` | `data/hpo_tuning/HPOBench/` |
+| HPOBench oracle | cost scaling | shipped | `data/hpo_tuning/oracle3.json` |
+| Phantom Wiki | `restricted_search` | auto via `--auto-only` | `$PHANTOM_WIKI_ROOT/...` |
+| ContractNLI segments | `evidence_audit` | manual zip, scripted extraction | `$EXPGYM_DATA_ROOT/contract-nli/test_segments.json` |
+| ContractNLI hints | `evidence_audit` | shipped | `data/contract-nli/test_nda_span_dims.json` |
+
+ContractNLI is not auto-downloaded because the Stanford page requires accepting
+data-use terms. After you provide the zip, the script extracts the public
+`contract-nli/test.json` split and normalizes it to ExpGym's
+`test_segments.json` schema.
+
+## HPOBench Dependencies
+
+The default smoke and built-in tuning task do not need HPOBench Python deps.
+Only `hpobench:*` tuning tasks need the legacy HPOBench/NASBench stack:
+
+```bash
+bash scripts/recreate_expgym_env.sh
+```
+
+This creates `expgym-hpobench` with HPOBench editable install,
+`tensorflow==1.15`, `scikit-learn==0.23.2`, ConfigSpace, NASBench, and
+NASBenchmarks. TensorFlow 1.15 does not have native macOS arm64 wheels, so the
+script fails fast on Apple Silicon unless `EXPGYM_FORCE_HPOBENCH_INSTALL=1` is
+set. For the full HPOBench/NASBench101 matrix, use Linux/x86_64.
+
+Run HPOBench tasks from that env:
+
+```bash
+conda run -n expgym-hpobench python scripts/run_paper_sweep.py \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks hpobench:paramnet:adult:steps \
+  --cost-regimes cost_tight
 ```
 
 ## Paper Reproduction
 
-The main paper ranking matrix is not hidden behind a preset. Build it with
-explicit selectors:
+The paper matrix is built from explicit selectors, not from a hidden preset:
 
-- 6 OpenRouter models: DeepSeek-V3.2, GPT-5.2, GPT-4.1,
-  Gemini-3-Flash, Claude-Haiku-4.5, Mistral-Large.
-- 3 cost regimes: `cost_free`, `cost_moderate`, `cost_tight`.
-- 9 HPOBench tuning tasks x 3 reps (`--tuning-tasks all-hpobench`).
-- 35 Phantom Wiki restricted-search questions.
-- 13 ContractNLI audit documents x 3 randomized hypothesis orders.
+- 6 model aliases: `dsv32,gpt52,gpt41,gemini3flash,haiku45,mistral_large`
+- 3 cost regimes: `cost_free,cost_moderate,cost_tight`
+- 9 HPOBench tuning tasks x 3 reps: `--tuning-tasks all-hpobench --tuning-reps 3`
+- 35 Phantom Wiki questions: `--search-indices 0:35`
+- 13 ContractNLI documents x 3 hypothesis orders: `--audit-indices 0:13 --audit-reps 3`
 
-That is `486 + 630 + 702 = 1,818` traces. Dry-run the exact matrix:
+Dry-run the exact 1,818-trace matrix:
 
 ```bash
 bash scripts/run_paper_sweep.sh --dry-run \
@@ -143,7 +193,7 @@ bash scripts/run_paper_sweep.sh --dry-run \
   --output-dir budget_sweep_results/paper
 ```
 
-Run the same matrix with resumable writes:
+Run it with resumable writes:
 
 ```bash
 bash scripts/run_paper_sweep.sh --resume \
@@ -161,185 +211,114 @@ bash scripts/run_paper_sweep.sh --resume \
   --output-dir budget_sweep_results/paper
 ```
 
-Every trace is saved under `--output-dir` with `job`,
-`cost_regime_resolved`, and `score_check` metadata. `score_check` recomputes
-the score from the scenario evaluator or tool and fails the run if the reported
-score disagrees.
-
-| Scenario | Module | EEI source | Per-call cost (surrogate wallclock) |
-|---|---|---|---|
-| Hyperparameter tuning | `expgym/task_tuning.py` | HPOBench surrogate eval (`--list-tuning-tasks` for the menu) | 8–50,000 s |
-| Restricted search | `expgym/task_restricted_search.py` | Phantom Wiki document fetch | 300 ± 20 s |
-| Evidence audit | `expgym/task_evidence_audit.py` | Simulated human verification | 300 ± 20 s |
-
-The paper evaluates six frontier LLMs (DeepSeek-V3.2, GPT-5.2, GPT-4.1,
-Gemini-3-Flash, Claude-Haiku-4.5, Mistral-Large) through OpenRouter, with
-extended reasoning disabled. The code is model-agnostic: pass any model
-identifier with `--backend openrouter --model <name>` and your own key.
-The OpenRouter client disables extended reasoning by default
-(`reasoning: {enabled: false}`); for the reasoning-enabled ablation,
-construct the client with `disable_thinking=False`.
-
-<!-- ### How the simulated human reviewer works (audit scenario)
-
-The audit scenario does not call a second LLM for verification. Instead,
-the `human_feedback` tool returns one of three deterministic responses
-based on the agent's proposed evidence IDs and the ground-truth
-annotations:
-
-- **`Evidence Correct`** — the proposed evidence set exactly matches the
-  ground-truth set, or both are empty for a `NotMentioned` hypothesis.
-- **`Evidence Incomplete | missing: <hint>`** — the proposed set is a
-  proper subset of ground truth; the hint lists semantic dimensions of
-  the missing pieces (e.g. "termination clause").
-- **`Contain Irrelevant Evidences`** — the proposed set contains IDs not
-  in ground truth.
-
-The full ruleset is in `expgym/task_evidence_audit.py:human_feedback`. -->
-
-## Cost regimes
-
-Cost is a continuous axis: `budget = β · c_base`, where `c_base` is the
-per-call base cost (oracle-best evaluation cost for tuning, ~300 s for
-search and audit). The paper reports three points, exposed as named
-presets; `--beta` picks any other point.
-
-| Preset | β | Cost shown | What it tests |
-|---|---|---|---|
-| `cost_free` | no budget | hidden | classical leaderboard |
-| `cost_moderate` | 10 | shown | 10× the oracle-best cost |
-| `cost_tight` | 3 | shown | ~3 affordable queries per session |
+If a model alias no longer maps to an available OpenRouter model, override it:
 
 ```bash
-python demo_experiment.py --cost-regime cost_tight
-python demo_experiment.py --cost-regime custom --beta 5 --baseline time_aware
+bash scripts/run_paper_sweep.sh \
+  --model-alias gpt52=openai/gpt-5.2 \
+  --models gpt52 \
+  --scenarios tuning
 ```
 
-The CLI prints the resolved `(preset, β, c_base, time_budget)` at run
-start whenever a preset or `--beta` is set.
+## Outputs And Scoring
 
-## PoolAct (parallel agents)
+Each trace is a JSON file under:
 
-When tool calls dominate wallclock, running N agents in parallel only
-helps if they share what they learn. PoolAct is that sharing layer: a
-thread-safe observation cache, an exploration ledger, and an exploration
-graph, all read by every agent.
+```text
+<output-dir>/<model_alias>_<cost_regime>/traces/*.json
+```
 
-Use **`wrap_tools_with_poolact`** — that is the configuration reported
-as `poolact` in the paper. The other two wrappers in `expgym.poolact`
-are ablations: `wrap_tools_with_cache` is cache-only (zero-cost dedup,
-no ledger), and `wrap_tools_with_polact` is the v2 graph variant that
-supports time-gated visibility via `AgentClock`.
+Important fields:
+
+| Field | Meaning |
+|---|---|
+| `job` | scenario, model, question/task index, seed, repetition |
+| `cost_regime_resolved` | resolved budget mode, `c_base`, and time budget |
+| `steps` | prompts, actions, observations, and final answer text |
+| `tool_records` | tool calls used for score recomputation |
+| `answer_perf` | primary scalar score |
+| `answer_metrics` | structured metrics when the scenario has more than one |
+| `score_check` | recomputed score; runs fail if `ok` is false |
+
+Scenario scores:
+
+| Scenario | Primary score |
+|---|---|
+| `tuning` | performance of the final submitted configuration |
+| `restricted_search` | name-level F1 against Phantom Wiki gold answers |
+| `evidence_audit` | label accuracy, plus evidence accuracy and verification efficiency |
+
+Cost regimes:
+
+| Regime | Budget | Cost visibility |
+|---|---|---|
+| `cost_free` | no ceiling | hidden |
+| `cost_moderate` | `10 * c_base` | shown |
+| `cost_tight` | `3 * c_base` | shown |
+
+## Sanity Checks
+
+```bash
+python -m unittest discover tests
+python scripts/run_paper_sweep.py --dry-run
+python scripts/download_data.py --check
+```
+
+The default dry-run should report one job. The explicit paper command above
+should report 1,818 jobs: 486 tuning, 630 restricted search, and 702 evidence
+audit.
+
+## PoolAct
+
+The repo also includes PoolAct (`expgym.poolact`) for parallel agents sharing
+expensive observations through a shared cache, ledger, and graph. Use
+`wrap_tools_with_poolact` for the main PoolAct behavior; `wrap_tools_with_cache`
+and `wrap_tools_with_polact` are ablations.
 
 ```python
 from expgym.poolact import (
-    SharedObservationCache, SharedExplorationLedger,
-    wrap_tools_with_poolact, make_ledger_augmenter,
+    SharedObservationCache,
+    SharedExplorationLedger,
+    make_ledger_augmenter,
+    wrap_tools_with_poolact,
 )
 from expgym.react_loop import run_react_loop
 from expgym.task_restricted_search import SCENARIO as SEARCH
 
-cache, ledger = SharedObservationCache(), SharedExplorationLedger()
+cache = SharedObservationCache()
+ledger = SharedExplorationLedger()
 augmenter = make_ledger_augmenter(ledger)
 
 def run_one(agent_id, llm):
     tools = wrap_tools_with_poolact(
         SEARCH["tools"](data_source="phantom_seed1"),
-        cache=cache, ledger=ledger, agent_id=agent_id,
+        cache=cache,
+        ledger=ledger,
+        agent_id=agent_id,
     )
     return run_react_loop(
-        llm=llm, tools=tools,
+        llm=llm,
+        tools=tools,
         time_budget=900,
         observation_augmenter=augmenter,
     )
 ```
 
-Implementation: `expgym/extras/parallel_cache.py`.
-
-## Datasets
-
-Phantom Wiki and HPOBench source auto-download; ContractNLI requires the user
-to accept Stanford's terms and provide the downloaded zip path.
-
-```bash
-python scripts/download_data.py --auto-only # fetch Phantom Wiki + HPOBench
-python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
-python scripts/download_data.py --check     # layout-only, no network
-python scripts/download_data.py             # full readiness check; reports ContractNLI manual step if missing
-```
-
-| Dataset | Used by | Source | Lands at |
-|---|---|---|---|
-| HPOBench code | tuning | `git clone` (auto) | `data/hpo_tuning/HPOBench/` |
-| HPOBench oracle | tuning, β presets | shipped | `data/hpo_tuning/oracle3.json` |
-| Phantom Wiki | search | HuggingFace (auto) | `$PHANTOM_WIKI_ROOT/...` |
-| ContractNLI segments | audit | manual (see below) | `$EXPGYM_DATA_ROOT/contract-nli/test_segments.json` |
-| ContractNLI hints | audit | shipped | `data/contract-nli/test_nda_span_dims.json` |
-
-**HPOBench Python deps** (needed only for `hpobench:*` tuning tasks):
-
-```bash
-bash scripts/recreate_expgym_env.sh
-# creates conda env expgym-hpobench with HPOBench (editable),
-# tensorflow==1.15, scikit-learn==0.23.2, NASBench deps, and ConfigSpace.
-```
-
-The default smoke does not need these dependencies. The full HPOBench/NASBench
-stack includes TensorFlow 1.15 and is intended for Linux/x86_64-style legacy
-Python environments; Apple Silicon/macOS cannot run the NASBench101 dependency
-stack natively.
-
-Run HPOBench sweeps from that env:
-
-```bash
-conda run -n expgym-hpobench python scripts/run_paper_sweep.py \
-  --models openai/gpt-4.1-nano \
-  --scenarios tuning \
-  --tuning-tasks hpobench:paramnet:adult:steps \
-  --cost-regimes cost_tight
-```
-
-**ContractNLI** (manual terms, scripted extraction): the audit scenario reads two files. The
-hints file `test_nda_span_dims.json` (which drives the `human_feedback`
-"Evidence Incomplete | missing: ..." messages) ships with this repo at
-`data/contract-nli/test_nda_span_dims.json`. The document segments
-`test_segments.json` come from Stanford and require manual download
-because their release page asks you to accept data-use terms that cannot
-be auto-clicked. Steps:
-
-1. Open [stanfordnlp/contract-nli](https://stanfordnlp.github.io/contract-nli/)
-   and download the dataset archive.
-2. Run `python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip`.
-3. The script extracts `contract-nli/test.json` as
-   `$EXPGYM_DATA_ROOT/contract-nli/test_segments.json`.
-
 ## Extending
 
-A scenario is a Python module exporting a `SCENARIO` dict. The core
-ReAct loop has no scenario-specific code, so adding one requires no
-changes to `react_loop.py` or the budget machinery.
+A scenario is a Python module exporting a `SCENARIO` dict. The core ReAct loop
+has no scenario-specific code.
 
 ```python
 SCENARIO = {
     "name": "my_world",
     "tools": {"my_tool": my_tool},   # or build_tools(): callable
-    "build_context": ...,             # (include_overhead, **kw) -> str
-    "build_instruction_notes": ...,   # (include_overhead) -> List[str]
-    "build_fake_plan": ...,           # (probes, **kw) -> [(tool, payload)]
+    "build_context": ...,            # (include_overhead, **kw) -> str
+    "build_instruction_notes": ...,  # (include_overhead) -> List[str]
+    "build_fake_plan": ...,          # (probes, **kw) -> [(tool, payload)]
 }
 ```
 
-Register the module in `demo_experiment.py:17` (`_SCENARIOS` dict), and
-add a branch in `resolve_base_cost()` if `--cost-regime` / `--beta`
-should compute a budget for it.
-
-## Environment variables
-
-| Variable | Purpose |
-|---|---|
-| `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `VLLM_API_KEY` | LLM backends |
-| `OPENROUTER_API_KEY_FILE` | one-line OpenRouter key file, default `../openrouter.key` |
-| `OPENROUTER_BASE_URL`, `EXPGYM_BASE_URL` | OpenRouter/OpenAI-compatible server override |
-| `EXPGYM_OPENROUTER_MODEL` | default smoke model |
-| `EXPGYM_DATA_ROOT` | parent of `contract-nli/` |
-| `PHANTOM_WIKI_ROOT` | Phantom Wiki cache directory |
+Register the module in `demo_experiment.py` (`_SCENARIOS`) and add a branch in
+`resolve_base_cost()` if the cost-regime machinery should derive a budget for
+it.
