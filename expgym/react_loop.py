@@ -51,6 +51,8 @@ class LoopResult:
     completion_tokens: int
     instruction_tokens: int
     messages: List[Dict[str, str]]
+    tool_records: List[Tuple[str, str, Optional[object]]]
+    eval_records: List[Tuple[str, Optional[str], float, float]]
 
 
 def _estimate_tokens(messages: List[Message]) -> int:
@@ -440,6 +442,8 @@ def run_react_loop(
         completion_tokens=completion_tokens,
         instruction_tokens=instruction_tokens,
         messages=messages,
+        tool_records=tool_records,
+        eval_records=eval_records,
     )
     return result.__dict__
 

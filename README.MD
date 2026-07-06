@@ -80,6 +80,59 @@ python demo_experiment.py --scenario restricted_search --question-index 5
 python demo_experiment.py --scenario evidence_audit --max-steps 20
 ```
 
+## Paper Reproduction
+
+Use `scripts/run_paper_sweep.py` for the main paper sweep. Its default job
+matrix matches the ranking experiment in the paper:
+
+- 6 OpenRouter models: DeepSeek-V3.2, GPT-5.2, GPT-4.1,
+  Gemini-3-Flash, Claude-Haiku-4.5, Mistral-Large.
+- 3 cost regimes: `cost_free`, `cost_moderate`, `cost_tight`.
+- 9 HPOBench tuning tasks x 3 reps.
+- 35 Phantom Wiki restricted-search questions.
+- 13 ContractNLI audit documents x 3 randomized hypothesis orders.
+
+That is `486 + 630 + 702 = 1,818` traces. Start with dry-run:
+
+```bash
+python scripts/run_paper_sweep.py --dry-run
+```
+
+Run a small real slice:
+
+```bash
+python scripts/run_paper_sweep.py \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks neural_network_training \
+  --cost-regimes cost_tight \
+  --tuning-reps 1 \
+  --limit 1
+```
+
+Run the full main sweep once external datasets and HPOBench dependencies are
+ready:
+
+```bash
+python scripts/run_paper_sweep.py --resume
+```
+
+Useful selectors:
+
+```bash
+python scripts/run_paper_sweep.py --models dsv32,gpt52 --scenarios tuning,restricted_search
+python scripts/run_paper_sweep.py --cost-regimes cost_free,cost_tight
+python scripts/run_paper_sweep.py --tuning-tasks hpobench:paramnet:adult:steps
+python scripts/run_paper_sweep.py --search-indices 0:10
+python scripts/run_paper_sweep.py --audit-indices 0,1,2 --audit-reps 3
+python scripts/run_paper_sweep.py --model-alias gpt52=openai/gpt-5.2
+```
+
+Every trace is saved under `budget_sweep_results/paper/` with `job`,
+`cost_regime_resolved`, and `score_check` metadata. `score_check` recomputes
+the score from the scenario evaluator or tool and fails the run if the reported
+score disagrees.
+
 | Scenario | Module | EEI source | Per-call cost (surrogate wallclock) |
 |---|---|---|---|
 | Hyperparameter tuning | `expgym/task_tuning.py` | HPOBench surrogate eval (`--list-tuning-tasks` for the menu) | 8–50,000 s |
