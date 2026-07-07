@@ -47,8 +47,11 @@ PARAMETER_RANGES: List[ParameterRange] = [
 
 # --- HPOBench support (surrogate-only). ---
 
-HPOBENCH_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), "data", "hpo_tuning", "HPOBench"
+HPOBENCH_ROOT = os.environ.get(
+    "HPOBENCH_ROOT",
+    os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "data", "hpo_tuning", "HPOBench"
+    ),
 )
 HPOBENCH_CONFIG_PATH = Path(
     os.path.dirname(os.path.dirname(__file__)), "configs", "hpobench_tasks.yaml"

@@ -145,15 +145,28 @@ data-use terms. After you provide the zip, the script extracts the public
 The default smoke and built-in tuning task do not need HPOBench Python deps.
 Only `hpobench:*` tuning tasks need the legacy HPOBench/NASBench stack:
 
+Linux/x86_64 native path:
+
 ```bash
 bash scripts/recreate_expgym_env.sh
 ```
 
 This creates `expgym-hpobench` with HPOBench editable install,
 `tensorflow==1.15`, `scikit-learn==0.23.2`, ConfigSpace, NASBench, and
-NASBenchmarks. TensorFlow 1.15 does not have native macOS arm64 wheels, so the
-script fails fast on Apple Silicon unless `EXPGYM_FORCE_HPOBENCH_INSTALL=1` is
-set. For the full HPOBench/NASBench101 matrix, use Linux/x86_64.
+NASBenchmarks.
+
+macOS Apple Silicon path:
+
+```bash
+# install and start Docker Desktop first
+bash scripts/run_hpobench_docker.sh
+```
+
+TensorFlow 1.15 has PyPI wheels for macOS x86_64 and Linux x86_64, but not for
+macOS arm64. The Docker runner fixes this by building a `linux/amd64` Python
+3.7 image with TF1.15 and HPOBench installed. It works on Apple Silicon through
+Docker emulation; it is slower than native Linux/x86_64 but avoids the missing
+wheel issue.
 
 Disk budget:
 
@@ -164,9 +177,10 @@ Disk budget:
 | ParamNet-only HPOBench tasks | `5-8 GB` |
 | Full paper HPOBench/NASBench tuning matrix | `20-30 GB` |
 
-The HPOBench source clone is small, but the benchmark data is not. HPOBench
-downloads data lazily into its configured data directory, usually
-`~/.local/share/hpobench`. The main large files are:
+The HPOBench source clone is small, but the benchmark data is not. Native
+HPOBench downloads data lazily into its configured data directory, usually
+`~/.local/share/hpobench`; the Docker runner stores it under
+`data/hpo_tuning/hpobench_data/`. The main large files are:
 
 | Component | Compressed/download size | Notes |
 |---|---:|---|
@@ -183,6 +197,16 @@ Run HPOBench tasks from that env:
 
 ```bash
 conda run -n expgym-hpobench python scripts/run_paper_sweep.py \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks hpobench:paramnet:adult:steps \
+  --cost-regimes cost_tight
+```
+
+Run the same task through Docker on macOS:
+
+```bash
+bash scripts/run_hpobench_docker.sh \
   --models openai/gpt-4.1-nano \
   --scenarios tuning \
   --tuning-tasks hpobench:paramnet:adult:steps \
@@ -234,6 +258,11 @@ bash scripts/run_paper_sweep.sh --resume \
   --max-evals 999999 \
   --output-dir budget_sweep_results/paper
 ```
+
+On macOS Apple Silicon, use the Docker runner for HPOBench/NASBench tuning
+jobs. You can run the full matrix through Docker, or split it and run
+`restricted_search,evidence_audit` with the normal wrapper while running
+`tuning --tuning-tasks all-hpobench` through Docker.
 
 If a model alias no longer maps to an available OpenRouter model, override it:
 
