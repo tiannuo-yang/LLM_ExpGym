@@ -29,6 +29,9 @@ If no runner options are provided, this runs one ParamNet smoke:
 The container stores HPOBench data under:
   data/hpo_tuning/hpobench_data/
   data/hpo_tuning/hpobench_cache/
+
+Full NASBench201 runs need Docker Desktop memory >= 16 GiB. ParamNet-only and
+NASBench101-only runs need less.
 EOF
 }
 
@@ -65,11 +68,11 @@ if [[ ${#RUNNER_ARGS[@]} -eq 0 ]]; then
 fi
 
 if [[ -z "$DOCKER_BIN" ]]; then
-  if command -v docker >/dev/null 2>&1; then
-    DOCKER_BIN="$(command -v docker)"
-  elif [[ -x /Applications/Docker.app/Contents/Resources/bin/docker ]]; then
+  if [[ -x /Applications/Docker.app/Contents/Resources/bin/docker ]]; then
     DOCKER_BIN="/Applications/Docker.app/Contents/Resources/bin/docker"
     export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+  elif command -v docker >/dev/null 2>&1; then
+    DOCKER_BIN="$(command -v docker)"
   fi
 fi
 
@@ -87,6 +90,30 @@ fi
 if ! "$DOCKER_BIN" info >/dev/null 2>&1; then
   echo "Docker is installed but the daemon is not running. Start Docker Desktop and rerun." >&2
   exit 1
+fi
+
+needs_nasbench201=0
+for arg in "${RUNNER_ARGS[@]}"; do
+  if [[ "$arg" == "all-hpobench" || "$arg" == hpobench:nasbench201:* ]]; then
+    needs_nasbench201=1
+  fi
+done
+if [[ "$needs_nasbench201" -eq 1 && "${EXPGYM_HPOBENCH_ALLOW_LOW_MEMORY:-0}" != "1" ]]; then
+  mem_total="$("$DOCKER_BIN" info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
+  min_mem=$((16 * 1024 * 1024 * 1024))
+  if [[ "$mem_total" =~ ^[0-9]+$ && "$mem_total" -lt "$min_mem" ]]; then
+    cat >&2 <<EOF
+Docker Desktop has less than 16 GiB available to containers (${mem_total} bytes).
+NASBench201 can OOM below this limit.
+
+Increase Docker Desktop memory in Settings > Resources > Advanced, then restart
+Docker Desktop and rerun this command. On macOS this is stored in:
+  ~/Library/Group Containers/group.com.docker/settings-store.json
+
+Set EXPGYM_HPOBENCH_ALLOW_LOW_MEMORY=1 to bypass this preflight.
+EOF
+    exit 1
+  fi
 fi
 
 if [[ "$BUILD_IMAGE" -eq 1 ]]; then

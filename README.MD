@@ -168,6 +168,11 @@ macOS arm64. The Docker runner fixes this by building a `linux/amd64` Python
 Docker emulation; it is slower than native Linux/x86_64 but avoids the missing
 wheel issue.
 
+For full NASBench201 runs, set Docker Desktop memory to at least `16 GB`
+(`24 GB` is safer) in Settings > Resources > Advanced before running
+`--tuning-tasks all-hpobench`. The Docker runner checks this up front because
+the default Docker Desktop memory limit can OOM while loading NASBench201.
+
 Disk budget:
 
 | Run target | Practical free space |
@@ -213,6 +218,12 @@ bash scripts/run_hpobench_docker.sh \
   --cost-regimes cost_tight
 ```
 
+NASBench101 variants use different edge encodings in HPOBench. In particular,
+`hpobench:nasbench101:B` uses `edge_0` through `edge_8` as selector indices
+into the 21 possible upper-triangular DAG edges, not as binary 0/1 adjacency
+flags. ExpGym's tuning prompt follows this HPOBench source behavior so the
+model can submit valid NASBench101-B architectures.
+
 ## Paper Reproduction
 
 The paper matrix is built from explicit selectors, not from a hidden preset:
@@ -220,8 +231,46 @@ The paper matrix is built from explicit selectors, not from a hidden preset:
 - 6 model aliases: `dsv32,gpt52,gpt41,gemini3flash,haiku45,mistral_large`
 - 3 cost regimes: `cost_free,cost_moderate,cost_tight`
 - 9 HPOBench tuning tasks x 3 reps: `--tuning-tasks all-hpobench --tuning-reps 3`
-- 35 Phantom Wiki questions: `--search-indices 0:35`
+- 35 Phantom Wiki questions from `phantom_seed1`: `--search-indices 0:35`
+  (18 three-hop `whois` questions + 17 three-hop `whatis` questions)
 - 13 ContractNLI documents x 3 hypothesis orders: `--audit-indices 0:13 --audit-reps 3`
+
+The `phantom_seed1` paper subset is fully covered by the auto-downloaded
+Phantom Wiki data. It is not a separate hidden file: the 35 questions are the
+three-hop `whois` and `whatis` rows after filtering out very large answer sets.
+
+### Cost-Tight E2E Check
+
+These commands cover every paper scenario once with one real model under
+`cost_tight`. They are the shortest practical end-to-end check for the paper
+task families:
+
+```bash
+# Native/light tasks.
+bash scripts/run_paper_sweep.sh --with-auto-data --resume \
+  --models openai/gpt-4.1-nano \
+  --scenarios restricted_search,evidence_audit \
+  --cost-regimes cost_tight \
+  --search-data-source phantom_seed1 \
+  --search-indices 0:35 \
+  --cc-split cc-large \
+  --audit-indices 0:13 \
+  --max-steps 30 \
+  --output-dir budget_sweep_results/task_e2e_tight_native
+
+# HPOBench/NASBench tasks, especially useful on macOS Apple Silicon.
+bash scripts/run_hpobench_docker.sh --resume \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks all-hpobench \
+  --cost-regimes cost_tight \
+  --tuning-reps 1 \
+  --max-steps 30 \
+  --output-dir budget_sweep_results/task_e2e_tight_hpobench
+```
+
+Every run writes JSON traces and fails the job if `score_check.ok` is false or
+if a tuning task returns no numeric final score.
 
 Dry-run the exact 1,818-trace matrix:
 

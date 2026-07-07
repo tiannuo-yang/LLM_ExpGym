@@ -389,6 +389,13 @@ def _score_check(
         recomputed = _parse_tool_perf(tool(answer))
     except Exception as exc:
         return {"ok": False, "reason": f"tool recompute failed: {exc}"}
+    if recomputed is None or result.get("answer_perf") is None:
+        return {
+            "ok": False,
+            "reason": "missing numeric score",
+            "recomputed_perf": recomputed,
+            "reported_perf": result.get("answer_perf"),
+        }
     ok = _float_close(result.get("answer_perf"), recomputed)
     return {
         "ok": ok,

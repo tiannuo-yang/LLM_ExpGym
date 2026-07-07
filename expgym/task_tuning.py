@@ -323,18 +323,34 @@ def _load_hpobench(task_name: str) -> HPOBenchTask:
 def _task_hints(task_name: str) -> Optional[str]:
     """Return task-specific semantic hints to help LLMs understand the search space."""
     if task_name.startswith("hpobench:nasbench101:"):
-        return (
+        variant = task_name.split(":")[-1].upper()
+        shared = (
             "Note: This is a neural architecture search task on a 7-node directed acyclic graph (DAG). "
-            "The edge_* parameters form the upper-triangular adjacency matrix (0 or 1) of the DAG. "
-            "The op_node_* parameters choose the operation for each intermediate node. "
             "Node 0 is the input and node 6 is the output. "
-            "IMPORTANT CONSTRAINTS: "
-            "(1) The total number of edges set to 1 must be AT MOST 9. "
-            "Architectures with more than 9 edges are INVALID and will always score 0. "
-            "(2) There must be a connected path from the input node (0) to the output node (6). "
-            "Disconnected graphs are degenerate and score 0. "
-            "(3) Do NOT set all edges to 1 — that exceeds the 9-edge limit. "
-            "You must specify ALL parameters in every evaluation call (set unused edges to 0)."
+            "The op_node_* parameters choose the operation for each intermediate node. "
+            "A valid architecture must have a connected path from input to output and at most 9 active edges; "
+            "invalid or disconnected graphs score 0. "
+        )
+        if variant == "B":
+            return shared + (
+                "For NASBench101-B, edge_0 through edge_8 are edge selector indices, not binary flags. "
+                "Each edge_* value selects one upper-triangular edge index from 0 to 20; duplicate selectors collapse "
+                "to fewer active edges. The index map is: 0=0->1, 1=0->2, 2=0->3, 3=0->4, 4=0->5, 5=0->6, "
+                "6=1->2, 7=1->3, 8=1->4, 9=1->5, 10=1->6, 11=2->3, 12=2->4, 13=2->5, 14=2->6, "
+                "15=3->4, 16=3->5, 17=3->6, 18=4->5, 19=4->6, 20=5->6. "
+                "Do not use 0/1 edge flags for this variant; choose selector values that create a connected DAG. "
+                "You must specify all edge_* and op_node_* parameters in every evaluation call."
+            )
+        if variant == "C":
+            return shared + (
+                "For NASBench101-C, edge_* values are edge scores and num_edges controls how many top-scoring edges "
+                "become active. Set num_edges to at most 9 and assign high scores to edges that create a connected DAG. "
+                "You must specify all edge_*, op_node_*, and num_edges parameters in every evaluation call."
+            )
+        return shared + (
+            "For NASBench101-A, edge_* parameters form the upper-triangular adjacency matrix of the DAG. "
+            "Use 0/1 values, keep at most 9 entries set to 1, and do not set all edges to 1. "
+            "You must specify all edge_* and op_node_* parameters in every evaluation call."
         )
     if task_name.startswith("hpobench:nasbench201:"):
         return (

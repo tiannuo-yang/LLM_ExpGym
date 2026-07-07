@@ -26,10 +26,11 @@ PHANTOM_WIKI_SNAPSHOT = os.path.join(
 QA_DIR = os.path.join(PHANTOM_WIKI_SNAPSHOT, "question-answer")
 CORPUS_DIR = os.path.join(PHANTOM_WIKI_SNAPSHOT, "text-corpus")
 
-# Question types 11-12 = 3 relation hops (sweet spot for EEI).
-# Lower types (6-10) have more hops but fail at reasoning even without budget.
-# Higher types (13-16) have fewer hops but need too few searches to show EEI sensitivity.
-SWEET_SPOT_TYPES = [11, 12]
+# Phantom Wiki type ids are grouped by question family and hop count.
+# Types 11-12 are 3-hop whois questions; types 27-28 are 3-hop whatis
+# questions. Together, seed 1 has the 35 whois+whatis questions used in
+# the paper after filtering out rows with very large answer sets.
+SWEET_SPOT_TYPES = [11, 12, 27, 28]
 MAX_ANSWER_COUNT = 20  # Filter out questions with >20 gold answers
 
 # Overhead per search: 300 +/- 20s

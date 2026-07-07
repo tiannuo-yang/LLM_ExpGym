@@ -8,6 +8,7 @@ from expgym.task_tuning import (
     _load_hpobench,
     _get_hpobench_fidelity_settings,
     _hpobench_evaluate,
+    _task_hints,
     evaluate_hpobench_action,
 )
 
@@ -42,6 +43,13 @@ class TestHPOBenchTasks(unittest.TestCase):
         tasks = list_hpobench_tasks()
         for variant in ["A", "B", "C"]:
             self.assertIn(f"hpobench:nasbench101:{variant}", tasks)
+
+    def test_nasbench101_b_hint_uses_edge_selectors(self) -> None:
+        hint = _task_hints("hpobench:nasbench101:B")
+        self.assertIsNotNone(hint)
+        self.assertIn("edge selector indices", hint)
+        self.assertIn("0=0->1", hint)
+        self.assertIn("Do not use 0/1 edge flags", hint)
 
     def test_hpobench_fidelity_config_svm(self) -> None:
         fidelity, tips = _get_hpobench_fidelity_settings("hpobench:svm_surrogate")

@@ -76,8 +76,8 @@ class DataLoadingTest(unittest.TestCase):
 
     def test_get_source_count(self):
         count = get_source_count("phantom_seed1")
-        self.assertGreater(count, 15)
-        self.assertLessEqual(count, 25)
+        # Paper search set: seed 1, 3-hop whois+whatis questions.
+        self.assertEqual(count, 35)
 
     def test_corpus_cached(self):
         c1 = _load_corpus(1)

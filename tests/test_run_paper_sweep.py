@@ -107,6 +107,16 @@ class PaperSweepMatrixTest(unittest.TestCase):
             "restricted_search_phantom_seed1_2_r0_s1206.json",
         )
 
+    def test_score_check_rejects_missing_numeric_tool_score(self):
+        result = {"answer": "{}", "answer_perf": None}
+        check = run_paper_sweep._score_check(
+            result,
+            {"evaluate_config": lambda _payload: (None, 1.0)},
+            None,
+        )
+        self.assertFalse(check["ok"])
+        self.assertEqual(check["reason"], "missing numeric score")
+
 
 if __name__ == "__main__":
     unittest.main()
