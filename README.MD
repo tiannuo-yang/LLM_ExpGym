@@ -155,6 +155,30 @@ NASBenchmarks. TensorFlow 1.15 does not have native macOS arm64 wheels, so the
 script fails fast on Apple Silicon unless `EXPGYM_FORCE_HPOBENCH_INSTALL=1` is
 set. For the full HPOBench/NASBench101 matrix, use Linux/x86_64.
 
+Disk budget:
+
+| Run target | Practical free space |
+|---|---:|
+| Default `tuning` smoke | `0.5 GB` |
+| `restricted_search` + `evidence_audit` data | `1 GB` |
+| ParamNet-only HPOBench tasks | `5-8 GB` |
+| Full paper HPOBench/NASBench tuning matrix | `20-30 GB` |
+
+The HPOBench source clone is small, but the benchmark data is not. HPOBench
+downloads data lazily into its configured data directory, usually
+`~/.local/share/hpobench`. The main large files are:
+
+| Component | Compressed/download size | Notes |
+|---|---:|---|
+| NASBench101 `nasbench_full.tfrecord` | `2.1 GB` | kept on disk |
+| NASBench201 `nasbench_201_data_v1.3.zip` | `1.5 GB` | read into memory, then extracted |
+| ParamNet/SVM `surrogates.tar.gz` | `0.5 GB` | kept and extracted |
+
+Leave extra headroom for extracted files, conda packages, pip caches, and trace
+outputs. If disk is tight, run only `neural_network_training`,
+`restricted_search`, or `evidence_audit`, or select one HPOBench family instead
+of `--tuning-tasks all-hpobench`.
+
 Run HPOBench tasks from that env:
 
 ```bash
