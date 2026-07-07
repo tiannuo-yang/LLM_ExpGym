@@ -117,6 +117,21 @@ class PaperSweepMatrixTest(unittest.TestCase):
         self.assertFalse(check["ok"])
         self.assertEqual(check["reason"], "missing numeric score")
 
+    def test_score_check_accepts_invalid_config_as_zero(self):
+        result = {"answer": "{}", "answer_perf": 0.0}
+        check = run_paper_sweep._score_check(
+            result,
+            {
+                "evaluate_config": lambda _payload: (
+                    "perf=0.000000 (invalid or degenerate configuration)",
+                    0.0,
+                )
+            },
+            None,
+        )
+        self.assertTrue(check["ok"])
+        self.assertEqual(check["recomputed_perf"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

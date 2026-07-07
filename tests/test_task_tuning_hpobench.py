@@ -44,12 +44,40 @@ class TestHPOBenchTasks(unittest.TestCase):
         for variant in ["A", "B", "C"]:
             self.assertIn(f"hpobench:nasbench101:{variant}", tasks)
 
-    def test_nasbench101_b_hint_uses_edge_selectors(self) -> None:
+    def test_nasbench101_hint_matches_paper_constraint(self) -> None:
         hint = _task_hints("hpobench:nasbench101:B")
         self.assertIsNotNone(hint)
-        self.assertIn("edge selector indices", hint)
-        self.assertIn("0=0->1", hint)
-        self.assertIn("Do not use 0/1 edge flags", hint)
+        self.assertIn("7-node directed acyclic graph", hint)
+        self.assertIn("upper-triangular adjacency matrix", hint)
+        self.assertIn("AT MOST 9", hint)
+        self.assertIn("will always score 0", hint)
+        self.assertNotIn("NASBench101-B", hint)
+        self.assertNotIn("selector", hint)
+
+    def test_hpobench_zero_perf_returns_numeric_score_with_message(self) -> None:
+        class _Hyperparameter:
+            name = "x"
+            lower = 0
+            upper = 1
+
+        class _ConfigSpace:
+            def get_hyperparameters(self):
+                return [_Hyperparameter()]
+
+        class _Benchmark:
+            def objective_function(self, configuration, fidelity):
+                del configuration, fidelity
+                return {"function_value": 1.0, "cost": 12.5}
+
+        class _Task:
+            benchmark = _Benchmark()
+            config_space = _ConfigSpace()
+            fidelity = {}
+
+        output, perf, overhead = evaluate_hpobench_action(_Task(), json.dumps({"x": 0}))
+        self.assertIn("invalid or degenerate", output)
+        self.assertEqual(perf, 0.0)
+        self.assertEqual(overhead, 12.5)
 
     def test_hpobench_fidelity_config_svm(self) -> None:
         fidelity, tips = _get_hpobench_fidelity_settings("hpobench:svm_surrogate")

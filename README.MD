@@ -218,12 +218,6 @@ bash scripts/run_hpobench_docker.sh \
   --cost-regimes cost_tight
 ```
 
-NASBench101 variants use different edge encodings in HPOBench. In particular,
-`hpobench:nasbench101:B` uses `edge_0` through `edge_8` as selector indices
-into the 21 possible upper-triangular DAG edges, not as binary 0/1 adjacency
-flags. ExpGym's tuning prompt follows this HPOBench source behavior so the
-model can submit valid NASBench101-B architectures.
-
 ## Paper Reproduction
 
 The paper matrix is built from explicit selectors, not from a hidden preset:
@@ -269,8 +263,9 @@ bash scripts/run_hpobench_docker.sh --resume \
   --output-dir budget_sweep_results/task_e2e_tight_hpobench
 ```
 
-Every run writes JSON traces and fails the job if `score_check.ok` is false or
-if a tuning task returns no numeric final score.
+Every run writes JSON traces and fails the job if `score_check.ok` is false.
+Invalid or degenerate HPOBench configurations are scored numerically as `0.0`,
+so the score can be recomputed from the trace.
 
 Dry-run the exact 1,818-trace matrix:
 

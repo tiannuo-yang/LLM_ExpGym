@@ -207,6 +207,28 @@ class RunReactLoopTest(unittest.TestCase):
         # Fallback activates: answer is replaced with best eval (cfg_01, perf=0.42).
         self.assertAlmostEqual(result["answer_perf"], 0.42, places=2)
 
+    def test_fallback_preserves_zero_score_when_all_evals_invalid(self) -> None:
+        class ZeroOnlyLLM(LLMBackend):
+            def __init__(self) -> None:
+                self._called = False
+
+            def generate(self, messages) -> LLMOutput:
+                if self._called:
+                    return LLMOutput(text='Answer: {"x": 999}')
+                self._called = True
+                return LLMOutput(text='Thought: try\nAction: evaluate_config {"x": 1}')
+
+        def tool(_: str) -> Tuple[float, float]:
+            return 0.0, 1.0
+
+        result = run_react_loop(
+            llm=ZeroOnlyLLM(),
+            tools={"evaluate_config": tool},
+            max_steps=2,
+        )
+
+        self.assertEqual(result["answer_perf"], 0.0)
+        self.assertEqual(result["answer"], '{"x": 1}')
 
     def test_tool_error_returns_observation_instead_of_crash(self) -> None:
         """Tool exceptions should be caught and returned as observations."""

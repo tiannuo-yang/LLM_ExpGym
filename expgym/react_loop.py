@@ -408,14 +408,14 @@ def run_react_loop(
         and answer_evaluator is None
         and eval_records
     ):
-        valid_records = [
+        scored_records = [
             (raw, perf, ovh)
             for raw, _canon, perf, ovh in eval_records
-            if perf is not None and perf > 0
+            if perf is not None
         ]
-        if valid_records:
+        if scored_records:
             best_raw, best_perf, best_ovh = max(
-                valid_records, key=lambda r: r[1]
+                scored_records, key=lambda r: r[1]
             )
             answer = best_raw
             answer_perf = best_perf

@@ -350,6 +350,23 @@ def _parse_tool_perf(tool_result: Any) -> Optional[float]:
     return None
 
 
+def _is_zero_score_tool_result(tool_result: Any) -> bool:
+    if not isinstance(tool_result, tuple) or len(tool_result) not in {2, 3}:
+        return False
+    output = tool_result[0]
+    if not isinstance(output, str):
+        return False
+    text = output.lower()
+    zero_markers = [
+        "invalid",
+        "degenerate",
+        "out of range",
+        "missing",
+        "tool error",
+    ]
+    return any(marker in text for marker in zero_markers)
+
+
 def _score_check(
     result: Dict[str, Any],
     tools: Dict[str, Callable[[str], Any]],
@@ -386,9 +403,16 @@ def _score_check(
         return {"ok": False, "reason": "no tools available for score recompute"}
     tool = next(iter(tools.values()))
     try:
-        recomputed = _parse_tool_perf(tool(answer))
+        tool_result = tool(answer)
+        recomputed = _parse_tool_perf(tool_result)
     except Exception as exc:
         return {"ok": False, "reason": f"tool recompute failed: {exc}"}
+    if (
+        recomputed is None
+        and _float_close(result.get("answer_perf"), 0.0)
+        and _is_zero_score_tool_result(tool_result)
+    ):
+        recomputed = 0.0
     if recomputed is None or result.get("answer_perf") is None:
         return {
             "ok": False,
