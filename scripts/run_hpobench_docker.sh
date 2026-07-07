@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${EXPGYM_HPOBENCH_IMAGE:-expgym-hpobench:py37}"
 PLATFORM="${EXPGYM_HPOBENCH_PLATFORM:-linux/amd64}"
+DOCKER_BIN="${DOCKER:-}"
 BUILD_IMAGE=1
 RUNNER_ARGS=()
 
@@ -63,7 +64,16 @@ if [[ ${#RUNNER_ARGS[@]} -eq 0 ]]; then
   )
 fi
 
-if ! command -v docker >/dev/null 2>&1; then
+if [[ -z "$DOCKER_BIN" ]]; then
+  if command -v docker >/dev/null 2>&1; then
+    DOCKER_BIN="$(command -v docker)"
+  elif [[ -x /Applications/Docker.app/Contents/Resources/bin/docker ]]; then
+    DOCKER_BIN="/Applications/Docker.app/Contents/Resources/bin/docker"
+    export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+  fi
+fi
+
+if [[ -z "$DOCKER_BIN" ]]; then
   cat >&2 <<'EOF'
 Docker is not installed or not on PATH.
 
@@ -74,13 +84,13 @@ EOF
   exit 1
 fi
 
-if ! docker info >/dev/null 2>&1; then
+if ! "$DOCKER_BIN" info >/dev/null 2>&1; then
   echo "Docker is installed but the daemon is not running. Start Docker Desktop and rerun." >&2
   exit 1
 fi
 
 if [[ "$BUILD_IMAGE" -eq 1 ]]; then
-  docker build \
+  "$DOCKER_BIN" build \
     --platform "$PLATFORM" \
     -f "$ROOT_DIR/docker/hpobench/Dockerfile" \
     -t "$IMAGE" \
@@ -113,7 +123,7 @@ else
   DOCKER_ENV+=(-e OPENROUTER_API_KEY_FILE=/workspace/openrouter.key)
 fi
 
-docker run --rm \
+"$DOCKER_BIN" run --rm \
   --platform "$PLATFORM" \
   "${DOCKER_ENV[@]}" \
   "${DOCKER_MOUNTS[@]}" \

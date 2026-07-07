@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 python:3.7-bullseye
+FROM python:3.7-bullseye
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HPOBENCH_ROOT=/opt/HPOBench \
