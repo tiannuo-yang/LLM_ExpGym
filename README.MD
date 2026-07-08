@@ -1,6 +1,6 @@
 # ExpGym
 
-ExpGym runs real LLM agents in three expensive-world tasks from the paper:
+ExpGym runs LLM agents in the three expensive-world tasks from the paper:
 
 | Scenario | Paper task |
 |---|---|
@@ -8,12 +8,11 @@ ExpGym runs real LLM agents in three expensive-world tasks from the paper:
 | `restricted_search` | 35 Phantom Wiki multi-hop questions |
 | `evidence_audit` | 13 ContractNLI audit documents |
 
-The default path always calls a real OpenRouter model. There is no fake-LLM
-smoke in the main runner.
+For the smoke run, you only need an OpenRouter API key.
 
 ## Smoke: Three Lines
 
-Run one real end-to-end evaluation with no external datasets:
+Run one end-to-end evaluation with no external datasets:
 
 ```bash
 git clone https://github.com/tiannuo-yang/LLM_ExpGym.git
@@ -27,7 +26,7 @@ Successful output ends with a score line:
 EVALUATION RESULT | scenario=tuning | item=neural_network_training | model=openai/gpt-4.1-nano | cost_regime=cost_tight | answer_perf=... | score_check=ok | ... | trace=...
 ```
 
-The smoke creates `.venv-expgym`, installs light dependencies, runs a real
+The smoke creates `.venv-expgym`, installs light dependencies, runs an
 OpenRouter ReAct trace, writes a JSON trace, and prints the primary score.
 
 For persistent config:
@@ -40,7 +39,7 @@ bash scripts/run_paper_sweep.sh
 
 ## Full Paper Reproduction
 
-Full reproduction is 1,818 real traces:
+Full reproduction is 1,818 model traces:
 
 - 6 models
 - 3 cost regimes
@@ -138,7 +137,7 @@ Expected dry-run count: `1818` jobs.
 ## Validated Short Paper Check
 
 This is not the full paper table. It is the smallest check that touches every
-paper task family once with one real model under `cost_tight`.
+paper task family once with one OpenRouter model under `cost_tight`.
 
 Native tasks:
 
