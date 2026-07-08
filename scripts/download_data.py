@@ -5,6 +5,8 @@ Usage:
     python scripts/download_data.py --check    # only verify the layout, do not fetch
     python scripts/download_data.py --auto-only
                                               # skip manually licensed ContractNLI
+    python scripts/download_data.py --print-manual-links
+                                              # show official manual data links
     python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
                                               # extract ContractNLI after accepting terms
 
@@ -61,6 +63,21 @@ CONTRACT_NLI_ARCHIVE_MEMBERS = [
     "contract-nli/test.json",
     "test.json",
 ]
+
+
+def contract_nli_manual_steps() -> str:
+    target_dir = os.path.join(_data_root(), "contract-nli")
+    return (
+        "ContractNLI manual download step:\n"
+        f"  Official page: {CONTRACT_NLI_PAGE}\n"
+        "  Download the dataset archive after reviewing/accepting the upstream terms.\n"
+        "  Then either set this in .env:\n"
+        "    CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip\n"
+        "  and rerun the wrapper, or run:\n"
+        "    python scripts/download_data.py --contract-nli-archive /absolute/path/to/contract-nli.zip\n"
+        f"  ExpGym will extract only the test split to: {target_dir}/test_segments.json\n"
+        "  We do not mirror or auto-download this archive from ExpGym."
+    )
 
 
 def _data_root() -> str:
@@ -200,10 +217,10 @@ def fetch_contract_nli(check_only: bool) -> Tuple[bool, str]:
         f"data-use terms, which can't be auto-clicked.\n"
         f"  Steps:\n"
         f"    1. Open {CONTRACT_NLI_PAGE} and download the dataset archive.\n"
-        f"    2. Extract it.\n"
-        f"    3. Either run:\n"
+        f"    2. Either set CONTRACT_NLI_ARCHIVE=/path/to/contract-nli.zip in .env and rerun the wrapper,\n"
+        f"       or run:\n"
         f"         python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip\n"
-        f"       or copy at least these files into {target_dir}/:\n"
+        f"    3. Alternatively, copy at least these files into {target_dir}/:\n"
         + "".join(f"         - {f}\n" for f in CONTRACT_NLI_FILES)
         + f"  Currently missing: {', '.join(missing)}"
     )
@@ -293,7 +310,16 @@ def main() -> int:
         default=None,
         help="Path to the manually downloaded ContractNLI zip archive.",
     )
+    parser.add_argument(
+        "--print-manual-links",
+        action="store_true",
+        help="Print official links/instructions for datasets that require manual steps.",
+    )
     args = parser.parse_args()
+
+    if args.print_manual_links:
+        print(contract_nli_manual_steps())
+        return 0
 
     if args.contract_nli_archive:
         os.environ[CONTRACT_NLI_ARCHIVE_ENV] = args.contract_nli_archive

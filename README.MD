@@ -55,6 +55,9 @@ OPENROUTER_API_KEY_FILE=../openrouter.key
 # EXPGYM_DATA_ROOT=/absolute/path/to/expgym-data
 # PHANTOM_WIKI_ROOT=/absolute/path/to/expgym-data/phantom-wiki
 
+# Optional ContractNLI archive downloaded from the official Stanford page.
+# CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip
+
 EXPGYM_OPENROUTER_MODEL=openai/gpt-4.1-nano
 ```
 
@@ -122,8 +125,15 @@ bash scripts/run_paper_sweep.sh --resume --output-dir budget_sweep_results/my_ru
 Prepare and verify data independently:
 
 ```bash
+# Print official manual-data links and commands.
+python scripts/download_data.py --print-manual-links
+
+# Auto-download datasets that do not require a manual terms flow.
 python scripts/download_data.py --auto-only
+
+# After downloading ContractNLI from the official page, extract the test split.
 python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
+
 python scripts/download_data.py --check
 ```
 
@@ -135,10 +145,16 @@ python scripts/download_data.py --check
 | ContractNLI segments | `evidence_audit` | manual zip, scripted extraction | `$EXPGYM_DATA_ROOT/contract-nli/test_segments.json` |
 | ContractNLI hints | `evidence_audit` | shipped | `data/contract-nli/test_nda_span_dims.json` |
 
-ContractNLI is not auto-downloaded because the Stanford page requires accepting
-data-use terms. After you provide the zip, the script extracts the public
-`contract-nli/test.json` split and normalizes it to ExpGym's
-`test_segments.json` schema.
+ContractNLI is not mirrored or auto-downloaded by ExpGym. The Stanford page
+requires a manual terms flow, so the safest low-friction path is:
+
+1. Run `python scripts/download_data.py --print-manual-links`.
+2. Download the ContractNLI archive from the official page.
+3. Put `CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip` in `.env`, or
+   pass `--contract-nli-archive /path/to/contract-nli.zip`.
+
+After you provide the zip, the script extracts the public `contract-nli/test.json`
+split and normalizes it to ExpGym's `test_segments.json` schema.
 
 ## HPOBench Dependencies
 

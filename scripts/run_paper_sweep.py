@@ -490,11 +490,14 @@ def _preflight(args: argparse.Namespace, jobs: Sequence[Job]) -> None:
             )
     if any(j.scenario == "evidence_audit" for j in jobs):
         from expgym.task_evidence_audit import EVIDENCE_PATH, HINTS_PATH
+        from scripts.download_data import CONTRACT_NLI_PAGE
 
         if not Path(EVIDENCE_PATH).is_file() or not Path(HINTS_PATH).is_file():
             errors.append(
-                "ContractNLI segments are missing. Download ContractNLI manually "
-                "and place test_segments.json under $EXPGYM_DATA_ROOT/contract-nli/."
+                "ContractNLI segments are missing. ExpGym does not mirror this archive; "
+                f"download it from the official page after reviewing the terms: {CONTRACT_NLI_PAGE}\n"
+                "  Then set CONTRACT_NLI_ARCHIVE=/path/to/contract-nli.zip in .env, or run:\n"
+                "  python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip"
             )
     if errors:
         raise SystemExit("Preflight failed:\n- " + "\n- ".join(errors))

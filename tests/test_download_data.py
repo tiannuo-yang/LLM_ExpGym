@@ -58,9 +58,17 @@ class CheckOnlyNoNetworkTest(unittest.TestCase):
         ok, msg = download_data.fetch_contract_nli(check_only=True)
         self.assertFalse(ok)
         self.assertIn("MISSING", msg)
+        self.assertIn(download_data.CONTRACT_NLI_PAGE, msg)
+        self.assertIn("CONTRACT_NLI_ARCHIVE", msg)
         # Both expected files must appear in the instructions.
         for fname in download_data.CONTRACT_NLI_FILES:
             self.assertIn(fname, msg)
+
+    def test_contract_nli_manual_steps_use_official_page(self):
+        msg = download_data.contract_nli_manual_steps()
+        self.assertIn(download_data.CONTRACT_NLI_PAGE, msg)
+        self.assertIn("CONTRACT_NLI_ARCHIVE", msg)
+        self.assertIn("do not mirror", msg)
 
     def test_phantom_wiki_check_succeeds_when_dirs_exist(self):
         snap = download_data._phantom_wiki_snapshot_dir()
