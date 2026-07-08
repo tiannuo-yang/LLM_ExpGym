@@ -107,6 +107,28 @@ class PaperSweepMatrixTest(unittest.TestCase):
             "restricted_search_phantom_seed1_2_r0_s1206.json",
         )
 
+    def test_result_summary_shows_score_and_trace(self):
+        result = {
+            "job": {
+                "scenario": "tuning",
+                "tuning_task": "neural_network_training",
+                "model_id": "openai/gpt-4.1-nano",
+                "cost_regime": "cost_tight",
+            },
+            "answer_perf": 0.812345678,
+            "score_check": {"ok": True},
+            "evaluations": 2,
+            "api_calls": 3,
+            "aborted": False,
+        }
+        summary = run_paper_sweep._format_result_summary(
+            result, Path("budget_sweep_results/e2e/trace.json")
+        )
+        self.assertIn("EVALUATION RESULT", summary)
+        self.assertIn("answer_perf=0.812346", summary)
+        self.assertIn("score_check=ok", summary)
+        self.assertIn("trace=budget_sweep_results/e2e/trace.json", summary)
+
     def test_score_check_rejects_missing_numeric_tool_score(self):
         result = {"answer": "{}", "answer_perf": None}
         check = run_paper_sweep._score_check(

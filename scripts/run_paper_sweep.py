@@ -243,6 +243,46 @@ def _trace_path(output_dir: Path, job: Job) -> Path:
     return base / name
 
 
+def _format_number(value: Any) -> str:
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return f"{float(value):.6f}"
+    return str(value)
+
+
+def _format_result_summary(result: Dict[str, Any], path: Path) -> str:
+    job = result.get("job") or {}
+    scenario = job.get("scenario", "unknown")
+    if scenario == "tuning":
+        item = job.get("tuning_task", "unknown")
+    elif scenario == "restricted_search":
+        item = f"{job.get('data_source') or 'phantom_seed1'}[{job.get('question_index')}]"
+    else:
+        item = f"{job.get('cc_split', 'cc-large')}[{job.get('question_index')}]"
+
+    parts = [
+        "EVALUATION RESULT",
+        f"scenario={scenario}",
+        f"item={item}",
+        f"model={job.get('model_id', 'unknown')}",
+        f"cost_regime={job.get('cost_regime', 'unknown')}",
+        f"answer_perf={_format_number(result.get('answer_perf'))}",
+        f"score_check={'ok' if (result.get('score_check') or {}).get('ok') else 'failed'}",
+        f"evaluations={result.get('evaluations')}",
+        f"api_calls={result.get('api_calls')}",
+        f"aborted={result.get('aborted')}",
+    ]
+    metrics = result.get("answer_metrics")
+    if isinstance(metrics, dict) and metrics:
+        metric_text = ",".join(
+            f"{key}={_format_number(value)}" for key, value in sorted(metrics.items())
+        )
+        parts.append(f"metrics={metric_text}")
+    parts.append(f"trace={path}")
+    return " | ".join(parts)
+
+
 def _namespace_for_job(args: argparse.Namespace, job: Job, api_key: str) -> argparse.Namespace:
     ns = argparse.Namespace()
     ns.scenario = job.scenario
@@ -611,6 +651,7 @@ def main() -> int:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
             print(f"  wrote {path} score_check=ok")
+            print(f"  {_format_result_summary(result, path)}")
         except Exception as exc:
             failures.append((job, str(exc)))
             print(f"  ERROR: {exc}", file=sys.stderr)

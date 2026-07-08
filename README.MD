@@ -19,7 +19,26 @@ the main path.
 
 ## Quickstart
 
-Clone, configure a key, and run one real end-to-end trace:
+Three lines to run one real end-to-end evaluation:
+
+```bash
+git clone https://github.com/tiannuo-yang/LLM_ExpGym.git
+cd LLM_ExpGym
+OPENROUTER_API_KEY=sk-or-... bash scripts/run_paper_sweep.sh
+```
+
+The last line creates/reuses `.venv-expgym`, installs light dependencies, calls
+OpenRouter, runs the ExpGym ReAct loop, writes a JSON trace, and prints an
+`EVALUATION RESULT` line with `answer_perf`, `score_check`, evaluation counts,
+and the trace path.
+
+Successful output ends like this:
+
+```text
+EVALUATION RESULT | scenario=tuning | item=neural_network_training | model=openai/gpt-4.1-nano | cost_regime=cost_tight | answer_perf=0.518234 | score_check=ok | evaluations=4 | api_calls=5 | aborted=True | trace=budget_sweep_results/e2e/...
+```
+
+If you prefer a persistent config file:
 
 ```bash
 cp .env.example .env
@@ -35,9 +54,7 @@ Default run:
 - cost regime: `cost_tight`
 - output: `budget_sweep_results/e2e/`
 
-The wrapper creates/reuses `.venv-expgym`, installs light Python dependencies,
-loads `.env`, calls OpenRouter, runs the ReAct loop, executes the ExpGym tool,
-and writes a trace whose `score_check.ok` must be `true`.
+The default smoke does not require external datasets.
 
 ## Configuration
 

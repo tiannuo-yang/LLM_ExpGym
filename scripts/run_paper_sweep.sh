@@ -80,16 +80,23 @@ else
 fi
 
 echo "[run] python: $("$PY" -c 'import sys; print(sys.executable)')"
-"$PY" -m pip install --upgrade pip
-"$PY" -m pip install -r requirements.txt
+echo "[run] installing light Python dependencies"
+"$PY" -m pip install --upgrade --disable-pip-version-check --quiet pip
+"$PY" -m pip install --disable-pip-version-check --quiet -r requirements.txt
 
 if [[ "$WITH_AUTO_DATA" -eq 1 ]]; then
-  "$PY" -m pip install -r requirements-data.txt
+  echo "[run] preparing auto-downloadable datasets"
+  "$PY" -m pip install --disable-pip-version-check --quiet -r requirements-data.txt
   "$PY" scripts/download_data.py --auto-only
 fi
 
 if [[ -n "$CONTRACT_NLI_ARCHIVE" ]]; then
+  echo "[run] extracting ContractNLI test split"
   "$PY" scripts/download_data.py --contract-nli-archive "$CONTRACT_NLI_ARCHIVE"
 fi
 
-"$PY" scripts/run_paper_sweep.py "${RUNNER_ARGS[@]}"
+if [[ ${#RUNNER_ARGS[@]} -eq 0 ]]; then
+  "$PY" scripts/run_paper_sweep.py
+else
+  "$PY" scripts/run_paper_sweep.py "${RUNNER_ARGS[@]}"
+fi
