@@ -17,6 +17,7 @@ CONTRACT_NLI_ARCHIVE="${CONTRACT_NLI_ARCHIVE:-}"
 PYTHON_BIN="${PYTHON:-python3}"
 VENV_DIR="${EXPGYM_VENV:-"$ROOT_DIR/.venv-expgym"}"
 RUNNER_ARGS=()
+DRY_RUN=0
 
 usage() {
   cat <<'EOF'
@@ -64,6 +65,9 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
+      if [[ "$1" == "--dry-run" ]]; then
+        DRY_RUN=1
+      fi
       RUNNER_ARGS+=("$1")
       shift
       ;;
@@ -84,15 +88,19 @@ echo "[run] installing light Python dependencies"
 "$PY" -m pip install --upgrade --disable-pip-version-check --quiet pip
 "$PY" -m pip install --disable-pip-version-check --quiet -r requirements.txt
 
-if [[ "$WITH_AUTO_DATA" -eq 1 ]]; then
+if [[ "$WITH_AUTO_DATA" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
   echo "[run] preparing auto-downloadable datasets"
   "$PY" -m pip install --disable-pip-version-check --quiet -r requirements-data.txt
   "$PY" scripts/download_data.py --auto-only
+elif [[ "$WITH_AUTO_DATA" -eq 1 ]]; then
+  echo "[run] dry-run: skipping auto-downloadable dataset preparation"
 fi
 
-if [[ -n "$CONTRACT_NLI_ARCHIVE" ]]; then
+if [[ -n "$CONTRACT_NLI_ARCHIVE" && "$DRY_RUN" -eq 0 ]]; then
   echo "[run] extracting ContractNLI test split"
   "$PY" scripts/download_data.py --contract-nli-archive "$CONTRACT_NLI_ARCHIVE"
+elif [[ -n "$CONTRACT_NLI_ARCHIVE" ]]; then
+  echo "[run] dry-run: skipping ContractNLI extraction"
 fi
 
 if [[ ${#RUNNER_ARGS[@]} -eq 0 ]]; then

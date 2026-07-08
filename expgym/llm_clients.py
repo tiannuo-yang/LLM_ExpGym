@@ -27,6 +27,21 @@ DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/ch
 DEFAULT_VLLM_URL = "http://localhost:8000/v1/chat/completions"
 
 
+def _normalize_chat_completions_url(base_url: str) -> str:
+    """Accept either an OpenAI-compatible base URL or the full chat endpoint."""
+    parsed = urllib.parse.urlparse(base_url.rstrip("/"))
+    path = parsed.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        return urllib.parse.urlunparse(parsed)
+    if path in ("", "/"):
+        path = "/v1/chat/completions"
+    elif path.endswith("/v1") or path.endswith("/api/v1") or path.endswith("/openai"):
+        path = f"{path}/chat/completions"
+    else:
+        return base_url
+    return urllib.parse.urlunparse(parsed._replace(path=path))
+
+
 def _default_transport(request: urllib.request.Request, timeout: float) -> bytes:
     """Direct HTTPS transport (no tunnel)."""
     with urllib.request.urlopen(request, timeout=timeout) as response:  # type: ignore[no-untyped-call]
@@ -145,7 +160,7 @@ class OpenAICompatibleLLM(LLMBackend):
             seed=seed,
             chat_template_kwargs=chat_template_kwargs or {},
             timeout=timeout,
-            base_url=base_url or DEFAULT_OPENAI_URL,
+            base_url=_normalize_chat_completions_url(base_url or DEFAULT_OPENAI_URL),
             extra_headers=extra_headers or {},
             top_k=top_k,
             provider=provider,

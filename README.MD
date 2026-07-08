@@ -1,45 +1,228 @@
 # ExpGym
 
-ExpGym runs LLM agents in the three expensive-world tasks from the paper:
+ExpGym evaluates a model in expensive-world tasks. The model runs a ReAct loop,
+decides when to call costly tools, and ExpGym saves a score-checked JSON trace.
 
-| Scenario | Paper task |
-|---|---|
-| `tuning` | 9 HPOBench / NASBench tuning tasks |
-| `restricted_search` | 35 Phantom Wiki multi-hop questions |
-| `evidence_audit` | 13 ContractNLI audit documents |
-
-For the smoke run, you only need an OpenRouter API key.
-
-## Smoke: Three Lines
-
-Run one end-to-end evaluation with no external datasets:
+## Run One Trace
 
 ```bash
 git clone https://github.com/tiannuo-yang/LLM_ExpGym.git
 cd LLM_ExpGym
-OPENROUTER_API_KEY=sk-or-... bash scripts/run_paper_sweep.sh
+OPENROUTER_API_KEY=sk-or-... bash scripts/eval_model.sh
 ```
 
-Successful output ends with a score line:
+The default run uses `openai/gpt-4.1-nano`, `tuning`,
+`neural_network_training`, and `cost_tight`. It needs no external dataset.
+
+Success looks like:
 
 ```text
 EVALUATION RESULT | scenario=tuning | item=neural_network_training | model=openai/gpt-4.1-nano | cost_regime=cost_tight | answer_perf=... | score_check=ok | ... | trace=...
 ```
 
-The smoke creates `.venv-expgym`, installs light dependencies, runs an
-OpenRouter ReAct trace, writes a JSON trace, and prints the primary score.
+Summarize traces:
 
-For persistent config:
+```bash
+python scripts/summarize_traces.py runs/openai_gpt-4.1-nano
+```
+
+## Evaluate Your Model
+
+OpenRouter model:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... bash scripts/eval_model.sh \
+  --model mistralai/mistral-large
+```
+
+OpenAI-compatible local/server model:
+
+```bash
+OPENROUTER_API_KEY=dummy bash scripts/eval_model.sh \
+  --base-url http://localhost:8000/v1 \
+  --model my-local-model
+```
+
+Persistent config:
 
 ```bash
 cp .env.example .env
-# edit OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE
-bash scripts/run_paper_sweep.sh
+# edit OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE, and optional EXPGYM_BASE_URL
+bash scripts/eval_model.sh --model openai/gpt-4.1-nano
 ```
 
-## Full Paper Reproduction
+`--base-url` accepts either a base URL such as `http://localhost:8000/v1` or a
+full `/chat/completions` endpoint.
 
-Full reproduction is 1,818 model traces:
+## Choose A Scenario
+
+| Goal | Command | Data |
+|---|---|---|
+| Fast zero-data smoke | `bash scripts/eval_model.sh --model <model>` | none |
+| Restricted search | `bash scripts/eval_model.sh --model <model> --scenario restricted_search --questions 0:5 --with-auto-data` | auto |
+| Evidence audit | `bash scripts/eval_model.sh --model <model> --scenario evidence_audit --questions 0:3 --contract-nli-archive /path/to/contract-nli.zip` | official ContractNLI zip |
+| HPOBench tuning | `bash scripts/run_hpobench_docker.sh --models <model> --tuning-tasks hpobench:paramnet:adult:steps` | Docker |
+
+Useful selectors:
+
+```bash
+--scenario tuning | restricted_search | evidence_audit
+--model openai/gpt-4.1-nano,mistralai/mistral-large
+--questions 0        # one question/doc
+--questions 0:10     # range [0, 10)
+--questions 0,2,7    # explicit set
+--budget cost_tight | cost_moderate | cost_free
+--reps 3
+--max-steps 30
+--max-evals 999999
+--output-dir runs/my_eval
+```
+
+Preview planned jobs without model calls or result traces:
+
+```bash
+bash scripts/eval_model.sh --scenario restricted_search --questions 0:35 --dry-run
+```
+
+## Outputs
+
+The exact trace path is printed in every `EVALUATION RESULT` line. By default,
+traces live under:
+
+```text
+runs/<model>/<scenario>_<budget>/<model>_<budget>/traces/*.json
+```
+
+`answer_perf` is the primary score:
+
+| Scenario | Primary score |
+|---|---|
+| `tuning` | final configuration performance |
+| `restricted_search` | name-level F1 |
+| `evidence_audit` | label accuracy |
+
+`score_check=ok` means ExpGym recomputed the score from the saved answer/trace.
+
+<details>
+<summary>Data Setup</summary>
+
+The default smoke has no data dependency.
+
+Auto-downloadable data:
+
+```bash
+python scripts/download_data.py --auto-only
+```
+
+ContractNLI is manual. ExpGym does not mirror or auto-download the archive.
+
+```bash
+python scripts/download_data.py --print-manual-links
+python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
+```
+
+You can also put this in `.env`:
+
+```bash
+CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip
+```
+
+</details>
+
+<details>
+<summary>Full Runs</summary>
+
+Run more questions for one model:
+
+```bash
+bash scripts/eval_model.sh --with-auto-data \
+  --model openai/gpt-4.1-nano \
+  --scenario restricted_search \
+  --questions 0:35 \
+  --budget cost_tight \
+  --max-steps 30 \
+  --max-evals 999999 \
+  --output-dir runs/search_full
+```
+
+Run all three cost regimes for one search slice:
+
+```bash
+bash scripts/eval_model.sh --with-auto-data \
+  --model openai/gpt-4.1-nano \
+  --scenario restricted_search \
+  --questions 0:35 \
+  --budget cost_free,cost_moderate,cost_tight \
+  --max-steps 30 \
+  --max-evals 999999 \
+  --output-dir runs/search_costs
+```
+
+For multiple scenarios in one command, use the lower-level batch runner:
+
+```bash
+bash scripts/run_paper_sweep.sh --with-auto-data --resume \
+  --models openai/gpt-4.1-nano,mistralai/mistral-large \
+  --scenarios tuning,restricted_search \
+  --cost-regimes cost_tight \
+  --tuning-tasks neural_network_training \
+  --search-indices 0:35 \
+  --max-steps 30 \
+  --max-evals 999999 \
+  --output-dir runs/batch_eval
+```
+
+</details>
+
+<details>
+<summary>HPOBench On macOS</summary>
+
+HPOBench / NASBench uses TensorFlow 1.15, so macOS Apple Silicon should use
+Docker:
+
+```bash
+bash scripts/run_hpobench_docker.sh --resume \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks hpobench:paramnet:adult:steps \
+  --cost-regimes cost_tight \
+  --output-dir runs/hpobench_smoke
+```
+
+For all paper HPOBench tasks:
+
+```bash
+bash scripts/run_hpobench_docker.sh --resume \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks all-hpobench \
+  --cost-regimes cost_tight \
+  --tuning-reps 1 \
+  --max-steps 30 \
+  --max-evals 999999 \
+  --output-dir runs/hpobench_all
+```
+
+Full NASBench201 runs need Docker Desktop memory at least 16GB; 24GB is safer.
+
+</details>
+
+<details>
+<summary>Space</summary>
+
+| Run target | Practical free space |
+|---|---:|
+| Default smoke | 0.5GB |
+| Search + audit data | 1GB |
+| ParamNet-only HPOBench | 5-8GB |
+| Full HPOBench / NASBench | 20-30GB |
+
+</details>
+
+<details>
+<summary>Paper Reproduction</summary>
+
+The paper matrix is 1,818 traces:
 
 - 6 models
 - 3 cost regimes
@@ -47,28 +230,7 @@ Full reproduction is 1,818 model traces:
 - 35 Phantom Wiki questions
 - 13 ContractNLI docs x 3 hypothesis orders
 
-First prepare data:
-
-```bash
-# Auto-downloadable data: Phantom Wiki + HPOBench source.
-bash scripts/run_paper_sweep.sh --with-auto-data --dry-run
-
-# ContractNLI is manual: print official link/instructions.
-python scripts/download_data.py --print-manual-links
-```
-
-Download ContractNLI from the official page, then put this in `.env`:
-
-```bash
-CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip
-```
-
-For HPOBench on macOS Apple Silicon, install/start Docker Desktop and set
-Docker memory to at least 16GB, 24GB recommended.
-
-Then run the full paper matrix in two parts.
-
-Native tasks:
+Native search + audit:
 
 ```bash
 bash scripts/run_paper_sweep.sh --with-auto-data --resume \
@@ -86,7 +248,7 @@ bash scripts/run_paper_sweep.sh --with-auto-data --resume \
   --output-dir budget_sweep_results/paper
 ```
 
-HPOBench / NASBench tuning:
+HPOBench / NASBench:
 
 ```bash
 bash scripts/run_hpobench_docker.sh --resume \
@@ -100,29 +262,7 @@ bash scripts/run_hpobench_docker.sh --resume \
   --output-dir budget_sweep_results/paper
 ```
 
-<details>
-<summary>Linux x86_64 native HPOBench instead of Docker</summary>
-
-```bash
-bash scripts/recreate_expgym_env.sh
-conda run -n expgym-hpobench python scripts/run_paper_sweep.py --resume \
-  --models dsv32,gpt52,gpt41,gemini3flash,haiku45,mistral_large \
-  --scenarios tuning \
-  --cost-regimes cost_free,cost_moderate,cost_tight \
-  --tuning-tasks all-hpobench \
-  --tuning-reps 3 \
-  --max-steps 30 \
-  --max-evals 999999 \
-  --output-dir budget_sweep_results/paper
-```
-
-</details>
-
-`--dry-run` means: print the jobs that would run, without calling models or
-writing result traces.
-
-<details>
-<summary>Dry-run the exact full matrix</summary>
+Dry-run the full matrix:
 
 ```bash
 bash scripts/run_paper_sweep.sh --dry-run \
@@ -144,127 +284,7 @@ Expected dry-run count: `1818` jobs.
 </details>
 
 <details>
-<summary>If a paper model alias is unavailable</summary>
-
-Override it:
-
-```bash
-bash scripts/run_paper_sweep.sh \
-  --model-alias gpt52=openai/gpt-5.2 \
-  --models gpt52 \
-  --scenarios tuning
-```
-
-</details>
-
-<details>
-<summary>macOS Docker details</summary>
-
-Docker is only needed for HPOBench / NASBench on macOS Apple Silicon. The
-runner builds a Linux x86_64 image with TensorFlow 1.15 and HPOBench installed.
-Full NASBench201 runs need Docker Desktop memory at least 16GB; 24GB is safer.
-
-</details>
-
-<details>
-<summary>Validated short paper check</summary>
-
-This is not the full paper table. It is the smallest check that touches every
-paper task family once with one OpenRouter model under `cost_tight`.
-
-Native tasks:
-
-```bash
-bash scripts/run_paper_sweep.sh --with-auto-data --resume \
-  --models openai/gpt-4.1-nano \
-  --scenarios restricted_search,evidence_audit \
-  --cost-regimes cost_tight \
-  --search-data-source phantom_seed1 \
-  --search-indices 0:35 \
-  --cc-split cc-large \
-  --audit-indices 0:13 \
-  --max-steps 30 \
-  --output-dir budget_sweep_results/task_e2e_tight_native
-```
-
-HPOBench tasks:
-
-```bash
-bash scripts/run_hpobench_docker.sh --resume \
-  --models openai/gpt-4.1-nano \
-  --scenarios tuning \
-  --tuning-tasks all-hpobench \
-  --cost-regimes cost_tight \
-  --tuning-reps 1 \
-  --max-steps 30 \
-  --output-dir budget_sweep_results/task_e2e_tight_hpobench
-```
-
-We have run this check successfully: 57/57 traces, no missing scores,
-`score_check=ok`.
-
-</details>
-
-## Data And Space
-
-| Item | Preparation | Notes |
-|---|---|---|
-| Smoke | none | no external datasets |
-| Phantom Wiki | auto via `--with-auto-data` | paper subset is `phantom_seed1`, indices `0:35` |
-| ContractNLI | manual official zip | ExpGym does not mirror or auto-download it |
-| HPOBench | auto source + Docker/native deps | full NASBench needs Docker memory >=16GB on macOS |
-
-Disk:
-
-| Run target | Practical free space |
-|---|---:|
-| Smoke | 0.5GB |
-| Search + audit data | 1GB |
-| ParamNet-only HPOBench | 5-8GB |
-| Full HPOBench / NASBench | 20-30GB |
-
-## Outputs
-
-Traces are written under:
-
-```text
-<output-dir>/<model_alias>_<cost_regime>/traces/*.json
-```
-
-Each successful job prints:
-
-```text
-EVALUATION RESULT | ... | answer_perf=... | score_check=ok | trace=...
-```
-
-Primary scores:
-
-| Scenario | `answer_perf` |
-|---|---|
-| `tuning` | final configuration performance |
-| `restricted_search` | name-level F1 |
-| `evidence_audit` | label accuracy |
-
-`score_check=ok` means the saved answer was recomputed from the trace.
-
-<details>
-<summary>Common options</summary>
-
-```bash
-bash scripts/run_paper_sweep.sh --models openai/gpt-4.1-nano,mistralai/mistral-large
-bash scripts/run_paper_sweep.sh --model-alias fast=openai/gpt-4.1-nano --models fast
-bash scripts/run_paper_sweep.sh --scenarios tuning,restricted_search
-bash scripts/run_paper_sweep.sh --cost-regimes cost_free,cost_moderate,cost_tight
-bash scripts/run_paper_sweep.sh --search-indices 0:10
-bash scripts/run_paper_sweep.sh --audit-indices 0,1,2 --audit-reps 3
-bash scripts/run_paper_sweep.sh --tuning-tasks hpobench:paramnet:adult:steps
-bash scripts/run_paper_sweep.sh --resume --output-dir budget_sweep_results/my_run
-```
-
-</details>
-
-<details>
-<summary>Developer checks</summary>
+<summary>Developer Checks</summary>
 
 ```bash
 python -m unittest discover tests

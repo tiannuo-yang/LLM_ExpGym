@@ -65,6 +65,18 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
         self.assertEqual(result.prompt_tokens, 0)
         self.assertEqual(transport.request.get_full_url(), url)
 
+    def test_base_url_accepts_openai_compatible_base(self) -> None:
+        cases = {
+            "http://localhost:8000": "http://localhost:8000/v1/chat/completions",
+            "http://localhost:8000/v1": "http://localhost:8000/v1/chat/completions",
+            "https://openrouter.ai/api/v1": "https://openrouter.ai/api/v1/chat/completions",
+            "https://example.com/v1/chat/completions": "https://example.com/v1/chat/completions",
+        }
+        for given, expected in cases.items():
+            with self.subTest(given=given):
+                llm = OpenAICompatibleLLM(api_key="k", base_url=given)
+                self.assertEqual(llm.config.base_url, expected)
+
 
 class GeminiHelperTest(unittest.TestCase):
     def test_build_gemini_client_uses_default_url(self) -> None:
