@@ -86,7 +86,7 @@ bash scripts/run_paper_sweep.sh --with-auto-data --resume \
   --output-dir budget_sweep_results/paper
 ```
 
-HPOBench / NASBench tuning on macOS Docker:
+HPOBench / NASBench tuning:
 
 ```bash
 bash scripts/run_hpobench_docker.sh --resume \
@@ -100,7 +100,8 @@ bash scripts/run_hpobench_docker.sh --resume \
   --output-dir budget_sweep_results/paper
 ```
 
-On Linux x86_64, you may use the native HPOBench env instead of Docker:
+<details>
+<summary>Linux x86_64 native HPOBench instead of Docker</summary>
 
 ```bash
 bash scripts/recreate_expgym_env.sh
@@ -115,7 +116,13 @@ conda run -n expgym-hpobench python scripts/run_paper_sweep.py --resume \
   --output-dir budget_sweep_results/paper
 ```
 
-Dry-run the exact full matrix:
+</details>
+
+`--dry-run` means: print the jobs that would run, without calling models or
+writing result traces.
+
+<details>
+<summary>Dry-run the exact full matrix</summary>
 
 ```bash
 bash scripts/run_paper_sweep.sh --dry-run \
@@ -134,7 +141,33 @@ bash scripts/run_paper_sweep.sh --dry-run \
 
 Expected dry-run count: `1818` jobs.
 
-## Validated Short Paper Check
+</details>
+
+<details>
+<summary>If a paper model alias is unavailable</summary>
+
+Override it:
+
+```bash
+bash scripts/run_paper_sweep.sh \
+  --model-alias gpt52=openai/gpt-5.2 \
+  --models gpt52 \
+  --scenarios tuning
+```
+
+</details>
+
+<details>
+<summary>macOS Docker details</summary>
+
+Docker is only needed for HPOBench / NASBench on macOS Apple Silicon. The
+runner builds a Linux x86_64 image with TensorFlow 1.15 and HPOBench installed.
+Full NASBench201 runs need Docker Desktop memory at least 16GB; 24GB is safer.
+
+</details>
+
+<details>
+<summary>Validated short paper check</summary>
 
 This is not the full paper table. It is the smallest check that touches every
 paper task family once with one OpenRouter model under `cost_tight`.
@@ -169,6 +202,8 @@ bash scripts/run_hpobench_docker.sh --resume \
 
 We have run this check successfully: 57/57 traces, no missing scores,
 `score_check=ok`.
+
+</details>
 
 ## Data And Space
 
@@ -212,7 +247,8 @@ Primary scores:
 
 `score_check=ok` means the saved answer was recomputed from the trace.
 
-## Common Options
+<details>
+<summary>Common options</summary>
 
 ```bash
 bash scripts/run_paper_sweep.sh --models openai/gpt-4.1-nano,mistralai/mistral-large
@@ -225,19 +261,15 @@ bash scripts/run_paper_sweep.sh --tuning-tasks hpobench:paramnet:adult:steps
 bash scripts/run_paper_sweep.sh --resume --output-dir budget_sweep_results/my_run
 ```
 
-If a paper model alias is unavailable on OpenRouter, override it:
+</details>
 
-```bash
-bash scripts/run_paper_sweep.sh \
-  --model-alias gpt52=openai/gpt-5.2 \
-  --models gpt52 \
-  --scenarios tuning
-```
-
-## Checks
+<details>
+<summary>Developer checks</summary>
 
 ```bash
 python -m unittest discover tests
 python scripts/download_data.py --check
 python scripts/run_paper_sweep.py --dry-run
 ```
+
+</details>
