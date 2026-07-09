@@ -2,6 +2,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/.env"
+  set +a
+fi
+
 IMAGE="${EXPGYM_HPOBENCH_IMAGE:-expgym-hpobench:py37}"
 PLATFORM="${EXPGYM_HPOBENCH_PLATFORM:-linux/amd64}"
 DOCKER_BIN="${DOCKER:-}"

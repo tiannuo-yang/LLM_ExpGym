@@ -1,14 +1,17 @@
 # ExpGym
 
 ExpGym evaluates a model in expensive-world tasks and writes score-checked
-ReAct traces. Use it when you want to see how a model spends tool calls, handles
-budget pressure, and what score it gets at the end.
+ReAct traces. Use it to see how a model spends tool calls, handles budget
+pressure, and what score it gets at the end.
 
-Most users only need one runner:
+The user-facing interface is two scripts:
 
-```bash
-bash scripts/eval_model.sh [flags]
-```
+| Script | Use it for |
+|---|---|
+| `scripts/eval_model.sh` | Default smoke, built-in tuning, restricted search, evidence audit |
+| `scripts/run_hpobench_docker.sh` | HPOBench / NASBench tuning in Docker |
+
+Everything else is a helper or advanced reproduction path.
 
 ## Quick Start
 
@@ -43,6 +46,8 @@ python scripts/summarize_traces.py runs/openai_gpt-4.1-nano
 
 ## Configure Once
 
+Both runners read `.env`.
+
 Either pass the key inline:
 
 ```bash
@@ -68,24 +73,11 @@ OPENROUTER_API_KEY=dummy bash scripts/eval_model.sh \
 `--base-url` accepts either `http://localhost:8000/v1` or a full
 `/chat/completions` endpoint.
 
-## Data Before You Run
+## Runner 1: Eval Model
 
-There is no required manual dataset step. For normal runs, do not call
-`scripts/download_data.py` directly; use `--with-auto-data` and the runner calls
-the data utility for you.
-
-| Run target | What happens | Runner flag |
-|---|---|---|
-| Default smoke / built-in `tuning` | Nothing. It runs immediately. | none |
-| `restricted_search` | First run downloads Phantom Wiki under `data/`. | `--with-auto-data` |
-| `evidence_audit` | First run downloads the official ContractNLI zip and extracts the test split under `data/`. | `--with-auto-data` |
-| HPOBench / NASBench tuning | Docker is recommended for the old TensorFlow 1.15 stack. Native Linux x86_64 can also use the conda setup below; macOS/Windows should use Docker. | use `scripts/run_hpobench_docker.sh` or native Linux conda |
-
-You do not need data for `--dry-run`; it only prints planned jobs.
-
-## The One Command
-
-Use the same command shape for smoke, slices, sweeps, and model comparisons:
+Use `scripts/eval_model.sh` for the built-in smoke, restricted search, and
+evidence audit. There is no required manual dataset step. When a scenario needs
+data, add `--with-auto-data`; the runner downloads what is missing.
 
 ```bash
 bash scripts/eval_model.sh \
@@ -96,42 +88,34 @@ bash scripts/eval_model.sh \
   --output-dir runs/<name>
 ```
 
-Only a few flags change between runs:
+Common flags:
 
 | Flag | Meaning | Examples |
 |---|---|---|
 | `--model` | Model ID or comma-separated model IDs | `openai/gpt-4.1-nano`, `mistralai/mistral-large` |
 | `--base-url` | OpenAI-compatible server | `http://localhost:8000/v1` |
-| `--scenario` | Expensive-world task family | `tuning`, `restricted_search`, `evidence_audit` |
+| `--scenario` | Task family | `tuning`, `restricted_search`, `evidence_audit` |
 | `--task` | Tuning task name | `neural_network_training` |
 | `--questions` | Search/audit item selector | `0`, `0:10`, `0,2,7` |
 | `--budget` | Cost regime | `cost_tight`, `cost_moderate`, `cost_free` |
-| `--reps` | Repeat each selected item | `3` |
-| `--max-steps` | ReAct step limit | `30` |
-| `--max-evals` | Tool-call limit | `999999` |
+| `--with-auto-data` | Download missing datasets before running | search/audit |
 | `--dry-run` | Print planned jobs only | no model calls, no traces |
-
-## Common Runs
-
-| What you want | Data first | Flags to add |
-|---|---|---|
-| Fast smoke | none | none |
-| Different OpenRouter model | none if using default `tuning` | `--model mistralai/mistral-large` |
-| Local/server model | none if using default `tuning` | `--base-url http://localhost:8000/v1 --model my-local-model` |
-| Search slice | auto via runner | `--scenario restricted_search --questions 0:5 --with-auto-data` |
-| Evidence-audit slice | auto via runner | `--scenario evidence_audit --questions 0:3 --with-auto-data` |
-| More budget regimes | same as selected scenario | `--budget cost_free,cost_moderate,cost_tight` |
-| More items | same as selected scenario | `--questions 0:35 --max-steps 30 --max-evals 999999` |
-| Preview a run | none | `--dry-run` |
 
 Examples:
 
 ```bash
-# One OpenRouter model on five restricted-search questions.
+# Search slice.
 bash scripts/eval_model.sh --with-auto-data \
   --model openai/gpt-4.1-nano \
   --scenario restricted_search \
   --questions 0:5 \
+  --budget cost_tight
+
+# Evidence-audit slice. ContractNLI downloads automatically.
+bash scripts/eval_model.sh --with-auto-data \
+  --model openai/gpt-4.1-nano \
+  --scenario evidence_audit \
+  --questions 0:3 \
   --budget cost_tight
 
 # Compare two models on the same slice.
@@ -142,14 +126,7 @@ bash scripts/eval_model.sh --with-auto-data \
   --budget cost_tight \
   --output-dir runs/search_compare
 
-# Run three ContractNLI evidence-audit docs. Data is downloaded automatically.
-bash scripts/eval_model.sh --with-auto-data \
-  --model openai/gpt-4.1-nano \
-  --scenario evidence_audit \
-  --questions 0:3 \
-  --budget cost_tight
-
-# Preview the full restricted-search slice before spending API calls.
+# Preview before spending API calls.
 bash scripts/eval_model.sh --with-auto-data \
   --scenario restricted_search \
   --questions 0:35 \
@@ -157,17 +134,22 @@ bash scripts/eval_model.sh --with-auto-data \
   --dry-run
 ```
 
-## Scenarios
+## Runner 2: Docker HPOBench
 
-| Scenario | What it tests | Main selector | Data |
-|---|---|---|---|
-| `tuning` | choosing configurations under evaluation cost | `--task` | default task needs none |
-| `restricted_search` | retrieving/combining evidence under search cost | `--questions` | auto via `--with-auto-data` |
-| `evidence_audit` | auditing claims against contracts | `--questions` | auto via `--with-auto-data` |
+Use `scripts/run_hpobench_docker.sh` for HPOBench / NASBench. This is separate
+because those tasks need the old TensorFlow 1.15 stack. Docker keeps the command
+the same across Linux, macOS, and Windows with WSL2.
 
-The default `tuning` task is intentionally tiny. HPOBench/NASBench tuning uses
-an old TensorFlow 1.15 stack, so Docker is the recommended path. Native Linux
-x86_64 can also run it without Docker using the conda setup below.
+```bash
+bash scripts/run_hpobench_docker.sh --resume \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks hpobench:paramnet:adult:steps \
+  --cost-regimes cost_tight \
+  --output-dir runs/hpobench_smoke
+```
+
+Full NASBench201 runs need at least 16GB Docker memory; 24GB is safer.
 
 ## Outputs
 
@@ -191,7 +173,7 @@ Primary scores:
 | `restricted_search` | name-level F1 |
 | `evidence_audit` | label accuracy (`answer_metrics.label_acc`) |
 
-Evidence audit also writes additional metrics:
+Evidence audit also writes:
 
 | Metric | Meaning |
 |---|---|
@@ -223,41 +205,18 @@ ContractNLI is downloaded from the official GitHub-hosted zip:
 https://github.com/stanfordnlp/contract-nli/blob/gh-pages/resources/contract-nli.zip
 ```
 
-For offline or mirrored environments, you can still provide a local zip:
+Offline override:
 
 ```bash
 CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip
 ```
 
-or:
-
-```bash
-bash scripts/eval_model.sh \
-  --scenario evidence_audit \
-  --questions 0:3 \
-  --contract-nli-archive /path/to/contract-nli.zip
-```
-
 </details>
 
 <details>
-<summary>HPOBench / NASBench</summary>
+<summary>Advanced: More HPOBench Options</summary>
 
-Docker is the recommended cross-platform path because it pins the old
-TensorFlow 1.15 stack. Use Docker Engine on Linux, Docker Desktop on macOS, or
-Docker Desktop with WSL2 on Windows. Run the same command from a bash shell; on
-Windows, use the WSL2 shell inside the cloned repo.
-
-```bash
-bash scripts/run_hpobench_docker.sh --resume \
-  --models openai/gpt-4.1-nano \
-  --scenarios tuning \
-  --tuning-tasks hpobench:paramnet:adult:steps \
-  --cost-regimes cost_tight \
-  --output-dir runs/hpobench_smoke
-```
-
-All paper HPOBench tasks:
+All paper HPOBench tasks in Docker:
 
 ```bash
 bash scripts/run_hpobench_docker.sh --resume \
@@ -270,8 +229,6 @@ bash scripts/run_hpobench_docker.sh --resume \
   --max-evals 999999 \
   --output-dir runs/hpobench_all
 ```
-
-Full NASBench201 runs need at least 16GB Docker memory; 24GB is safer.
 
 On native Linux x86_64, Docker is optional. You can use conda instead:
 
