@@ -68,6 +68,30 @@ OPENROUTER_API_KEY=dummy bash scripts/eval_model.sh \
 `--base-url` accepts either `http://localhost:8000/v1` or a full
 `/chat/completions` endpoint.
 
+## Data Before You Run
+
+Data setup is scenario-specific. Check this table before launching anything
+beyond the default smoke:
+
+| Run target | What to prepare first | Runner flag |
+|---|---|---|
+| Default smoke / built-in `tuning` | Nothing. It runs immediately. | none |
+| `restricted_search` | Nothing manual. Add `--with-auto-data` on the first run; it downloads Phantom Wiki data under `data/`. | `--with-auto-data` |
+| `evidence_audit` | Download the official ContractNLI zip yourself, then pass the local path. | `--contract-nli-archive /path/to/contract-nli.zip` |
+| HPOBench / NASBench tuning | Install/start Docker Desktop on macOS; full NASBench201 needs >=16GB Docker memory. | use `scripts/run_hpobench_docker.sh` |
+
+Useful data commands:
+
+```bash
+# Optional: prefetch all auto-downloadable data instead of using --with-auto-data.
+python scripts/download_data.py --auto-only
+
+# ContractNLI is manual; print the official link/instructions.
+python scripts/download_data.py --print-manual-links
+```
+
+You do not need data for `--dry-run`; it only prints planned jobs.
+
 ## The One Command
 
 Use the same command shape for smoke, slices, sweeps, and model comparisons:
@@ -98,16 +122,16 @@ Only a few flags change between runs:
 
 ## Common Runs
 
-| What you want | Flags to add |
-|---|---|
-| Fast smoke | none |
-| Different OpenRouter model | `--model mistralai/mistral-large` |
-| Local/server model | `--base-url http://localhost:8000/v1 --model my-local-model` |
-| Search slice | `--scenario restricted_search --questions 0:5 --with-auto-data` |
-| Evidence-audit slice | `--scenario evidence_audit --questions 0:3 --contract-nli-archive /path/to/contract-nli.zip` |
-| More budget regimes | `--budget cost_free,cost_moderate,cost_tight` |
-| More items | `--questions 0:35 --max-steps 30 --max-evals 999999` |
-| Preview a run | `--dry-run` |
+| What you want | Data first | Flags to add |
+|---|---|---|
+| Fast smoke | none | none |
+| Different OpenRouter model | none if using default `tuning` | `--model mistralai/mistral-large` |
+| Local/server model | none if using default `tuning` | `--base-url http://localhost:8000/v1 --model my-local-model` |
+| Search slice | auto via runner | `--scenario restricted_search --questions 0:5 --with-auto-data` |
+| Evidence-audit slice | ContractNLI zip | `--scenario evidence_audit --questions 0:3 --contract-nli-archive /path/to/contract-nli.zip` |
+| More budget regimes | same as selected scenario | `--budget cost_free,cost_moderate,cost_tight` |
+| More items | same as selected scenario | `--questions 0:35 --max-steps 30 --max-evals 999999` |
+| Preview a run | none | `--dry-run` |
 
 Examples:
 
@@ -171,11 +195,9 @@ Primary scores:
 `score_check=ok` means ExpGym recomputed the score from the saved answer/trace.
 
 <details>
-<summary>Data Setup</summary>
+<summary>Data Notes</summary>
 
-The default smoke has no data dependency.
-
-Auto-downloadable data:
+Auto-downloadable data can be prepared explicitly:
 
 ```bash
 python scripts/download_data.py --auto-only
@@ -192,6 +214,15 @@ You can also put this in `.env`:
 
 ```bash
 CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip
+```
+
+The runner also accepts the path directly:
+
+```bash
+bash scripts/eval_model.sh \
+  --scenario evidence_audit \
+  --questions 0:3 \
+  --contract-nli-archive /path/to/contract-nli.zip
 ```
 
 </details>

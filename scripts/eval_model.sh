@@ -36,6 +36,11 @@ Usage: bash scripts/eval_model.sh [options] [-- extra run_paper_sweep.py args]
 
 Evaluate one model and write ExpGym traces.
 
+Data:
+  default tuning smoke needs no data.
+  restricted_search needs --with-auto-data on first run.
+  evidence_audit needs --contract-nli-archive /path/to/contract-nli.zip.
+
 Common options:
   --model MODEL                 OpenRouter/OpenAI-compatible model id.
   --base-url URL                OpenAI-compatible API base URL.
