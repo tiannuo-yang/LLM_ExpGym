@@ -38,8 +38,8 @@ Evaluate one model and write ExpGym traces.
 
 Data:
   default tuning smoke needs no data.
-  restricted_search needs --with-auto-data on first run.
-  evidence_audit needs --with-auto-data on first run.
+  restricted_search/evidence_audit need --with-auto-data on first run.
+  --with-auto-data calls scripts/download_data.py automatically.
 
 Common options:
   --model MODEL                 OpenRouter/OpenAI-compatible model id.

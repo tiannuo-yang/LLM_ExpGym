@@ -70,22 +70,16 @@ OPENROUTER_API_KEY=dummy bash scripts/eval_model.sh \
 
 ## Data Before You Run
 
-There is no required manual dataset step. Data setup is scenario-specific; check
-this table before launching anything beyond the default smoke:
+There is no required manual dataset step. For normal runs, do not call
+`scripts/download_data.py` directly; use `--with-auto-data` and the runner calls
+the data utility for you.
 
-| Run target | What to prepare first | Runner flag |
+| Run target | What happens | Runner flag |
 |---|---|---|
 | Default smoke / built-in `tuning` | Nothing. It runs immediately. | none |
-| `restricted_search` | Nothing manual. Add `--with-auto-data` on the first run; it downloads Phantom Wiki data under `data/`. | `--with-auto-data` |
-| `evidence_audit` | Nothing manual. Add `--with-auto-data` on the first run; it downloads the official ContractNLI zip and extracts the test split under `data/`. | `--with-auto-data` |
+| `restricted_search` | First run downloads Phantom Wiki under `data/`. | `--with-auto-data` |
+| `evidence_audit` | First run downloads the official ContractNLI zip and extracts the test split under `data/`. | `--with-auto-data` |
 | HPOBench / NASBench tuning | Docker is recommended for the old TensorFlow 1.15 stack. Native Linux x86_64 can also use the conda setup below; macOS/Windows should use Docker. | use `scripts/run_hpobench_docker.sh` or native Linux conda |
-
-Useful data commands:
-
-```bash
-# Optional: prefetch all external data instead of using --with-auto-data.
-python scripts/download_data.py
-```
 
 You do not need data for `--dry-run`; it only prints planned jobs.
 
@@ -208,12 +202,19 @@ Evidence audit also writes additional metrics:
 `score_check=ok` means ExpGym recomputed the score from the saved answer/trace.
 
 <details>
-<summary>Data Notes</summary>
+<summary>Advanced: Data Utility</summary>
 
-All external datasets can be prepared explicitly:
+`scripts/download_data.py` is the implementation behind `--with-auto-data`.
+Most users do not need to call it directly.
+
+Use it manually only when you want to prefetch data without starting a model
+run, verify a cache in CI, print data source URLs, or use an offline ContractNLI
+zip:
 
 ```bash
 python scripts/download_data.py
+python scripts/download_data.py --check
+python scripts/download_data.py --print-data-links
 ```
 
 ContractNLI is downloaded from the official GitHub-hosted zip:
