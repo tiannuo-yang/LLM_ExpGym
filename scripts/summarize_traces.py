@@ -15,6 +15,9 @@ FIELDS = [
     "model",
     "cost_regime",
     "answer_perf",
+    "label_acc",
+    "evidence_acc",
+    "verification_eff",
     "score_check",
     "evaluations",
     "api_calls",
@@ -48,6 +51,7 @@ def trace_item(job: Dict[str, Any]) -> str:
 def summarize_trace(path: Path) -> Dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     job = data.get("job") or {}
+    answer_metrics = data.get("answer_metrics") or {}
     score_check = data.get("score_check") or {}
     return {
         "trace": str(path),
@@ -56,6 +60,9 @@ def summarize_trace(path: Path) -> Dict[str, Any]:
         "model": job.get("model_id", ""),
         "cost_regime": job.get("cost_regime", ""),
         "answer_perf": data.get("answer_perf"),
+        "label_acc": answer_metrics.get("label_acc"),
+        "evidence_acc": answer_metrics.get("evidence_acc"),
+        "verification_eff": answer_metrics.get("verification_eff"),
         "score_check": "ok" if score_check.get("ok") else "failed",
         "evaluations": data.get("evaluations"),
         "api_calls": data.get("api_calls"),

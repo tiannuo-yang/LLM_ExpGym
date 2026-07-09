@@ -61,6 +61,38 @@ class SummarizeTracesTest(unittest.TestCase):
 
             self.assertEqual(files, [trace])
 
+    def test_summarizes_audit_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "audit.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "job": {
+                            "scenario": "evidence_audit",
+                            "cc_split": "cc-large",
+                            "question_index": 9,
+                            "model_id": "openai/gpt-4.1-nano",
+                            "cost_regime": "cost_tight",
+                        },
+                        "answer_perf": 0.35294117647058826,
+                        "answer_metrics": {
+                            "label_acc": 0.35294117647058826,
+                            "evidence_acc": 0.23529411764705882,
+                            "verification_eff": 0.0,
+                        },
+                        "score_check": {"ok": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            row = summarize_traces.summarize_trace(path)
+
+            self.assertEqual(row["item"], "cc-large[9]")
+            self.assertEqual(summarize_traces.format_value(row["label_acc"]), "0.352941")
+            self.assertEqual(summarize_traces.format_value(row["evidence_acc"]), "0.235294")
+            self.assertEqual(summarize_traces.format_value(row["verification_eff"]), "0.000000")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -191,7 +191,15 @@ Primary scores:
 |---|---|
 | `tuning` | final configuration performance |
 | `restricted_search` | name-level F1 |
-| `evidence_audit` | label accuracy |
+| `evidence_audit` | label accuracy (`answer_metrics.label_acc`) |
+
+Evidence audit also writes additional metrics:
+
+| Metric | Meaning |
+|---|---|
+| `answer_metrics.label_acc` | fraction of hypotheses with the correct NLI label |
+| `answer_metrics.evidence_acc` | fraction of hypotheses with exact-match evidence IDs |
+| `answer_metrics.verification_eff` | among fully-correct hypotheses, fraction verified via `human_feedback` |
 
 `score_check=ok` means ExpGym recomputed the score from the saved answer/trace.
 
