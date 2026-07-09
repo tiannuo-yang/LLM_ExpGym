@@ -171,7 +171,16 @@ clean = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "model"
 print(clean)
 PY
   )"
-  OUTPUT_DIR="runs/${MODEL_ALIAS}/${SCENARIO}_${BUDGET}"
+  RUN_ALIAS="$(
+    RUN_NAME="${SCENARIO}_${BUDGET}" python - <<'PY'
+import os
+import re
+value = os.environ["RUN_NAME"]
+clean = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "run"
+print(clean)
+PY
+  )"
+  OUTPUT_DIR="runs/${MODEL_ALIAS}/${RUN_ALIAS}"
 fi
 
 CMD=(bash scripts/run_paper_sweep.sh)

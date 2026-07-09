@@ -1,9 +1,18 @@
 # ExpGym
 
-ExpGym evaluates a model in expensive-world tasks. The model runs a ReAct loop,
-decides when to call costly tools, and ExpGym saves a score-checked JSON trace.
+ExpGym evaluates a model in expensive-world tasks and writes score-checked
+ReAct traces. Use it when you want to see how a model spends tool calls, handles
+budget pressure, and what score it gets at the end.
 
-## Run One Trace
+Most users only need one runner:
+
+```bash
+bash scripts/eval_model.sh [flags]
+```
+
+## Quick Start
+
+Run one real end-to-end trace with no external dataset:
 
 ```bash
 git clone https://github.com/tiannuo-yang/LLM_ExpGym.git
@@ -11,10 +20,16 @@ cd LLM_ExpGym
 OPENROUTER_API_KEY=sk-or-... bash scripts/eval_model.sh
 ```
 
-The default run uses `openai/gpt-4.1-nano`, `tuning`,
-`neural_network_training`, and `cost_tight`. It needs no external dataset.
+The default is deliberately small:
 
-Success looks like:
+```text
+model=openai/gpt-4.1-nano
+scenario=tuning
+task=neural_network_training
+budget=cost_tight
+```
+
+Success ends with one line like this:
 
 ```text
 EVALUATION RESULT | scenario=tuning | item=neural_network_training | model=openai/gpt-4.1-nano | cost_regime=cost_tight | answer_perf=... | score_check=ok | ... | trace=...
@@ -26,16 +41,23 @@ Summarize traces:
 python scripts/summarize_traces.py runs/openai_gpt-4.1-nano
 ```
 
-## Evaluate Your Model
+## Configure Once
 
-OpenRouter model:
+Either pass the key inline:
 
 ```bash
-OPENROUTER_API_KEY=sk-or-... bash scripts/eval_model.sh \
-  --model mistralai/mistral-large
+OPENROUTER_API_KEY=sk-or-... bash scripts/eval_model.sh
 ```
 
-OpenAI-compatible local/server model:
+or create `.env`:
+
+```bash
+cp .env.example .env
+# edit OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE
+bash scripts/eval_model.sh
+```
+
+For a local or OpenAI-compatible server:
 
 ```bash
 OPENROUTER_API_KEY=dummy bash scripts/eval_model.sh \
@@ -43,59 +65,104 @@ OPENROUTER_API_KEY=dummy bash scripts/eval_model.sh \
   --model my-local-model
 ```
 
-Persistent config:
+`--base-url` accepts either `http://localhost:8000/v1` or a full
+`/chat/completions` endpoint.
+
+## The One Command
+
+Use the same command shape for smoke, slices, sweeps, and model comparisons:
 
 ```bash
-cp .env.example .env
-# edit OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE, and optional EXPGYM_BASE_URL
-bash scripts/eval_model.sh --model openai/gpt-4.1-nano
+bash scripts/eval_model.sh \
+  --model <model-or-comma-list> \
+  --scenario <tuning|restricted_search|evidence_audit> \
+  --budget <cost_tight|cost_moderate|cost_free> \
+  [--task <tuning-task> | --questions <index-or-range>] \
+  --output-dir runs/<name>
 ```
 
-`--base-url` accepts either a base URL such as `http://localhost:8000/v1` or a
-full `/chat/completions` endpoint.
+Only a few flags change between runs:
 
-## Choose A Scenario
-
-| Goal | Command | Data |
+| Flag | Meaning | Examples |
 |---|---|---|
-| Fast zero-data smoke | `bash scripts/eval_model.sh --model <model>` | none |
-| Restricted search | `bash scripts/eval_model.sh --model <model> --scenario restricted_search --questions 0:5 --with-auto-data` | auto |
-| Evidence audit | `bash scripts/eval_model.sh --model <model> --scenario evidence_audit --questions 0:3 --contract-nli-archive /path/to/contract-nli.zip` | official ContractNLI zip |
-| HPOBench tuning | `bash scripts/run_hpobench_docker.sh --models <model> --tuning-tasks hpobench:paramnet:adult:steps` | Docker |
+| `--model` | Model ID or comma-separated model IDs | `openai/gpt-4.1-nano`, `mistralai/mistral-large` |
+| `--base-url` | OpenAI-compatible server | `http://localhost:8000/v1` |
+| `--scenario` | Expensive-world task family | `tuning`, `restricted_search`, `evidence_audit` |
+| `--task` | Tuning task name | `neural_network_training` |
+| `--questions` | Search/audit item selector | `0`, `0:10`, `0,2,7` |
+| `--budget` | Cost regime | `cost_tight`, `cost_moderate`, `cost_free` |
+| `--reps` | Repeat each selected item | `3` |
+| `--max-steps` | ReAct step limit | `30` |
+| `--max-evals` | Tool-call limit | `999999` |
+| `--dry-run` | Print planned jobs only | no model calls, no traces |
 
-Useful selectors:
+## Common Runs
+
+| What you want | Flags to add |
+|---|---|
+| Fast smoke | none |
+| Different OpenRouter model | `--model mistralai/mistral-large` |
+| Local/server model | `--base-url http://localhost:8000/v1 --model my-local-model` |
+| Search slice | `--scenario restricted_search --questions 0:5 --with-auto-data` |
+| Evidence-audit slice | `--scenario evidence_audit --questions 0:3 --contract-nli-archive /path/to/contract-nli.zip` |
+| More budget regimes | `--budget cost_free,cost_moderate,cost_tight` |
+| More items | `--questions 0:35 --max-steps 30 --max-evals 999999` |
+| Preview a run | `--dry-run` |
+
+Examples:
 
 ```bash
---scenario tuning | restricted_search | evidence_audit
---model openai/gpt-4.1-nano,mistralai/mistral-large
---questions 0        # one question/doc
---questions 0:10     # range [0, 10)
---questions 0,2,7    # explicit set
---budget cost_tight | cost_moderate | cost_free
---reps 3
---max-steps 30
---max-evals 999999
---output-dir runs/my_eval
+# One OpenRouter model on five restricted-search questions.
+bash scripts/eval_model.sh --with-auto-data \
+  --model openai/gpt-4.1-nano \
+  --scenario restricted_search \
+  --questions 0:5 \
+  --budget cost_tight
+
+# Compare two models on the same slice.
+bash scripts/eval_model.sh --with-auto-data \
+  --model openai/gpt-4.1-nano,mistralai/mistral-large \
+  --scenario restricted_search \
+  --questions 0:5 \
+  --budget cost_tight \
+  --output-dir runs/search_compare
+
+# Preview the full restricted-search slice before spending API calls.
+bash scripts/eval_model.sh --with-auto-data \
+  --scenario restricted_search \
+  --questions 0:35 \
+  --budget cost_free,cost_moderate,cost_tight \
+  --dry-run
 ```
 
-Preview planned jobs without model calls or result traces:
+## Scenarios
 
-```bash
-bash scripts/eval_model.sh --scenario restricted_search --questions 0:35 --dry-run
-```
+| Scenario | What it tests | Main selector | Data |
+|---|---|---|---|
+| `tuning` | choosing configurations under evaluation cost | `--task` | default task needs none |
+| `restricted_search` | retrieving/combining evidence under search cost | `--questions` | auto via `--with-auto-data` |
+| `evidence_audit` | auditing claims against contracts | `--questions` | official ContractNLI zip |
+
+The default `tuning` task is intentionally tiny. HPOBench/NASBench tuning is
+available through Docker because it depends on TensorFlow 1.15.
 
 ## Outputs
 
-The exact trace path is printed in every `EVALUATION RESULT` line. By default,
-traces live under:
+Each successful job prints the primary score and trace path:
+
+```text
+EVALUATION RESULT | ... | answer_perf=... | score_check=ok | trace=...
+```
+
+By default traces are under:
 
 ```text
 runs/<model>/<scenario>_<budget>/<model>_<budget>/traces/*.json
 ```
 
-`answer_perf` is the primary score:
+Primary scores:
 
-| Scenario | Primary score |
+| Scenario | `answer_perf` means |
 |---|---|
 | `tuning` | final configuration performance |
 | `restricted_search` | name-level F1 |
@@ -130,55 +197,9 @@ CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip
 </details>
 
 <details>
-<summary>Full Runs</summary>
+<summary>HPOBench / NASBench</summary>
 
-Run more questions for one model:
-
-```bash
-bash scripts/eval_model.sh --with-auto-data \
-  --model openai/gpt-4.1-nano \
-  --scenario restricted_search \
-  --questions 0:35 \
-  --budget cost_tight \
-  --max-steps 30 \
-  --max-evals 999999 \
-  --output-dir runs/search_full
-```
-
-Run all three cost regimes for one search slice:
-
-```bash
-bash scripts/eval_model.sh --with-auto-data \
-  --model openai/gpt-4.1-nano \
-  --scenario restricted_search \
-  --questions 0:35 \
-  --budget cost_free,cost_moderate,cost_tight \
-  --max-steps 30 \
-  --max-evals 999999 \
-  --output-dir runs/search_costs
-```
-
-For multiple scenarios in one command, use the lower-level batch runner:
-
-```bash
-bash scripts/run_paper_sweep.sh --with-auto-data --resume \
-  --models openai/gpt-4.1-nano,mistralai/mistral-large \
-  --scenarios tuning,restricted_search \
-  --cost-regimes cost_tight \
-  --tuning-tasks neural_network_training \
-  --search-indices 0:35 \
-  --max-steps 30 \
-  --max-evals 999999 \
-  --output-dir runs/batch_eval
-```
-
-</details>
-
-<details>
-<summary>HPOBench On macOS</summary>
-
-HPOBench / NASBench uses TensorFlow 1.15, so macOS Apple Silicon should use
-Docker:
+On macOS Apple Silicon, use Docker:
 
 ```bash
 bash scripts/run_hpobench_docker.sh --resume \
@@ -189,7 +210,7 @@ bash scripts/run_hpobench_docker.sh --resume \
   --output-dir runs/hpobench_smoke
 ```
 
-For all paper HPOBench tasks:
+All paper HPOBench tasks:
 
 ```bash
 bash scripts/run_hpobench_docker.sh --resume \
@@ -208,7 +229,7 @@ Full NASBench201 runs need Docker Desktop memory at least 16GB; 24GB is safer.
 </details>
 
 <details>
-<summary>Space</summary>
+<summary>Disk Space</summary>
 
 | Run target | Practical free space |
 |---|---:|
