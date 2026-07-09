@@ -70,24 +70,21 @@ OPENROUTER_API_KEY=dummy bash scripts/eval_model.sh \
 
 ## Data Before You Run
 
-Data setup is scenario-specific. Check this table before launching anything
-beyond the default smoke:
+There is no required manual dataset step. Data setup is scenario-specific; check
+this table before launching anything beyond the default smoke:
 
 | Run target | What to prepare first | Runner flag |
 |---|---|---|
 | Default smoke / built-in `tuning` | Nothing. It runs immediately. | none |
 | `restricted_search` | Nothing manual. Add `--with-auto-data` on the first run; it downloads Phantom Wiki data under `data/`. | `--with-auto-data` |
-| `evidence_audit` | Download the official ContractNLI zip yourself, then pass the local path. | `--contract-nli-archive /path/to/contract-nli.zip` |
+| `evidence_audit` | Nothing manual. Add `--with-auto-data` on the first run; it downloads the official ContractNLI zip and extracts the test split under `data/`. | `--with-auto-data` |
 | HPOBench / NASBench tuning | Docker is recommended for the old TensorFlow 1.15 stack. Native Linux x86_64 can also use the conda setup below; macOS/Windows should use Docker. | use `scripts/run_hpobench_docker.sh` or native Linux conda |
 
 Useful data commands:
 
 ```bash
-# Optional: prefetch all auto-downloadable data instead of using --with-auto-data.
-python scripts/download_data.py --auto-only
-
-# ContractNLI is manual; print the official link/instructions.
-python scripts/download_data.py --print-manual-links
+# Optional: prefetch all external data instead of using --with-auto-data.
+python scripts/download_data.py
 ```
 
 You do not need data for `--dry-run`; it only prints planned jobs.
@@ -128,7 +125,7 @@ Only a few flags change between runs:
 | Different OpenRouter model | none if using default `tuning` | `--model mistralai/mistral-large` |
 | Local/server model | none if using default `tuning` | `--base-url http://localhost:8000/v1 --model my-local-model` |
 | Search slice | auto via runner | `--scenario restricted_search --questions 0:5 --with-auto-data` |
-| Evidence-audit slice | ContractNLI zip | `--scenario evidence_audit --questions 0:3 --contract-nli-archive /path/to/contract-nli.zip` |
+| Evidence-audit slice | auto via runner | `--scenario evidence_audit --questions 0:3 --with-auto-data` |
 | More budget regimes | same as selected scenario | `--budget cost_free,cost_moderate,cost_tight` |
 | More items | same as selected scenario | `--questions 0:35 --max-steps 30 --max-evals 999999` |
 | Preview a run | none | `--dry-run` |
@@ -151,6 +148,13 @@ bash scripts/eval_model.sh --with-auto-data \
   --budget cost_tight \
   --output-dir runs/search_compare
 
+# Run three ContractNLI evidence-audit docs. Data is downloaded automatically.
+bash scripts/eval_model.sh --with-auto-data \
+  --model openai/gpt-4.1-nano \
+  --scenario evidence_audit \
+  --questions 0:3 \
+  --budget cost_tight
+
 # Preview the full restricted-search slice before spending API calls.
 bash scripts/eval_model.sh --with-auto-data \
   --scenario restricted_search \
@@ -165,7 +169,7 @@ bash scripts/eval_model.sh --with-auto-data \
 |---|---|---|---|
 | `tuning` | choosing configurations under evaluation cost | `--task` | default task needs none |
 | `restricted_search` | retrieving/combining evidence under search cost | `--questions` | auto via `--with-auto-data` |
-| `evidence_audit` | auditing claims against contracts | `--questions` | official ContractNLI zip |
+| `evidence_audit` | auditing claims against contracts | `--questions` | auto via `--with-auto-data` |
 
 The default `tuning` task is intentionally tiny. HPOBench/NASBench tuning uses
 an old TensorFlow 1.15 stack, so Docker is the recommended path. Native Linux
@@ -206,26 +210,25 @@ Evidence audit also writes additional metrics:
 <details>
 <summary>Data Notes</summary>
 
-Auto-downloadable data can be prepared explicitly:
+All external datasets can be prepared explicitly:
 
 ```bash
-python scripts/download_data.py --auto-only
+python scripts/download_data.py
 ```
 
-ContractNLI is manual. ExpGym does not mirror or auto-download the archive.
+ContractNLI is downloaded from the official GitHub-hosted zip:
 
 ```bash
-python scripts/download_data.py --print-manual-links
-python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
+https://github.com/stanfordnlp/contract-nli/blob/gh-pages/resources/contract-nli.zip
 ```
 
-You can also put this in `.env`:
+For offline or mirrored environments, you can still provide a local zip:
 
 ```bash
 CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip
 ```
 
-The runner also accepts the path directly:
+or:
 
 ```bash
 bash scripts/eval_model.sh \
@@ -272,7 +275,7 @@ Full NASBench201 runs need at least 16GB Docker memory; 24GB is safer.
 On native Linux x86_64, Docker is optional. You can use conda instead:
 
 ```bash
-python scripts/download_data.py --auto-only
+python scripts/download_data.py
 bash scripts/recreate_expgym_env.sh
 conda run -n expgym-hpobench python scripts/run_paper_sweep.py --resume \
   --models openai/gpt-4.1-nano \

@@ -24,8 +24,8 @@ usage() {
 Usage: bash scripts/run_paper_sweep.sh [wrapper options] [runner options]
 
 Wrapper options:
-  --with-auto-data              Install data deps and fetch Phantom Wiki + HPOBench source.
-  --contract-nli-archive PATH   Extract ContractNLI test split from the manually downloaded zip.
+  --with-auto-data              Install data deps and fetch Phantom Wiki, HPOBench source, and ContractNLI.
+  --contract-nli-archive PATH   Optional offline ContractNLI zip override.
   --no-venv                     Use the active Python instead of .venv-expgym.
   --venv PATH                   Override the venv path.
   --python PATH                 Python executable used to create the venv.
@@ -89,11 +89,11 @@ echo "[run] installing light Python dependencies"
 "$PY" -m pip install --disable-pip-version-check --quiet -r requirements.txt
 
 if [[ "$WITH_AUTO_DATA" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
-  echo "[run] preparing auto-downloadable datasets"
+  echo "[run] preparing datasets"
   "$PY" -m pip install --disable-pip-version-check --quiet -r requirements-data.txt
-  "$PY" scripts/download_data.py --auto-only
+  "$PY" scripts/download_data.py
 elif [[ "$WITH_AUTO_DATA" -eq 1 ]]; then
-  echo "[run] dry-run: skipping auto-downloadable dataset preparation"
+  echo "[run] dry-run: skipping dataset preparation"
 fi
 
 if [[ -n "$CONTRACT_NLI_ARCHIVE" && "$DRY_RUN" -eq 0 ]]; then

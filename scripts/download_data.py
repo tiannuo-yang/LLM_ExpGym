@@ -3,17 +3,15 @@
 Usage:
     python scripts/download_data.py            # download everything that is missing
     python scripts/download_data.py --check    # only verify the layout, do not fetch
-    python scripts/download_data.py --auto-only
-                                              # skip manually licensed ContractNLI
-    python scripts/download_data.py --print-manual-links
-                                              # show official manual data links
+    python scripts/download_data.py --print-data-links
+                                              # show official data source links
     python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip
-                                              # extract ContractNLI after accepting terms
+                                              # optional offline ContractNLI override
 
 Three datasets are needed for the full experiment sweep:
     1. Phantom Wiki    (auto-download from HuggingFace)
     2. HPOBench code   (auto-download from GitHub)
-    3. ContractNLI     (manual terms, scripted extraction from local zip)
+    3. ContractNLI     (auto-download from the official GitHub-hosted zip)
 
 The script reads ``EXPGYM_DATA_ROOT`` and ``PHANTOM_WIKI_ROOT`` from the
 environment if set; otherwise it places the data under ``./data/`` relative
@@ -28,6 +26,8 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import zipfile
 from typing import Callable, List, Tuple
 
@@ -46,8 +46,15 @@ HPOBENCH_GIT_URL = "https://github.com/automl/HPOBench.git"
 # Override with HPOBENCH_GIT_REF=<sha or tag> if you want a different cut.
 HPOBENCH_GIT_REF_DEFAULT = "master"
 
-CONTRACT_NLI_PAGE = "https://stanfordnlp.github.io/contract-nli/"
-# Only test_segments.json needs the manual Stanford download.
+CONTRACT_NLI_PAGE = (
+    "https://github.com/stanfordnlp/contract-nli/blob/gh-pages/"
+    "resources/contract-nli.zip"
+)
+CONTRACT_NLI_ZIP_URL = (
+    "https://raw.githubusercontent.com/stanfordnlp/contract-nli/"
+    "gh-pages/resources/contract-nli.zip"
+)
+# Only test_segments.json needs the Stanford download.
 # test_nda_span_dims.json (the hints file) ships with this repo at
 # data/contract-nli/test_nda_span_dims.json and is loaded from there
 # automatically; the script does not check for it here.
@@ -65,20 +72,18 @@ CONTRACT_NLI_ARCHIVE_MEMBERS = [
 ]
 
 
-def contract_nli_manual_steps() -> str:
+def contract_nli_data_links() -> str:
     target_dir = os.path.join(_data_root(), "contract-nli")
     return (
-        "ContractNLI manual download step:\n"
-        f"  Official page: {CONTRACT_NLI_PAGE}\n"
-        "  Download the dataset archive after reviewing/accepting the upstream terms.\n"
-        "  Then either set this in .env:\n"
-        "    CONTRACT_NLI_ARCHIVE=/absolute/path/to/contract-nli.zip\n"
-        "  and rerun the wrapper, or run:\n"
+        "ContractNLI data source:\n"
+        f"  Official GitHub page: {CONTRACT_NLI_PAGE}\n"
+        f"  Direct zip URL: {CONTRACT_NLI_ZIP_URL}\n"
+        "  Normal setup is automatic:\n"
+        "    python scripts/download_data.py\n"
+        "  Optional offline override:\n"
         "    python scripts/download_data.py --contract-nli-archive /absolute/path/to/contract-nli.zip\n"
         f"  ExpGym will extract only the test split to: {target_dir}/test_segments.json\n"
-        "  We do not mirror or auto-download this archive from ExpGym."
     )
-
 
 def _data_root() -> str:
     return os.environ.get("EXPGYM_DATA_ROOT", os.path.join(REPO_ROOT, "data"))
@@ -192,7 +197,7 @@ def fetch_hpobench(check_only: bool) -> Tuple[bool, str]:
 
 
 def fetch_contract_nli(check_only: bool) -> Tuple[bool, str]:
-    """ContractNLI requires manual download (Stanford's NDA-licensed release)."""
+    """Download and extract ContractNLI from the official GitHub-hosted zip."""
     target_dir = os.path.join(_data_root(), "contract-nli")
     have_all = all(
         os.path.isfile(os.path.join(target_dir, f)) for f in CONTRACT_NLI_FILES
@@ -211,20 +216,48 @@ def fetch_contract_nli(check_only: bool) -> Tuple[bool, str]:
         f for f in CONTRACT_NLI_FILES
         if not os.path.isfile(os.path.join(target_dir, f))
     ]
-    msg = (
-        f"ContractNLI MISSING (manual step).\n"
-        f"  Why manual: the ContractNLI release page requires accepting their "
-        f"data-use terms, which can't be auto-clicked.\n"
-        f"  Steps:\n"
-        f"    1. Open {CONTRACT_NLI_PAGE} and download the dataset archive.\n"
-        f"    2. Either set CONTRACT_NLI_ARCHIVE=/path/to/contract-nli.zip in .env and rerun the wrapper,\n"
-        f"       or run:\n"
-        f"         python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip\n"
-        f"    3. Alternatively, copy at least these files into {target_dir}/:\n"
-        + "".join(f"         - {f}\n" for f in CONTRACT_NLI_FILES)
-        + f"  Currently missing: {', '.join(missing)}"
+    if check_only:
+        msg = (
+            f"ContractNLI MISSING.\n"
+            f"  expected: {target_dir}/test_segments.json\n"
+            f"  fix: run `python scripts/download_data.py` (no --check), or use "
+            f"`--contract-nli-archive /path/to/contract-nli.zip` for an offline zip.\n"
+            f"  source: {CONTRACT_NLI_PAGE}\n"
+            f"  Currently missing: {', '.join(missing)}"
+        )
+        return False, msg
+
+    archive_path = ""
+    try:
+        archive_path = _download_contract_nli_archive(target_dir)
+        ok, message = _extract_contract_nli_archive(archive_path, target_dir)
+        if ok:
+            return True, f"ContractNLI downloaded from {CONTRACT_NLI_ZIP_URL}; {message}"
+        return False, message
+    except RuntimeError as exc:
+        return False, str(exc)
+    finally:
+        if archive_path:
+            try:
+                os.remove(archive_path)
+            except OSError:
+                pass
+
+
+def _download_contract_nli_archive(target_dir: str) -> str:
+    os.makedirs(target_dir, exist_ok=True)
+    archive_path = os.path.join(target_dir, "contract-nli.zip.download")
+    request = urllib.request.Request(
+        CONTRACT_NLI_ZIP_URL,
+        headers={"User-Agent": "ExpGym data downloader"},
     )
-    return False, msg
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            with open(archive_path, "wb") as handle:
+                shutil.copyfileobj(response, handle)
+    except (urllib.error.URLError, OSError) as exc:
+        raise RuntimeError(f"ContractNLI download failed: {exc}") from exc
+    return archive_path
 
 
 def _extract_contract_nli_archive(archive: str, target_dir: str) -> Tuple[bool, str]:
@@ -303,22 +336,29 @@ def main() -> int:
     parser.add_argument(
         "--auto-only",
         action="store_true",
-        help="Only prepare auto-downloadable datasets; skip manual ContractNLI.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--contract-nli-archive",
         default=None,
-        help="Path to the manually downloaded ContractNLI zip archive.",
+        help="Optional path to a local ContractNLI zip archive.",
+    )
+    parser.add_argument(
+        "--print-data-links",
+        dest="print_data_links",
+        action="store_true",
+        help="Print official data source links.",
     )
     parser.add_argument(
         "--print-manual-links",
+        dest="print_data_links",
         action="store_true",
-        help="Print official links/instructions for datasets that require manual steps.",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
-    if args.print_manual_links:
-        print(contract_nli_manual_steps())
+    if args.print_data_links:
+        print(contract_nli_data_links())
         return 0
 
     if args.contract_nli_archive:
@@ -329,14 +369,12 @@ def main() -> int:
     print(f"HPOBench checkout  = {_hpobench_dir()}")
     print()
 
-    steps = STEPS
     result_label = "all datasets"
     if args.auto_only:
-        steps = [(name, step) for name, step in STEPS if name != "ContractNLI"]
-        result_label = "all auto-downloadable datasets"
+        result_label = "all datasets"
 
     failures: List[str] = []
-    for name, step in steps:
+    for name, step in STEPS:
         print(f"[{name}] ...")
         ok, message = step(args.check)
         prefix = "  OK  " if ok else "  ERR "

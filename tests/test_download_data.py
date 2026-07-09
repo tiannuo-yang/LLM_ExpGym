@@ -59,16 +59,16 @@ class CheckOnlyNoNetworkTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("MISSING", msg)
         self.assertIn(download_data.CONTRACT_NLI_PAGE, msg)
-        self.assertIn("CONTRACT_NLI_ARCHIVE", msg)
+        self.assertIn("--contract-nli-archive", msg)
         # Both expected files must appear in the instructions.
         for fname in download_data.CONTRACT_NLI_FILES:
             self.assertIn(fname, msg)
 
-    def test_contract_nli_manual_steps_use_official_page(self):
-        msg = download_data.contract_nli_manual_steps()
+    def test_contract_nli_data_links_use_official_source(self):
+        msg = download_data.contract_nli_data_links()
         self.assertIn(download_data.CONTRACT_NLI_PAGE, msg)
-        self.assertIn("CONTRACT_NLI_ARCHIVE", msg)
-        self.assertIn("do not mirror", msg)
+        self.assertIn(download_data.CONTRACT_NLI_ZIP_URL, msg)
+        self.assertIn("--contract-nli-archive", msg)
 
     def test_phantom_wiki_check_succeeds_when_dirs_exist(self):
         snap = download_data._phantom_wiki_snapshot_dir()
@@ -116,6 +116,42 @@ class CheckOnlyNoNetworkTest(unittest.TestCase):
             extracted = json.load(handle)
         self.assertEqual(extracted["documents"][0]["segments"][0]["text"], "alpha")
         self.assertEqual(extracted["documents"][0]["segments"][1]["span_index"], 1)
+
+    def test_contract_nli_auto_download_extracts_public_zip(self):
+        payload = {
+            "documents": [
+                {
+                    "id": 1,
+                    "text": "alpha beta",
+                    "spans": [[0, 5], [6, 10]],
+                    "annotation_sets": [{"annotations": {}}],
+                }
+            ],
+            "labels": {},
+        }
+
+        def fake_download(target_dir):
+            archive = os.path.join(target_dir, "contract-nli.zip")
+            os.makedirs(target_dir, exist_ok=True)
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("contract-nli/test.json", json.dumps(payload))
+            return archive
+
+        old_download = download_data._download_contract_nli_archive
+        download_data._download_contract_nli_archive = fake_download
+        try:
+            ok, msg = download_data.fetch_contract_nli(check_only=False)
+        finally:
+            download_data._download_contract_nli_archive = old_download
+
+        self.assertTrue(ok, msg)
+        self.assertIn("downloaded", msg)
+        target = os.path.join(
+            os.environ["EXPGYM_DATA_ROOT"], "contract-nli", "test_segments.json"
+        )
+        with open(target, encoding="utf-8") as handle:
+            extracted = json.load(handle)
+        self.assertEqual(extracted["documents"][0]["segments"][0]["text"], "alpha")
 
 
 class StepsRegistrationTest(unittest.TestCase):

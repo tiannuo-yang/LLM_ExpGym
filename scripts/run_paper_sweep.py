@@ -498,7 +498,7 @@ def _preflight(args: argparse.Namespace, jobs: Sequence[Job]) -> None:
         hpobench_setup = REPO_ROOT / "data" / "hpo_tuning" / "HPOBench" / "setup.py"
         if not hpobench_setup.exists():
             errors.append(
-                "HPOBench source is missing. Run: python scripts/download_data.py --auto-only"
+                "HPOBench source is missing. Run: python scripts/download_data.py"
             )
         try:
             import ConfigSpace  # noqa: F401
@@ -519,7 +519,7 @@ def _preflight(args: argparse.Namespace, jobs: Sequence[Job]) -> None:
 
         if not Path(QA_DIR).is_dir() or not Path(CORPUS_DIR).is_dir():
             errors.append(
-                "Phantom Wiki is missing. Run: python scripts/download_data.py --auto-only"
+                "Phantom Wiki is missing. Run: python scripts/download_data.py"
             )
         try:
             import pyarrow  # noqa: F401
@@ -530,14 +530,12 @@ def _preflight(args: argparse.Namespace, jobs: Sequence[Job]) -> None:
             )
     if any(j.scenario == "evidence_audit" for j in jobs):
         from expgym.task_evidence_audit import EVIDENCE_PATH, HINTS_PATH
-        from scripts.download_data import CONTRACT_NLI_PAGE
 
         if not Path(EVIDENCE_PATH).is_file() or not Path(HINTS_PATH).is_file():
             errors.append(
-                "ContractNLI segments are missing. ExpGym does not mirror this archive; "
-                f"download it from the official page after reviewing the terms: {CONTRACT_NLI_PAGE}\n"
-                "  Then set CONTRACT_NLI_ARCHIVE=/path/to/contract-nli.zip in .env, or run:\n"
-                "  python scripts/download_data.py --contract-nli-archive /path/to/contract-nli.zip"
+                "ContractNLI segments are missing. Run:\n"
+                "  python scripts/download_data.py\n"
+                "or rerun the wrapper with --with-auto-data."
             )
     if errors:
         raise SystemExit("Preflight failed:\n- " + "\n- ".join(errors))

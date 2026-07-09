@@ -20,9 +20,8 @@ Runs the real OpenRouter ExpGym smoke:
   4. run a real OpenRouter ReAct tuning trace end to end
 
 Options:
-  --with-auto-data  Also install data dependencies and fetch auto-downloadable
-                    datasets: Phantom Wiki and HPOBench source. ContractNLI is
-                    skipped because its license flow requires manual download.
+  --with-auto-data  Also install data dependencies and fetch external datasets:
+                    Phantom Wiki, HPOBench source, and ContractNLI.
   --model MODEL     OpenRouter model for the real smoke
                     (default: EXPGYM_OPENROUTER_MODEL or openai/gpt-4.1-nano).
   --api-key-file PATH
@@ -90,7 +89,7 @@ fi
 
 if [[ "$WITH_AUTO_DATA" -eq 1 ]]; then
   "$PY" -m pip install -r requirements-data.txt
-  "$PY" scripts/download_data.py --auto-only
+  "$PY" scripts/download_data.py
 fi
 
 echo "[smoke] running unit tests"

@@ -39,7 +39,7 @@ Evaluate one model and write ExpGym traces.
 Data:
   default tuning smoke needs no data.
   restricted_search needs --with-auto-data on first run.
-  evidence_audit needs --contract-nli-archive /path/to/contract-nli.zip.
+  evidence_audit needs --with-auto-data on first run.
 
 Common options:
   --model MODEL                 OpenRouter/OpenAI-compatible model id.
@@ -53,8 +53,8 @@ Common options:
   --temperature FLOAT           Sampling temperature.
   --limit N                     Run only the first N planned jobs.
   --output-dir DIR              Trace output directory.
-  --with-auto-data              Fetch Phantom Wiki + HPOBench source first.
-  --contract-nli-archive PATH   Extract manually downloaded ContractNLI zip.
+  --with-auto-data              Fetch all external datasets first.
+  --contract-nli-archive PATH   Optional offline ContractNLI zip override.
   --max-steps N                 ReAct step limit.
   --max-evals N                 Tool call limit.
   --dry-run                     Print planned jobs only; no model calls/traces.
