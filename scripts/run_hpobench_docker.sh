@@ -30,8 +30,13 @@ The container stores HPOBench data under:
   data/hpo_tuning/hpobench_data/
   data/hpo_tuning/hpobench_cache/
 
-Full NASBench201 runs need Docker Desktop memory >= 16 GiB. ParamNet-only and
-NASBench101-only runs need less.
+Full NASBench201 runs need >= 16 GiB available to Docker containers.
+ParamNet-only and NASBench101-only runs need less.
+
+Docker setup:
+  Linux: install/start Docker Engine.
+  macOS: install/start Docker Desktop.
+  Windows: install/start Docker Desktop with WSL2, then run this script from WSL.
 EOF
 }
 
@@ -80,9 +85,10 @@ if [[ -z "$DOCKER_BIN" ]]; then
   cat >&2 <<'EOF'
 Docker is not installed or not on PATH.
 
-On macOS, install Docker Desktop, start it once, then rerun this script.
-Apple Silicon is supported through linux/amd64 emulation, but full NASBench
-runs will be slower than native Linux/x86_64.
+Install/start Docker Engine on Linux, Docker Desktop on macOS, or Docker Desktop
+with WSL2 on Windows. On Windows, rerun this script from the WSL shell.
+Apple Silicon and Windows-on-Arm are supported through linux/amd64 emulation,
+but full NASBench runs will be slower than native Linux/x86_64.
 EOF
   exit 1
 fi
@@ -103,11 +109,11 @@ if [[ "$needs_nasbench201" -eq 1 && "${EXPGYM_HPOBENCH_ALLOW_LOW_MEMORY:-0}" != 
   min_mem=$((16 * 1024 * 1024 * 1024))
   if [[ "$mem_total" =~ ^[0-9]+$ && "$mem_total" -lt "$min_mem" ]]; then
     cat >&2 <<EOF
-Docker Desktop has less than 16 GiB available to containers (${mem_total} bytes).
+Docker has less than 16 GiB available to containers (${mem_total} bytes).
 NASBench201 can OOM below this limit.
 
-Increase Docker Desktop memory in Settings > Resources > Advanced, then restart
-Docker Desktop and rerun this command. On macOS this is stored in:
+On Docker Desktop, increase memory in Settings > Resources > Advanced, then
+restart Docker Desktop and rerun this command. On macOS this is stored in:
   ~/Library/Group Containers/group.com.docker/settings-store.json
 
 Set EXPGYM_HPOBENCH_ALLOW_LOW_MEMORY=1 to bypass this preflight.

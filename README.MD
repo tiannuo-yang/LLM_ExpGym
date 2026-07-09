@@ -78,7 +78,7 @@ beyond the default smoke:
 | Default smoke / built-in `tuning` | Nothing. It runs immediately. | none |
 | `restricted_search` | Nothing manual. Add `--with-auto-data` on the first run; it downloads Phantom Wiki data under `data/`. | `--with-auto-data` |
 | `evidence_audit` | Download the official ContractNLI zip yourself, then pass the local path. | `--contract-nli-archive /path/to/contract-nli.zip` |
-| HPOBench / NASBench tuning | Install/start Docker Desktop on macOS; full NASBench201 needs >=16GB Docker memory. | use `scripts/run_hpobench_docker.sh` |
+| HPOBench / NASBench tuning | Use Docker: Docker Engine on Linux, Docker Desktop on macOS, or Docker Desktop + WSL2 on Windows. Full NASBench201 needs >=16GB Docker memory. | use `scripts/run_hpobench_docker.sh` |
 
 Useful data commands:
 
@@ -228,9 +228,12 @@ bash scripts/eval_model.sh \
 </details>
 
 <details>
-<summary>HPOBench / NASBench</summary>
+<summary>HPOBench / NASBench With Docker</summary>
 
-On macOS Apple Silicon, use Docker:
+Docker is the recommended cross-platform path for HPOBench/NASBench because it
+pins the old TensorFlow 1.15 stack. Use Docker Engine on Linux, Docker Desktop
+on macOS, or Docker Desktop with WSL2 on Windows. Run the same command from a
+bash shell; on Windows, use the WSL2 shell inside the cloned repo.
 
 ```bash
 bash scripts/run_hpobench_docker.sh --resume \
@@ -255,7 +258,7 @@ bash scripts/run_hpobench_docker.sh --resume \
   --output-dir runs/hpobench_all
 ```
 
-Full NASBench201 runs need Docker Desktop memory at least 16GB; 24GB is safer.
+Full NASBench201 runs need at least 16GB Docker memory; 24GB is safer.
 
 </details>
 
