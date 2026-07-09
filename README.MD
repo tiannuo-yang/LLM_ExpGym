@@ -78,7 +78,7 @@ beyond the default smoke:
 | Default smoke / built-in `tuning` | Nothing. It runs immediately. | none |
 | `restricted_search` | Nothing manual. Add `--with-auto-data` on the first run; it downloads Phantom Wiki data under `data/`. | `--with-auto-data` |
 | `evidence_audit` | Download the official ContractNLI zip yourself, then pass the local path. | `--contract-nli-archive /path/to/contract-nli.zip` |
-| HPOBench / NASBench tuning | Use Docker: Docker Engine on Linux, Docker Desktop on macOS, or Docker Desktop + WSL2 on Windows. Full NASBench201 needs >=16GB Docker memory. | use `scripts/run_hpobench_docker.sh` |
+| HPOBench / NASBench tuning | Docker is recommended for the old TensorFlow 1.15 stack. Native Linux x86_64 can also use the conda setup below; macOS/Windows should use Docker. | use `scripts/run_hpobench_docker.sh` or native Linux conda |
 
 Useful data commands:
 
@@ -167,8 +167,9 @@ bash scripts/eval_model.sh --with-auto-data \
 | `restricted_search` | retrieving/combining evidence under search cost | `--questions` | auto via `--with-auto-data` |
 | `evidence_audit` | auditing claims against contracts | `--questions` | official ContractNLI zip |
 
-The default `tuning` task is intentionally tiny. HPOBench/NASBench tuning is
-available through Docker because it depends on TensorFlow 1.15.
+The default `tuning` task is intentionally tiny. HPOBench/NASBench tuning uses
+an old TensorFlow 1.15 stack, so Docker is the recommended path. Native Linux
+x86_64 can also run it without Docker using the conda setup below.
 
 ## Outputs
 
@@ -228,12 +229,12 @@ bash scripts/eval_model.sh \
 </details>
 
 <details>
-<summary>HPOBench / NASBench With Docker</summary>
+<summary>HPOBench / NASBench</summary>
 
-Docker is the recommended cross-platform path for HPOBench/NASBench because it
-pins the old TensorFlow 1.15 stack. Use Docker Engine on Linux, Docker Desktop
-on macOS, or Docker Desktop with WSL2 on Windows. Run the same command from a
-bash shell; on Windows, use the WSL2 shell inside the cloned repo.
+Docker is the recommended cross-platform path because it pins the old
+TensorFlow 1.15 stack. Use Docker Engine on Linux, Docker Desktop on macOS, or
+Docker Desktop with WSL2 on Windows. Run the same command from a bash shell; on
+Windows, use the WSL2 shell inside the cloned repo.
 
 ```bash
 bash scripts/run_hpobench_docker.sh --resume \
@@ -259,6 +260,19 @@ bash scripts/run_hpobench_docker.sh --resume \
 ```
 
 Full NASBench201 runs need at least 16GB Docker memory; 24GB is safer.
+
+On native Linux x86_64, Docker is optional. You can use conda instead:
+
+```bash
+python scripts/download_data.py --auto-only
+bash scripts/recreate_expgym_env.sh
+conda run -n expgym-hpobench python scripts/run_paper_sweep.py --resume \
+  --models openai/gpt-4.1-nano \
+  --scenarios tuning \
+  --tuning-tasks hpobench:paramnet:adult:steps \
+  --cost-regimes cost_tight \
+  --output-dir runs/hpobench_native
+```
 
 </details>
 
