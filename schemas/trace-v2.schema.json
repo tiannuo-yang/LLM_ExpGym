@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://expgym.local/schemas/trace-v2.schema.json",
+  "title": "ExpGym Trace v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "trace_id",
+    "provenance",
+    "run",
+    "task",
+    "messages",
+    "llm_calls",
+    "tool_calls",
+    "outcome",
+    "timing"
+  ],
+  "properties": {
+    "schema": {
+      "const": {"name": "expgym.trace", "version": "2.0.0"}
+    },
+    "trace_id": {"type": "string", "minLength": 1},
+    "provenance": {"type": "object"},
+    "run": {"type": "object"},
+    "task": {"type": "object"},
+    "messages": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/message"}
+    },
+    "llm_calls": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/llmCall"}
+    },
+    "tool_calls": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/toolCall"}
+    },
+    "outcome": {
+      "type": "object",
+      "required": [
+        "status",
+        "termination_reason",
+        "answer_source",
+        "answer_message_id",
+        "score",
+        "validation"
+      ]
+    },
+    "timing": {
+      "type": "object",
+      "required": ["wall_time_seconds"],
+      "properties": {
+        "wall_time_seconds": {"type": ["number", "null"], "minimum": 0}
+      }
+    }
+  },
+  "$defs": {
+    "message": {
+      "type": "object",
+      "required": ["id", "role"],
+      "properties": {
+        "id": {"type": "string"},
+        "role": {"type": "string"},
+        "content": {"type": "string"},
+        "content_ref": {
+          "type": "object",
+          "required": ["kind", "tool_call_id"],
+          "properties": {
+            "kind": {"const": "tool_observation"},
+            "tool_call_id": {"type": "string"}
+          }
+        },
+        "request_only": {"type": "boolean"}
+      },
+      "oneOf": [
+        {"required": ["content"], "not": {"required": ["content_ref"]}},
+        {"required": ["content_ref"], "not": {"required": ["content"]}}
+      ]
+    },
+    "llmCall": {
+      "type": "object",
+      "required": [
+        "id",
+        "input_message_ids",
+        "output_message_id",
+        "forced",
+        "latency_seconds",
+        "request_attempts",
+        "usage"
+      ],
+      "properties": {
+        "id": {"type": "string"},
+        "input_message_ids": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "output_message_id": {"type": ["string", "null"]},
+        "forced": {"type": "boolean"},
+        "latency_seconds": {"type": "number", "minimum": 0},
+        "request_attempts": {"type": "integer", "minimum": 1},
+        "usage": {
+          "type": "object",
+          "required": ["input_tokens", "output_tokens", "cache"]
+        },
+        "raw_output": {"type": "string"}
+      }
+    },
+    "toolCall": {
+      "type": "object",
+      "required": [
+        "id",
+        "request_message_id",
+        "result_message_id",
+        "name",
+        "arguments",
+        "performance",
+        "simulated_cost_seconds",
+        "visible_to_model"
+      ],
+      "properties": {
+        "id": {"type": "string"},
+        "request_message_id": {"type": "string"},
+        "result_message_id": {"type": ["string", "null"]},
+        "name": {"type": "string"},
+        "arguments": {},
+        "performance": {"type": ["number", "null"]},
+        "simulated_cost_seconds": {"type": "number", "minimum": 0},
+        "visible_to_model": {"type": "boolean"},
+        "observation": {"type": "string"},
+        "withheld_result": {},
+        "structured_result": {}
+      }
+    }
+  }
+}

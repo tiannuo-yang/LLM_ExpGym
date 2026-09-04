@@ -2,6 +2,8 @@
 
 Usage:
     python scripts/download_data.py            # download everything that is missing
+    python scripts/download_data.py --only phantom-wiki
+                                              # download only Search data
     python scripts/download_data.py --check    # only verify the layout, do not fetch
     python scripts/download_data.py --print-data-links
                                               # show official data source links
@@ -325,6 +327,24 @@ STEPS: List[Tuple[str, Callable[[bool], Tuple[bool, str]]]] = [
     ("ContractNLI",   fetch_contract_nli),
 ]
 
+STEP_ALIASES = {
+    "phantom-wiki": "Phantom Wiki",
+    "hpobench": "HPOBench",
+    "contract-nli": "ContractNLI",
+}
+
+
+def _select_steps(value: str) -> List[Tuple[str, Callable[[bool], Tuple[bool, str]]]]:
+    requested = [part.strip().lower() for part in value.split(",") if part.strip()]
+    if not requested or requested == ["all"]:
+        return STEPS
+    unknown = [name for name in requested if name not in STEP_ALIASES]
+    if unknown:
+        choices = ", ".join([*STEP_ALIASES, "all"])
+        raise ValueError(f"unknown dataset(s): {', '.join(unknown)}; choose from {choices}")
+    selected_names = {STEP_ALIASES[name] for name in requested}
+    return [step for step in STEPS if step[0] in selected_names]
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -332,6 +352,15 @@ def main() -> int:
         "--check",
         action="store_true",
         help="Only verify the layout; do not download anything.",
+    )
+    parser.add_argument(
+        "--only",
+        default="all",
+        metavar="DATASETS",
+        help=(
+            "Comma-separated subset: phantom-wiki, hpobench, contract-nli, "
+            "or all (default)."
+        ),
     )
     parser.add_argument(
         "--auto-only",
@@ -369,12 +398,18 @@ def main() -> int:
     print(f"HPOBench checkout  = {_hpobench_dir()}")
     print()
 
-    result_label = "all datasets"
-    if args.auto_only:
-        result_label = "all datasets"
+    try:
+        selected_steps = _select_steps(args.only)
+    except ValueError as exc:
+        parser.error(str(exc))
+    result_label = (
+        "all datasets"
+        if len(selected_steps) == len(STEPS)
+        else ", ".join(name for name, _ in selected_steps)
+    )
 
     failures: List[str] = []
-    for name, step in STEPS:
+    for name, step in selected_steps:
         print(f"[{name}] ...")
         ok, message = step(args.check)
         prefix = "  OK  " if ok else "  ERR "

@@ -6,11 +6,12 @@ flat-string prompts, so chat-tuned LLMs can track their own prior outputs.
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 import logging
 import time
 from dataclasses import dataclass
 import json
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger("expgym")
 
@@ -25,6 +26,9 @@ class LLMOutput:
     text: str
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
+    cached_prompt_tokens: Optional[int] = None
+    cache_write_prompt_tokens: Optional[int] = None
+    request_attempts: int = 1
 
 
 class LLMBackend:
@@ -49,6 +53,7 @@ class LoopResult:
     eval_time: float
     prompt_tokens: int
     completion_tokens: int
+    cached_prompt_tokens: int
     instruction_tokens: int
     messages: List[Dict[str, str]]
     tool_records: List[Tuple[str, str, Optional[object]]]
@@ -151,8 +156,17 @@ def run_react_loop(
     max_context_tokens: Optional[int] = None,
     observation_augmenter: Optional[Callable[[str], str]] = None,
     agent_clock: object = None,
+    pre_tool_hook: Optional[Callable[[str, str], None]] = None,
+    llm_lock: Optional[Any] = None,
+    capture_trace_v2: bool = False,
 ) -> Dict[str, object]:
-    """Execute a ReAct loop using proper multi-turn chat messages."""
+    """Execute a ReAct loop using proper multi-turn chat messages.
+
+    ``observation_augmenter``, ``pre_tool_hook``, and ``llm_lock`` form the
+    PoolAct integration boundary.  When a lock is supplied, graph injection,
+    LLM reasoning, action parsing, and pending-claim recording happen in one
+    critical section; tool execution happens after the lock is released.
+    """
 
     # --- Build initial message history ---
     messages: List[Message] = []
@@ -178,11 +192,71 @@ def run_react_loop(
     eval_time = 0.0
     prompt_tokens = 0
     completion_tokens = 0
+    cached_prompt_tokens = 0
     instruction_tokens = 0
 
     abort_reason: Optional[str] = None
+    answer_source: Optional[str] = None
     eval_records: List[Tuple[str, Optional[str], float, float]] = []
     tool_records: List[Tuple[str, str, Optional[object]]] = []
+    llm_call_traces: List[Dict[str, object]] = []
+    tool_call_traces: List[Dict[str, object]] = []
+
+    def start_llm_call_trace(
+        input_messages: List[Message],
+        output: LLMOutput,
+        latency_seconds: float,
+        *,
+        forced: bool,
+    ) -> Dict[str, object]:
+        if not capture_trace_v2:
+            return {}
+        return {
+            "input_messages": copy.deepcopy(input_messages),
+            "output_message_index": None,
+            "raw_output": output.text.strip(),
+            "forced": forced,
+            "latency_seconds": latency_seconds,
+            "request_attempts": output.request_attempts,
+            "usage": {
+                "input_tokens": output.prompt_tokens,
+                "output_tokens": output.completion_tokens,
+                "cache": {
+                    "reported": (
+                        output.cached_prompt_tokens is not None
+                        or output.cache_write_prompt_tokens is not None
+                    ),
+                    "read_tokens": output.cached_prompt_tokens,
+                    "write_tokens": output.cache_write_prompt_tokens,
+                },
+            },
+        }
+
+    def finish_llm_call_trace(
+        record: Dict[str, object],
+        output_message_index: Optional[int],
+    ) -> None:
+        if not capture_trace_v2:
+            return
+        record["output_message_index"] = output_message_index
+        if output_message_index is not None:
+            stored = messages[output_message_index]["content"]
+            if record["raw_output"] == stored:
+                record.pop("raw_output", None)
+        llm_call_traces.append(record)
+
+    def augment_latest_user_message() -> None:
+        """Inject the latest shared-state snapshot exactly once."""
+        nonlocal _prev_augmented_idx
+        if observation_augmenter is None or len(messages) < 2:
+            return
+        last_index = len(messages) - 1
+        last_user = messages[last_index]
+        if last_user.get("role") != "user" or last_index == _prev_augmented_idx:
+            return
+        augmented = observation_augmenter(last_user["content"])
+        messages[last_index] = {**last_user, "content": augmented}
+        _prev_augmented_idx = last_index
 
     # Log system prompt and context for trace output
     steps.append("System Prompt:")
@@ -193,67 +267,80 @@ def run_react_loop(
 
     effective_max_steps = max_steps if max_steps is not None else 999999
     for _ in range(effective_max_steps):
-        # Inject graph/diversity context into the latest user observation.
-        # Each observation permanently keeps its graph snapshot so traces
-        # honestly record what the LLM saw at every step.
-        if observation_augmenter is not None and len(messages) >= 3:
-            last_user = messages[-1]
-            if last_user.get("role") == "user" and (len(messages) - 1) != _prev_augmented_idx:
-                augmented = observation_augmenter(last_user["content"])
-                messages[-1] = {**last_user, "content": augmented}
-                _prev_augmented_idx = len(messages) - 1
+        # PoolAct serializes exactly this section.  The next agent observes
+        # both completed graph updates and the claim recorded below.
+        lock_context = llm_lock if llm_lock is not None else nullcontext()
+        with lock_context:
+            augment_latest_user_message()
 
-        # Build send_messages for the LLM call (may be trimmed).
-        if max_context_tokens is not None:
-            send_messages = _trim_messages(messages, max_context_tokens)
-        else:
-            send_messages = list(messages)
-        start = time.perf_counter()
-        llm_output = llm.generate(send_messages)
-        api_elapsed = time.perf_counter() - start
-        llm_time += api_elapsed
-        api_calls += 1
-        if llm_output.prompt_tokens is not None:
-            prompt_tokens += llm_output.prompt_tokens
-            if api_calls == 1:
-                instruction_tokens = llm_output.prompt_tokens
-        if llm_output.completion_tokens is not None:
-            completion_tokens += llm_output.completion_tokens
-        output = llm_output.text.strip()
-        if not output:
-            aborted = True
-            abort_reason = "LLM returned empty response"
-            break
+            # Build send_messages for the LLM call (may be trimmed).
+            if max_context_tokens is not None:
+                send_messages = _trim_messages(messages, max_context_tokens)
+            else:
+                send_messages = list(messages)
+            start = time.perf_counter()
+            llm_output = llm.generate(send_messages)
+            api_elapsed = time.perf_counter() - start
+            call_trace = start_llm_call_trace(
+                send_messages, llm_output, api_elapsed, forced=False
+            )
+            llm_time += api_elapsed
+            api_calls += 1
+            if llm_output.prompt_tokens is not None:
+                prompt_tokens += llm_output.prompt_tokens
+                if api_calls == 1:
+                    instruction_tokens = llm_output.prompt_tokens
+            if llm_output.completion_tokens is not None:
+                completion_tokens += llm_output.completion_tokens
+            if llm_output.cached_prompt_tokens is not None:
+                cached_prompt_tokens += llm_output.cached_prompt_tokens
+            output = llm_output.text.strip()
+            if not output:
+                finish_llm_call_trace(call_trace, None)
+                aborted = True
+                abort_reason = "LLM returned empty response"
+                break
 
-        # Safety cap: truncate degenerate/runaway outputs (>8000 chars)
-        if len(output) > 8000:
-            logger.warning("Truncating degenerate LLM output (%d chars -> 8000)", len(output))
-            output = output[:8000] + "\n[... output truncated due to excessive length ...]"
+            # Safety cap: truncate degenerate/runaway outputs (>8000 chars)
+            if len(output) > 8000:
+                logger.warning(
+                    "Truncating degenerate LLM output (%d chars -> 8000)",
+                    len(output),
+                )
+                output = output[:8000] + "\n[... output truncated due to excessive length ...]"
 
-        action = _extract_action(output)
-        if action:
-            truncated = _truncate_after_action(output)
-            messages.append({"role": "assistant", "content": truncated})
-            _append_to_steps(truncated, steps)
-        else:
-            answer = _extract_answer(output)
-            if answer:
+            action = _extract_action(output)
+            if action:
+                truncated = _truncate_after_action(output)
+                messages.append({"role": "assistant", "content": truncated})
+                _append_to_steps(truncated, steps)
+                finish_llm_call_trace(call_trace, len(messages) - 1)
+            else:
+                answer = _extract_answer(output)
+                if answer:
+                    messages.append({"role": "assistant", "content": output})
+                    _append_to_steps(output, steps)
+                    finish_llm_call_trace(call_trace, len(messages) - 1)
+                    answer_source = "natural_model_answer"
+                    answer_perf, answer_overhead = _lookup_answer_metrics(
+                        answer, eval_records
+                    )
+                    break
                 messages.append({"role": "assistant", "content": output})
                 _append_to_steps(output, steps)
-                answer_perf, answer_overhead = _lookup_answer_metrics(answer, eval_records)
+                finish_llm_call_trace(call_trace, len(messages) - 1)
+                aborted = True
+                abort_reason = "Missing Action directive"
                 break
-            messages.append({"role": "assistant", "content": output})
-            _append_to_steps(output, steps)
-            aborted = True
-            abort_reason = "Missing Action directive"
-            break
 
-        tool_name, argument = action
-        tool = tools.get(tool_name)
-        if tool is None:
-            aborted = True
-            abort_reason = f"Unknown tool '{tool_name}'"
-            break
+            tool_name, argument = action
+            tool = tools.get(tool_name)
+            if tool is None:
+                aborted = True
+                abort_reason = f"Unknown tool '{tool_name}'"
+                break
+            if pre_tool_hook is not None:
+                pre_tool_hook(tool_name, argument)
 
         steps.append(f"Tool input: {argument}")
         try:
@@ -268,6 +355,15 @@ def run_react_loop(
             agent_clock.advance(overhead)
         evaluations += 1
         tool_records.append((tool_name, argument, tool_output))
+        tool_trace: Dict[str, object] = {
+            "request_message_index": len(messages) - 1,
+            "result_message_index": None,
+            "name": tool_name,
+            "arguments": _trace_argument(argument),
+            "performance": perf,
+            "simulated_cost_seconds": overhead,
+            "visible_to_model": False,
+        }
 
         # Check budget BEFORE recording eval or showing observation —
         # if this eval pushed us over budget, the LLM should not benefit
@@ -282,6 +378,9 @@ def run_react_loop(
                 "This evaluation exceeded the time budget.]"
             )
             steps.append("Observation: [over-budget, result withheld]")
+            if tool_output is not None:
+                tool_trace["withheld_result"] = tool_output
+            tool_call_traces.append(tool_trace)
             aborted = True
             abort_reason = "Time budget exceeded"
             break
@@ -328,6 +427,12 @@ def run_react_loop(
                 observation = f"Observation: perf={perf:.6f}"
         messages.append({"role": "user", "content": observation})
         steps.append(observation)
+        tool_trace["visible_to_model"] = True
+        tool_trace["result_message_index"] = len(messages) - 1
+        tool_trace["observation"] = observation
+        if tool_output is not None and not isinstance(tool_output, str):
+            tool_trace["structured_result"] = tool_output
+        tool_call_traces.append(tool_trace)
         if max_evals is not None and evaluations >= max_evals:
             aborted = True
             abort_reason = "Maximum evaluations reached"
@@ -360,24 +465,36 @@ def run_react_loop(
             _over_budget_note = None
         messages.append({"role": "user", "content": note})
         steps.append(note)
-        if max_context_tokens is not None:
-            send_messages = _trim_messages(messages, max_context_tokens)
-        else:
-            send_messages = messages
-        start = time.perf_counter()
-        forced_output = llm.generate(send_messages)
-        api_elapsed = time.perf_counter() - start
+        lock_context = llm_lock if llm_lock is not None else nullcontext()
+        with lock_context:
+            # A forced final answer is still an LLM reasoning call.  Serialize
+            # it and show the latest pooled state just like a normal turn.
+            augment_latest_user_message()
+            if max_context_tokens is not None:
+                send_messages = _trim_messages(messages, max_context_tokens)
+            else:
+                send_messages = list(messages)
+            start = time.perf_counter()
+            forced_output = llm.generate(send_messages)
+            api_elapsed = time.perf_counter() - start
+            forced_call_trace = start_llm_call_trace(
+                list(send_messages), forced_output, api_elapsed, forced=True
+            )
         llm_time += api_elapsed
         api_calls += 1
         if forced_output.prompt_tokens is not None:
             prompt_tokens += forced_output.prompt_tokens
         if forced_output.completion_tokens is not None:
             completion_tokens += forced_output.completion_tokens
+        if forced_output.cached_prompt_tokens is not None:
+            cached_prompt_tokens += forced_output.cached_prompt_tokens
         forced_text = forced_output.text.strip()
         if forced_text:
             messages.append({"role": "assistant", "content": forced_text})
             _append_to_steps(forced_text, steps)
+            finish_llm_call_trace(forced_call_trace, len(messages) - 1)
             answer = _extract_answer(forced_text) or forced_text
+            answer_source = "forced_model_answer"
             _perf_raw, answer_overhead = _finalize_answer(
                 answer or "",
                 eval_records,
@@ -386,6 +503,8 @@ def run_react_loop(
                 total_overhead,
             )
             answer_perf, answer_metrics = _unpack_perf(_perf_raw)
+        else:
+            finish_llm_call_trace(forced_call_trace, None)
 
     if answer is not None and answer_perf is None and answer_metrics is None:
         _perf_raw, answer_overhead = _finalize_answer(
@@ -420,6 +539,7 @@ def run_react_loop(
             answer = best_raw
             answer_perf = best_perf
             answer_overhead = best_ovh
+            answer_source = "best_evaluated_fallback"
             logger.info(
                 "Forced answer didn't match eval records; "
                 "falling back to best evaluated config (perf=%.6f)",
@@ -440,12 +560,21 @@ def run_react_loop(
         eval_time=eval_time,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cached_prompt_tokens=cached_prompt_tokens,
         instruction_tokens=instruction_tokens,
         messages=messages,
         tool_records=tool_records,
         eval_records=eval_records,
     )
-    return result.__dict__
+    result_dict = result.__dict__
+    if capture_trace_v2:
+        result_dict["_trace_v2_capture"] = {
+            "llm_calls": llm_call_traces,
+            "tool_calls": tool_call_traces,
+            "termination_reason": abort_reason if aborted else "Natural answer",
+            "answer_source": answer_source,
+        }
+    return result_dict
 
 
 def _truncate_after_action(text: str) -> str:
@@ -507,6 +636,14 @@ def _canonicalize_payload(payload: str) -> Optional[str]:
     if isinstance(data, list):
         return json.dumps(data, separators=(",", ":"))
     return None
+
+
+def _trace_argument(payload: str) -> object:
+    """Preserve machine-readable tool arguments without duplicating raw JSON."""
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        return {"raw": payload, "encoding": "text"}
 
 
 def _lookup_answer_metrics(

@@ -25,6 +25,7 @@ Transport = Callable[[urllib.request.Request, float], bytes]
 DEFAULT_OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 DEFAULT_VLLM_URL = "http://localhost:8000/v1/chat/completions"
+DEFAULT_SUB2API_URL = "http://127.0.0.1:8080/v1/chat/completions"
 
 
 def _normalize_chat_completions_url(base_url: str) -> str:
@@ -121,6 +122,7 @@ class OpenAIConfig:
     reasoning: Optional[Dict[str, object]] = None
     max_tokens: Optional[int] = None
     nothink_prefix: bool = False
+    prompt_cache_key: Optional[str] = None
 
 
 class OpenAICompatibleLLM(LLMBackend):
@@ -147,6 +149,7 @@ class OpenAICompatibleLLM(LLMBackend):
         reasoning: Optional[Dict[str, object]] = None,
         max_tokens: Optional[int] = None,
         nothink_prefix: bool = False,
+        prompt_cache_key: Optional[str] = None,
     ) -> None:
         key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not key:
@@ -167,6 +170,9 @@ class OpenAICompatibleLLM(LLMBackend):
             reasoning=reasoning,
             max_tokens=max_tokens,
             nothink_prefix=nothink_prefix,
+            prompt_cache_key=(
+                prompt_cache_key.strip() if prompt_cache_key and prompt_cache_key.strip() else None
+            ),
         )
         self._transport = transport
 
@@ -206,6 +212,8 @@ class OpenAICompatibleLLM(LLMBackend):
             payload["reasoning"] = self.config.reasoning
         if self.config.chat_template_kwargs:
             payload["chat_template_kwargs"] = self.config.chat_template_kwargs
+        if self.config.prompt_cache_key is not None:
+            payload["prompt_cache_key"] = self.config.prompt_cache_key
         request = urllib.request.Request(
             self.config.base_url,
             data=json.dumps(payload).encode("utf-8"),
@@ -259,12 +267,30 @@ class OpenAICompatibleLLM(LLMBackend):
         if not message or "content" not in message:
             raise RuntimeError("API choice missing message content")
         usage = data.get("usage") or {}
-        prompt_tokens = usage.get("prompt_tokens")
-        completion_tokens = usage.get("completion_tokens")
+        prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+        completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        prompt_token_details = (
+            usage.get("prompt_tokens_details")
+            or usage.get("input_tokens_details")
+            or {}
+        )
+        cached_prompt_tokens = (
+            prompt_token_details.get("cached_tokens")
+            if isinstance(prompt_token_details, dict)
+            else None
+        )
+        cache_write_prompt_tokens = (
+            prompt_token_details.get("cache_write_tokens")
+            if isinstance(prompt_token_details, dict)
+            else None
+        )
         return LLMOutput(
             text=str(message["content"]).strip(),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+            cache_write_prompt_tokens=cache_write_prompt_tokens,
+            request_attempts=attempt + 1,
         )
 
 
@@ -330,5 +356,22 @@ def build_vllm_client(
         api_key=key,
         base_url=base_url or DEFAULT_VLLM_URL,
         chat_template_kwargs=chat_template_kwargs,
+        **kwargs,
+    )
+
+
+def build_sub2api_client(
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    **kwargs,
+) -> OpenAICompatibleLLM:
+    """Build a client for a local or remote Sub2API deployment."""
+    key = api_key or os.getenv("SUB2API_API_KEY")
+    if not key:
+        raise ValueError("SUB2API_API_KEY is required for the Sub2API backend")
+    endpoint = base_url or os.getenv("SUB2API_BASE_URL") or DEFAULT_SUB2API_URL
+    return OpenAICompatibleLLM(
+        api_key=key,
+        base_url=endpoint,
         **kwargs,
     )

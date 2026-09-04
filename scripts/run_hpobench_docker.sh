@@ -15,6 +15,7 @@ IMAGE="${EXPGYM_HPOBENCH_IMAGE:-expgym-hpobench:py37}"
 PLATFORM="${EXPGYM_HPOBENCH_PLATFORM:-linux/amd64}"
 DOCKER_BIN="${DOCKER:-}"
 BUILD_IMAGE=1
+POOLACT_MODE=0
 RUNNER_ARGS=()
 
 usage() {
@@ -27,6 +28,7 @@ HPOBench, NASBench101, and NASBench201 dependencies.
 Wrapper options:
   --no-build       Use the existing Docker image instead of building first.
   --image NAME     Docker image tag (default: expgym-hpobench:py37).
+  --poolact        Run scripts/run_poolact.py instead of the sequential sweep.
   -h, --help       Show this help.
 
 If no runner options are provided, this runs one ParamNet smoke:
@@ -34,6 +36,13 @@ If no runner options are provided, this runs one ParamNet smoke:
   --scenarios tuning
   --tuning-tasks hpobench:paramnet:adult:steps
   --cost-regimes cost_tight
+
+With --poolact, the default smoke instead uses:
+  --model openai/gpt-4.1-nano
+  --scenario tuning
+  --tuning-task hpobench:paramnet:adult:steps
+  --cost-regime cost_tight
+  --agents 2 --strategies poolact
 
 The container stores HPOBench data under:
   data/hpo_tuning/hpobench_data/
@@ -59,6 +68,10 @@ while [[ $# -gt 0 ]]; do
       IMAGE="${2:?--image requires a value}"
       shift 2
       ;;
+    --poolact)
+      POOLACT_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -70,7 +83,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ ${#RUNNER_ARGS[@]} -eq 0 ]]; then
+if [[ "$POOLACT_MODE" -eq 1 ]]; then
+  POOLACT_DEFAULT_ARGS=(
+    --backend openrouter
+    --model "${EXPGYM_OPENROUTER_MODEL:-openai/gpt-4.1-nano}"
+    --scenario tuning
+    --tuning-task hpobench:paramnet:adult:steps
+    --cost-regime cost_tight
+    --agents 2
+    --strategies poolact
+    --output-dir runs/hpobench_poolact
+    --resume
+  )
+  # User arguments come last, so normal argparse options override defaults.
+  RUNNER_ARGS=("${POOLACT_DEFAULT_ARGS[@]}" "${RUNNER_ARGS[@]}")
+elif [[ ${#RUNNER_ARGS[@]} -eq 0 ]]; then
   RUNNER_ARGS=(
     --models "${EXPGYM_OPENROUTER_MODEL:-openai/gpt-4.1-nano}"
     --scenarios tuning
@@ -165,10 +192,16 @@ else
   DOCKER_ENV+=(-e OPENROUTER_API_KEY_FILE=/workspace/openrouter.key)
 fi
 
+if [[ "$POOLACT_MODE" -eq 1 ]]; then
+  RUNNER_SCRIPT="scripts/run_poolact.py"
+else
+  RUNNER_SCRIPT="scripts/run_paper_sweep.py"
+fi
+
 "$DOCKER_BIN" run --rm \
   --platform "$PLATFORM" \
   "${DOCKER_ENV[@]}" \
   "${DOCKER_MOUNTS[@]}" \
   -w /workspace/LLM_ExpGym \
   "$IMAGE" \
-  python scripts/run_paper_sweep.py "${RUNNER_ARGS[@]}"
+  python "$RUNNER_SCRIPT" "${RUNNER_ARGS[@]}"

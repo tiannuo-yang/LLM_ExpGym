@@ -13,6 +13,7 @@ The paper's main ranking matrix is expressible with explicit selector values:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -39,6 +40,7 @@ from demo_experiment import (  # noqa: E402
     resolve_cost_regime,
 )
 from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
+from expgym.trace_v2 import build_trace_v2, write_trace_v2  # noqa: E402
 
 PAPER_MODELS: Dict[str, str] = {
     "dsv32": "deepseek/deepseek-v3.2",
@@ -74,6 +76,8 @@ REGIME_DIR = {
     "cost_moderate": "cost_moderate",
     "cost_tight": "cost_tight",
 }
+PROMPT_CACHE_KEY_MAX_LENGTH = 64
+PROMPT_CACHE_DERIVATION = "expgym.job.v1"
 
 
 @dataclass(frozen=True)
@@ -91,13 +95,99 @@ class Job:
     hypothesis_order: Optional[List[str]] = None
 
 
+def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object]:
+    """Return the effective prompt-cache key and reproducible derivation metadata.
+
+    ``--prompt-cache-key`` is a namespace by default. The actual API key is
+    derived from the complete logical job identity so every turn and retry in
+    one job shares a key, while distinct jobs cannot accidentally share a
+    routing bucket. ``literal`` scope preserves the old exact-key behavior for
+    targeted debugging.
+    """
+    scope = getattr(args, "prompt_cache_scope", "job")
+    if scope == "disabled":
+        return {"key": None, "scope": "disabled"}
+    if scope not in {"job", "literal"}:
+        raise ValueError(
+            "--prompt-cache-scope must be 'job', 'literal', or 'disabled'"
+        )
+
+    raw_key = getattr(args, "prompt_cache_key", None)
+    source = "explicit"
+    if raw_key is None or not str(raw_key).strip():
+        if scope == "job" and getattr(args, "backend", "openrouter") == "sub2api":
+            raw_key = "expgym"
+            source = "sub2api_default"
+        else:
+            return {"key": None, "scope": "disabled"}
+
+    namespace = str(raw_key).strip()
+    if scope == "literal":
+        if len(namespace) > PROMPT_CACHE_KEY_MAX_LENGTH:
+            raise ValueError(
+                "literal --prompt-cache-key exceeds the 64-character API limit"
+            )
+        return {"key": namespace, "scope": "literal"}
+    if scope != "job":
+        raise ValueError("--prompt-cache-scope must be 'job' or 'literal'")
+
+    temperature = (
+        args.temperature_tuning
+        if job.scenario == "tuning"
+        else args.temperature_eval
+    )
+    identity = {
+        "derivation": PROMPT_CACHE_DERIVATION,
+        "namespace": namespace,
+        "backend": getattr(args, "backend", "openrouter"),
+        "job": asdict(job),
+        "generation": {
+            "temperature": temperature,
+            "max_steps": args.max_steps,
+            "max_evaluations": args.max_evals,
+        },
+    }
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(canonical).hexdigest()[:36]
+    scenario_tag = {
+        "tuning": "tuning",
+        "restricted_search": "search",
+        "evidence_audit": "audit",
+    }[job.scenario]
+    namespace_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", namespace)
+    namespace_slug = namespace_slug.strip("._-") or "expgym"
+    max_namespace_length = (
+        PROMPT_CACHE_KEY_MAX_LENGTH - len(scenario_tag) - len(digest) - 2
+    )
+    namespace_slug = namespace_slug[:max_namespace_length].rstrip("._-") or "expgym"
+    key = f"{namespace_slug}-{scenario_tag}-{digest}"
+    if len(key) > PROMPT_CACHE_KEY_MAX_LENGTH:  # defensive invariant
+        raise AssertionError("derived prompt cache key exceeds API limit")
+    return {
+        "key": key,
+        "scope": "job",
+        "namespace": namespace,
+        "derivation": PROMPT_CACHE_DERIVATION,
+        "source": source,
+    }
+
+
 def _default_key_file() -> Path:
     return Path(
         os.environ.get("OPENROUTER_API_KEY_FILE", REPO_ROOT.parent / "openrouter.key")
     )
 
 
-def _load_api_key(path: Optional[Path]) -> Optional[str]:
+def _load_api_key(path: Optional[Path], backend: str = "openrouter") -> Optional[str]:
+    if backend == "sub2api":
+        env_key = os.environ.get("SUB2API_API_KEY")
+        if env_key:
+            return env_key.strip()
     env_key = os.environ.get("OPENROUTER_API_KEY")
     if env_key:
         return env_key.strip()
@@ -228,8 +318,9 @@ def _build_jobs(args: argparse.Namespace) -> List[Job]:
     return jobs
 
 
-def _trace_path(output_dir: Path, job: Job) -> Path:
-    base = output_dir / f"{job.model_alias}_{REGIME_DIR[job.cost_regime]}" / "traces"
+def _trace_path(output_dir: Path, job: Job, trace_format: str = "v1") -> Path:
+    trace_dir = "traces-v2" if trace_format == "v2" else "traces"
+    base = output_dir / f"{job.model_alias}_{REGIME_DIR[job.cost_regime]}" / trace_dir
     if job.scenario == "tuning":
         name = f"tuning_{_sanitize(job.tuning_task)}_r{job.rep}_s{job.seed}.json"
     elif job.scenario == "restricted_search":
@@ -271,6 +362,7 @@ def _format_result_summary(result: Dict[str, Any], path: Path) -> str:
         f"score_check={'ok' if (result.get('score_check') or {}).get('ok') else 'failed'}",
         f"evaluations={result.get('evaluations')}",
         f"api_calls={result.get('api_calls')}",
+        f"cached_prompt_tokens={result.get('cached_prompt_tokens', 0)}",
         f"aborted={result.get('aborted')}",
     ]
     metrics = result.get("answer_metrics")
@@ -286,7 +378,7 @@ def _format_result_summary(result: Dict[str, Any], path: Path) -> str:
 def _namespace_for_job(args: argparse.Namespace, job: Job, api_key: str) -> argparse.Namespace:
     ns = argparse.Namespace()
     ns.scenario = job.scenario
-    ns.backend = "openrouter"
+    ns.backend = getattr(args, "backend", "openrouter")
     ns.model = job.model_id
     ns.api_key = api_key
     ns.system_prompt = None
@@ -297,6 +389,9 @@ def _namespace_for_job(args: argparse.Namespace, job: Job, api_key: str) -> argp
     )
     ns.seed = job.seed
     ns.base_url = args.base_url
+    ns.prompt_cache = _prompt_cache_config(args, job)
+    ns.prompt_cache_key = ns.prompt_cache["key"]
+    ns.trace_format = getattr(args, "trace_format", "v1")
     ns.probes = 4
     ns.max_steps = args.max_steps
     ns.time_budget = None
@@ -369,6 +464,7 @@ def _run_job(args: argparse.Namespace, job: Job, api_key: str) -> Dict[str, Any]
         include_overhead_in_observation=include_overhead,
         include_cost_in_observation=include_cost,
         answer_evaluator=answer_evaluator,
+        capture_trace_v2=ns.trace_format == "v2",
     )
     result["job"] = asdict(job)
     result["cost_regime_resolved"] = {
@@ -377,6 +473,43 @@ def _run_job(args: argparse.Namespace, job: Job, api_key: str) -> Dict[str, Any]
         "time_budget": time_budget,
     }
     result["score_check"] = _score_check(result, tools, answer_evaluator)
+    if ns.trace_format == "v2":
+        config = asdict(llm.config) if hasattr(llm, "config") else {}
+        auth_configured = bool(config.pop("api_key", None))
+        model = config.pop("model", ns.model)
+        base_url = config.pop("base_url", ns.base_url)
+        prompt_cache_key = config.pop("prompt_cache_key", None)
+        prompt_cache = dict(ns.prompt_cache)
+        if prompt_cache.get("key") != prompt_cache_key:
+            raise RuntimeError("effective prompt cache key metadata mismatch")
+        timeout = config.pop("timeout", None)
+        config.pop("system_prompt", None)
+        extra_headers = config.pop("extra_headers", {}) or {}
+        result["_trace_v2_runtime"] = {
+            "run": {
+                "seed": ns.seed,
+                "backend": {
+                    "name": ns.backend,
+                    "base_url": base_url,
+                    "auth_configured": auth_configured,
+                    "extra_header_names": sorted(extra_headers),
+                },
+                "model": {"id": model},
+                "generation": config,
+                "prompt_cache": prompt_cache,
+                "transport": {
+                    "timeout_seconds": timeout,
+                    "max_retries": 10,
+                    "retry_http_statuses": [429, 500, 502, 503],
+                },
+            },
+            "limits": {
+                "max_steps": ns.max_steps,
+                "max_evaluations": ns.max_evals,
+                "max_prompt_tokens": None,
+                "max_context_tokens": None,
+            },
+        }
     return result
 
 
@@ -553,11 +686,19 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
     print()
     print("First jobs:")
     for job in jobs[: min(10, len(jobs))]:
-        print(json.dumps(asdict(job), sort_keys=True))
+        preview = asdict(job)
+        preview["prompt_cache"] = _prompt_cache_config(args, job)
+        print(json.dumps(preview, sort_keys=True))
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--backend",
+        choices=["openai", "openrouter", "sub2api"],
+        default=os.environ.get("EXPGYM_BACKEND", "openrouter"),
+        help="OpenAI-compatible backend used for every job.",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -565,7 +706,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--models",
-        default=os.environ.get("EXPGYM_MODELS", DEFAULT_MODEL),
+        default=(
+            os.environ.get("EXPGYM_MODELS")
+            or os.environ.get("SUB2API_MODEL")
+            or DEFAULT_MODEL
+        ),
         help=(
             "Comma-separated aliases or OpenRouter IDs. Default: "
             f"{DEFAULT_MODEL}. Paper aliases: {','.join(PAPER_MODELS.keys())}."
@@ -607,7 +752,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key-file", type=Path, default=_default_key_file())
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("OPENROUTER_BASE_URL") or os.environ.get("EXPGYM_BASE_URL"),
+        default=(
+            os.environ.get("EXPGYM_BASE_URL")
+            or os.environ.get("SUB2API_BASE_URL")
+            or os.environ.get("OPENROUTER_BASE_URL")
+        ),
+    )
+    parser.add_argument(
+        "--prompt-cache-key",
+        default=os.environ.get("EXPGYM_PROMPT_CACHE_KEY"),
+        help=(
+            "Prompt-cache namespace. By default a stable <=64-character key "
+            "is derived separately for each logical job."
+        ),
+    )
+    parser.add_argument(
+        "--prompt-cache-scope",
+        choices=["job", "literal", "disabled"],
+        default=os.environ.get("EXPGYM_PROMPT_CACHE_SCOPE", "job"),
+        help=(
+            "job (default) derives an isolated key per job; literal sends "
+            "--prompt-cache-key unchanged; disabled omits the field."
+        ),
+    )
+    parser.add_argument(
+        "--trace-format",
+        choices=["v1", "v2"],
+        default=os.environ.get("EXPGYM_TRACE_FORMAT", "v2"),
+        help="Trace artifact format. v2 is normalized and versioned; v1 is legacy.",
     )
     parser.add_argument("--openrouter-referer", default=None)
     parser.add_argument("--openrouter-title", default="ExpGym sweep")
@@ -625,8 +797,13 @@ def main() -> int:
     if args.dry_run:
         _print_dry_run(jobs, args)
         return 0
-    api_key = _load_api_key(args.api_key_file)
+    api_key = _load_api_key(args.api_key_file, args.backend)
     if not api_key:
+        if args.backend == "sub2api":
+            raise SystemExit(
+                "SUB2API_API_KEY is not set. Source the Sub2API client env or "
+                "export SUB2API_API_KEY."
+            )
         raise SystemExit(
             "OPENROUTER_API_KEY is not set and no key file was found. "
             "Set OPENROUTER_API_KEY or pass --api-key-file PATH."
@@ -635,7 +812,7 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     failures: List[Tuple[Job, str]] = []
     for idx, job in enumerate(jobs, start=1):
-        path = _trace_path(args.output_dir, job)
+        path = _trace_path(args.output_dir, job, args.trace_format)
         if args.resume and path.exists():
             print(f"[{idx}/{len(jobs)}] skip existing {path}")
             continue
@@ -646,8 +823,14 @@ def main() -> int:
             result["wall_time_seconds"] = time.time() - start
             if not result["score_check"].get("ok"):
                 raise RuntimeError(f"score check failed: {result['score_check']}")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+            if args.trace_format == "v2":
+                artifact = build_trace_v2(result, repo_root=REPO_ROOT)
+                write_trace_v2(path, artifact)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(result, indent=2, default=str), encoding="utf-8"
+                )
             print(f"  wrote {path} score_check=ok")
             print(f"  {_format_result_summary(result, path)}")
         except Exception as exc:

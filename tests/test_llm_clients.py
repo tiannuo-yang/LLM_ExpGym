@@ -4,10 +4,12 @@ import unittest
 from expgym.llm_clients import (
     DEFAULT_GEMINI_URL,
     DEFAULT_OPENROUTER_URL,
+    DEFAULT_SUB2API_URL,
     DEFAULT_VLLM_URL,
     OpenAICompatibleLLM,
     build_gemini_client,
     build_openrouter_client,
+    build_sub2api_client,
     build_vllm_client,
 )
 
@@ -28,19 +30,30 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
     def test_generate_parses_choice_and_builds_request(self) -> None:
         payload = {
             "choices": [{"message": {"content": "Answer"}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 25},
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 25,
+                "prompt_tokens_details": {
+                    "cached_tokens": 80,
+                    "cache_write_tokens": 20,
+                },
+            },
         }
         transport = _CaptureTransport(payload)
         llm = OpenAICompatibleLLM(
             api_key="test",
             model="gpt-test",
             seed=1206,
+            prompt_cache_key="expgym-task-abc-v1",
             transport=transport,
         )
         output = llm.generate("Hi")
         self.assertEqual(output.text, "Answer")
         self.assertEqual(output.prompt_tokens, 100)
         self.assertEqual(output.completion_tokens, 25)
+        self.assertEqual(output.cached_prompt_tokens, 80)
+        self.assertEqual(output.cache_write_prompt_tokens, 20)
+        self.assertEqual(output.request_attempts, 1)
         self.assertEqual(transport.request.get_full_url(), llm.config.base_url)
         body = json.loads(transport.request.data.decode("utf-8"))
         self.assertEqual(body["model"], "gpt-test")
@@ -48,6 +61,14 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
         self.assertEqual(body["temperature"], 0.0)
         self.assertEqual(body["top_p"], 1.0)
         self.assertEqual(body["seed"], 1206)
+        self.assertEqual(body["prompt_cache_key"], "expgym-task-abc-v1")
+
+    def test_prompt_cache_key_is_omitted_when_unset(self) -> None:
+        transport = _CaptureTransport({"choices": [{"message": {"content": "Ok"}}]})
+        llm = OpenAICompatibleLLM(api_key="k", transport=transport)
+        llm.generate("Hi")
+        body = json.loads(transport.request.data.decode("utf-8"))
+        self.assertNotIn("prompt_cache_key", body)
 
     def test_missing_api_key_raises(self) -> None:
         with self.assertRaises(ValueError):
@@ -136,6 +157,36 @@ class VLLMHelperTest(unittest.TestCase):
         self.assertEqual(transport.request.get_full_url(), DEFAULT_VLLM_URL)
         body = json.loads(transport.request.data.decode("utf-8"))
         self.assertEqual(body.get("chat_template_kwargs"), {"enable_thinking": False})
+
+
+class Sub2APIHelperTest(unittest.TestCase):
+    def test_build_sub2api_client_uses_env_and_default_url(self) -> None:
+        import os
+        from unittest import mock
+
+        transport = _CaptureTransport({"choices": [{"message": {"content": "Sub2"}}]})
+        with mock.patch.dict(
+            os.environ,
+            {"SUB2API_API_KEY": "sub2-key", "SUB2API_BASE_URL": ""},
+            clear=False,
+        ):
+            llm = build_sub2api_client(
+                model="gpt-5.4",
+                prompt_cache_key="expgym-sub2-v1",
+                transport=transport,
+            )
+        llm.generate("hi")
+        self.assertEqual(llm.config.base_url, DEFAULT_SUB2API_URL)
+        body = json.loads(transport.request.data.decode("utf-8"))
+        self.assertEqual(body["prompt_cache_key"], "expgym-sub2-v1")
+
+    def test_missing_api_key_raises(self) -> None:
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"SUB2API_API_KEY": ""}, clear=False):
+            with self.assertRaises(ValueError):
+                build_sub2api_client(api_key="")
 
 
 if __name__ == "__main__":  # pragma: no cover

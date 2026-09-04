@@ -93,6 +93,51 @@ class SummarizeTracesTest(unittest.TestCase):
             self.assertEqual(summarize_traces.format_value(row["evidence_acc"]), "0.235294")
             self.assertEqual(summarize_traces.format_value(row["verification_eff"]), "0.000000")
 
+    def test_summarizes_v2_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace-v2.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": {"name": "expgym.trace", "version": "2.0.0"},
+                        "run": {"model": {"id": "gpt-5.4"}},
+                        "task": {
+                            "scenario": "evidence_audit",
+                            "item": {"id": 0, "split": "cc-large"},
+                            "budget": {"regime": "cost_tight"},
+                        },
+                        "llm_calls": [
+                            {
+                                "usage": {
+                                    "cache": {
+                                        "reported": True,
+                                        "read_tokens": 1024,
+                                    }
+                                }
+                            }
+                        ],
+                        "tool_calls": [{}, {}],
+                        "outcome": {
+                            "status": "completed",
+                            "score": {
+                                "metrics": {
+                                    "label_acc": 0.9,
+                                    "evidence_acc": 0.4,
+                                }
+                            },
+                            "validation": {"passed": True},
+                        },
+                        "timing": {"wall_time_seconds": 3.2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            row = summarize_traces.summarize_trace(path)
+            self.assertEqual(row["scenario"], "evidence_audit")
+            self.assertEqual(row["answer_perf"], 0.9)
+            self.assertEqual(row["cached_prompt_tokens"], 1024)
+            self.assertEqual(row["score_check"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -161,6 +161,20 @@ class StepsRegistrationTest(unittest.TestCase):
         names = [name for name, _ in download_data.STEPS]
         self.assertEqual(set(names), {"Phantom Wiki", "HPOBench", "ContractNLI"})
 
+    def test_only_selects_requested_datasets_in_stable_order(self):
+        selected = download_data._select_steps("contract-nli,phantom-wiki")
+        self.assertEqual(
+            [name for name, _ in selected],
+            ["Phantom Wiki", "ContractNLI"],
+        )
+
+    def test_only_all_selects_every_dataset(self):
+        self.assertEqual(download_data._select_steps("all"), download_data.STEPS)
+
+    def test_only_rejects_unknown_dataset(self):
+        with self.assertRaisesRegex(ValueError, "unknown dataset"):
+            download_data._select_steps("phantom-wiki,nope")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# ``scripts/setup.sh`` creates this environment. Prefer it automatically so
+# readers do not have to remember to activate the venv in every new shell.
+if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+  export PATH="$ROOT_DIR/.venv/bin:$PATH"
+fi
+
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
@@ -11,7 +17,13 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
 fi
 
-MODEL="${EXPGYM_OPENROUTER_MODEL:-openai/gpt-4.1-nano}"
+if [[ -n "${SUB2API_API_KEY:-}" && -n "${SUB2API_BASE_URL:-}" ]]; then
+  DEFAULT_BACKEND="sub2api"
+else
+  DEFAULT_BACKEND="openrouter"
+fi
+BACKEND="${EXPGYM_BACKEND:-$DEFAULT_BACKEND}"
+MODEL="${EXPGYM_MODEL:-${SUB2API_MODEL:-${EXPGYM_OPENROUTER_MODEL:-openai/gpt-4.1-nano}}}"
 SCENARIO="tuning"
 QUESTIONS="0"
 TASK="neural_network_training"
@@ -21,7 +33,10 @@ WITH_AUTO_DATA=0
 CONTRACT_NLI_ARCHIVE="${CONTRACT_NLI_ARCHIVE:-}"
 MAX_STEPS=""
 MAX_EVALS=""
-BASE_URL=""
+BASE_URL="${EXPGYM_BASE_URL:-${SUB2API_BASE_URL:-}}"
+PROMPT_CACHE_KEY="${EXPGYM_PROMPT_CACHE_KEY:-}"
+PROMPT_CACHE_SCOPE="${EXPGYM_PROMPT_CACHE_SCOPE:-job}"
+TRACE_FORMAT="${EXPGYM_TRACE_FORMAT:-v2}"
 REPS=""
 SEED=""
 TEMPERATURE=""
@@ -42,8 +57,12 @@ Data:
   --with-auto-data calls scripts/download_data.py automatically.
 
 Common options:
+  --backend NAME                openrouter | openai | sub2api.
   --model MODEL                 OpenRouter/OpenAI-compatible model id.
   --base-url URL                OpenAI-compatible API base URL.
+  --prompt-cache-key KEY        Cache namespace; derives one stable key per job.
+  --prompt-cache-scope SCOPE    job (default) | literal | disabled.
+  --trace-format FORMAT         v2 (default, normalized) | v1 (legacy).
   --scenario NAME               tuning | restricted_search | evidence_audit.
   --task TASK                   Tuning task, e.g. neural_network_training.
   --questions INDICES           Question/doc indices, e.g. 0 or 0:5.
@@ -64,6 +83,9 @@ Examples:
   bash scripts/eval_model.sh --model mistralai/mistral-large
   OPENROUTER_API_KEY=dummy bash scripts/eval_model.sh \
     --base-url http://localhost:8000/v1 --model my-local-model
+  source /path/to/sub2api/.sub2api-client.env
+  bash scripts/eval_model.sh --backend sub2api \
+    --prompt-cache-key expgym-task-v1
   bash scripts/eval_model.sh --with-auto-data --scenario restricted_search --questions 0:5
 EOF
 }
@@ -71,12 +93,28 @@ EOF
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --backend)
+      BACKEND="${2:?--backend requires a value}"
+      shift 2
+      ;;
     --model)
       MODEL="${2:?--model requires a value}"
       shift 2
       ;;
     --base-url)
       BASE_URL="${2:?--base-url requires a value}"
+      shift 2
+      ;;
+    --prompt-cache-key)
+      PROMPT_CACHE_KEY="${2:?--prompt-cache-key requires a value}"
+      shift 2
+      ;;
+    --prompt-cache-scope)
+      PROMPT_CACHE_SCOPE="${2:?--prompt-cache-scope requires a value}"
+      shift 2
+      ;;
+    --trace-format)
+      TRACE_FORMAT="${2:?--trace-format requires a value}"
       shift 2
       ;;
     --scenario)
@@ -165,6 +203,10 @@ done
 if [[ -n "$BASE_URL" ]]; then
   EXTRA_ARGS+=(--base-url "$BASE_URL")
 fi
+EXTRA_ARGS+=(--prompt-cache-scope "$PROMPT_CACHE_SCOPE")
+if [[ -n "$PROMPT_CACHE_KEY" ]]; then
+  EXTRA_ARGS+=(--prompt-cache-key "$PROMPT_CACHE_KEY")
+fi
 
 if [[ -z "$OUTPUT_DIR" ]]; then
   MODEL_ALIAS="$(
@@ -197,6 +239,8 @@ if [[ -n "$CONTRACT_NLI_ARCHIVE" ]]; then
 fi
 
 CMD+=(
+  --backend "$BACKEND"
+  --trace-format "$TRACE_FORMAT"
   --models "$MODEL"
   --scenarios "$SCENARIO"
   --cost-regimes "$BUDGET"

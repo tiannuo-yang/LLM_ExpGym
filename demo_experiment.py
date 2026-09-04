@@ -110,6 +110,7 @@ def build_llm(
     *,
     system_prompt: str | None = None,
 ) -> LLMBackend:
+    prompt_cache_key = getattr(args, "prompt_cache_key", None)
     if backend == "fake":
         final_answer = plan[-1][1] if plan else None
         return FakeLLM(plan=plan, final_answer=final_answer)
@@ -123,6 +124,7 @@ def build_llm(
             temperature=getattr(args, "temperature", 0.0),
             seed=args.seed,
             base_url=args.base_url,
+            prompt_cache_key=prompt_cache_key,
         )
     if backend == "gemini":
         from expgym.llm_clients import build_gemini_client
@@ -134,6 +136,7 @@ def build_llm(
             temperature=getattr(args, "temperature", 0.0),
             seed=args.seed,
             base_url=args.base_url,
+            prompt_cache_key=prompt_cache_key,
         )
     if backend == "openrouter":
         from expgym.llm_clients import build_openrouter_client
@@ -147,6 +150,7 @@ def build_llm(
             base_url=args.base_url,
             referer=args.openrouter_referer,
             title=args.openrouter_title,
+            prompt_cache_key=prompt_cache_key,
         )
     if backend == "vllm":
         from expgym.llm_clients import build_vllm_client
@@ -162,6 +166,19 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             chat_template_kwargs=chat_kwargs,
+            prompt_cache_key=prompt_cache_key,
+        )
+    if backend == "sub2api":
+        from expgym.llm_clients import build_sub2api_client
+
+        return build_sub2api_client(
+            api_key=args.api_key,
+            model=args.model or os.getenv("SUB2API_MODEL", "gpt-5.4"),
+            system_prompt=system_prompt,
+            temperature=getattr(args, "temperature", 0.0),
+            seed=args.seed,
+            base_url=args.base_url,
+            prompt_cache_key=prompt_cache_key,
         )
     raise ValueError(f"Unknown backend: {backend}")
 
@@ -176,7 +193,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        choices=["fake", "openai", "gemini", "openrouter", "vllm"],
+        choices=["fake", "openai", "gemini", "openrouter", "sub2api", "vllm"],
         default="fake",
         help="LLM backend to use for the ReAct loop.",
     )
@@ -197,8 +214,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-url",
-        default=None,
+        default=os.getenv("EXPGYM_BASE_URL"),
         help="Override the OpenAI-compatible endpoint (e.g., Gemini OpenAI URL).",
+    )
+    parser.add_argument(
+        "--prompt-cache-key",
+        default=os.getenv("EXPGYM_PROMPT_CACHE_KEY"),
+        help=(
+            "Stable prompt cache routing key reused for every turn and retry in "
+            "this run."
+        ),
     )
     parser.add_argument(
         "--probes",

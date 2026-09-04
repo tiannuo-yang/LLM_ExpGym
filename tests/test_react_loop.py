@@ -29,6 +29,7 @@ class RunReactLoopTest(unittest.TestCase):
         self.assertEqual(result["evaluations"], 2)
         self.assertEqual(result["api_calls"], 3)
         self.assertEqual(result["instruction_tokens"], 0)
+        self.assertEqual(result["cached_prompt_tokens"], 0)
         # total_overhead >= eval_time (includes API latency)
         self.assertGreaterEqual(result["total_overhead"], result["eval_time"])
 
@@ -733,6 +734,7 @@ class HTTP500RetryTest(unittest.TestCase):
 
         self.assertEqual(call_count, 2, "Should have retried once after HTTP 500")
         self.assertEqual(output.text, "Answer: hello")
+        self.assertEqual(output.request_attempts, 2)
 
     def test_http_429_still_retries(self) -> None:
         """Confirm that 429 (rate limit) still triggers retries as before."""
@@ -770,6 +772,7 @@ class HTTP500RetryTest(unittest.TestCase):
 
         self.assertEqual(call_count, 2)
         self.assertEqual(output.text, "ok")
+        self.assertEqual(output.request_attempts, 2)
 
     def test_http_400_does_not_retry(self) -> None:
         """Non-retryable codes like 400 should raise immediately."""

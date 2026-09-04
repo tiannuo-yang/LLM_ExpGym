@@ -1,20 +1,15 @@
-"""Shared observation cache and exploration ledger/graph for PoolAct.
+"""Shared cache and exploration graph used by PoolAct.
 
-This module backs the PoolAct strategy and is what ``expgym.poolact``
-re-exports. It sits under ``expgym.extras`` because it is not part of
-the core evaluation suite: nothing in ``react_loop``, the three
-scenarios, or ``demo_experiment`` imports from here. Importing is
-opt-in.
-
-Public surface:
-    SharedObservationCache       thread-safe exact-match cache (zero-cost dedup)
-    SharedExplorationLedger      records observations for context injection
-    SharedExplorationGraph       graph representation of parallel exploration
-    wrap_tools_with_cache        caching-only tool wrapper
-    wrap_tools_with_poolact      caching + ledger recording
-    wrap_tools_with_polact       caching + graph recording (PoolAct v2)
-    make_ledger_augmenter        observation_augmenter that injects ledger
-    make_graph_augmenter         observation_augmenter that injects graph
+Provides:
+- SharedObservationCache: thread-safe exact-match cache (zero-cost dedup)
+- SharedExplorationLedger: records all observations for context injection
+- SharedExplorationGraph: graph-based representation of parallel exploration
+- wrap_tools_with_cache: caching-only tool wrapper
+- wrap_tools_with_poolact: paper implementation (cache + graph + claims)
+- wrap_tools_with_polact: backwards-compatible alias for the paper implementation
+- wrap_tools_with_ledger: legacy flat-ledger experiment
+- make_ledger_augmenter: creates observation_augmenter for react_loop
+- make_graph_augmenter: creates observation_augmenter with graph injection
 """
 from __future__ import annotations
 
@@ -138,15 +133,18 @@ class SharedObservationCache:
     ) -> None:
         """Store a result in the cache.
 
-        First-writer-wins: if the key already exists, keep the original
-        result and the earlier (min) completion_time so the entry becomes
-        visible as early as possible.
+        Earliest simulated completion wins. Physical thread scheduling can
+        differ from the simulated EEI timeline, so a later ``put`` may replace
+        an entry when its completion time is earlier.
         """
         key = (tool_name, self._canonicalize(payload))
         with self._lock:
             if key in self._cache:
                 existing_result, existing_ct = self._cache[key]
-                self._cache[key] = (existing_result, min(existing_ct, completion_time))
+                if completion_time < existing_ct:
+                    self._cache[key] = (result, completion_time)
+                else:
+                    self._cache[key] = (existing_result, existing_ct)
             else:
                 self._cache[key] = (result, completion_time)
 
@@ -176,13 +174,7 @@ class LedgerEntry:
 
 
 class SharedExplorationLedger:
-    """Thread-safe ledger recording all observations across parallel agents.
-
-    The ledger is the key innovation in PoolAct: before each agent's LLM
-    call, the ledger is formatted and injected into the agent's observation
-    context, enabling stigmergic coordination --- agents see what others
-    have tried and found, and can steer their exploration accordingly.
-    """
+    """Legacy flat ledger retained for prototype compatibility."""
 
     def __init__(self, max_display_entries: int = 30):
         self._lock = threading.Lock()
@@ -285,27 +277,27 @@ def _zero_overhead(result: Any) -> Any:
 # Helper: summarize tool payloads and results for ledger
 # ---------------------------------------------------------------------------
 
-def _summarize_payload(payload: str, max_len: int = 120) -> str:
-    """Condense a tool payload for ledger display."""
+def _summarize_payload(payload: str) -> str:
+    """Condense a tool payload for ledger/claim display.
+
+    Never truncates dict payloads — agents need full configs to
+    learn from others' choices.
+    """
     try:
         data = json.loads(payload)
     except (json.JSONDecodeError, TypeError):
-        s = payload.strip()
-        return s[:max_len] + "..." if len(s) > max_len else s
+        return payload.strip()
 
     if isinstance(data, dict):
-        # For tuning configs: show key=value pairs compactly
         parts = []
         for k, v in sorted(data.items()):
             if isinstance(v, float):
                 parts.append("{}={:.4g}".format(k, v))
             else:
                 parts.append("{}={}".format(k, v))
-        s = "{" + ", ".join(parts) + "}"
-        return s[:max_len] + "..." if len(s) > max_len else s
+        return "{" + ", ".join(parts) + "}"
 
-    s = json.dumps(data, separators=(",", ":"))
-    return s[:max_len] + "..." if len(s) > max_len else s
+    return json.dumps(data, separators=(",", ":"))
 
 
 def _summarize_result(tool_name: str, result: Any) -> str:
@@ -381,23 +373,27 @@ def _make_cached_wrapper(
             return _zero_overhead(cached)
         result = original_fn(payload)
         raw_overhead = _extract_overhead_from_result(result)
-        ct = (clock.now + raw_overhead * overhead_scale) if clock is not None else 0.0
+        scaled_overhead = raw_overhead * overhead_scale
+        # The ReAct loop owns the clock and advances it exactly once after
+        # parsing the tool return.  The wrapper only predicts when this
+        # result becomes visible on the simulated parallel timeline.
+        ct = (clock.now + scaled_overhead) if clock is not None else 0.0
         cache.put(tool_name, payload, result, completion_time=ct)
         return result
     return wrapper
 
 
 # ---------------------------------------------------------------------------
-# PoolAct wrapper (caching + ledger recording)
+# Legacy ledger wrapper
 # ---------------------------------------------------------------------------
 
-def wrap_tools_with_poolact(
+def wrap_tools_with_ledger(
     tools: Dict[str, Callable],
     cache: SharedObservationCache,
     ledger: SharedExplorationLedger,
     agent_id: int,
 ) -> Dict[str, Callable]:
-    """Wrap tool functions with caching + ledger recording for PoolAct.
+    """Wrap tools with the legacy flat exploration ledger.
 
     Combines two layers:
     - Layer 0 (caching): exact-match deduplication with zero-cost hits
@@ -414,13 +410,13 @@ def wrap_tools_with_poolact(
     """
     wrapped = {}
     for tool_name, func in tools.items():
-        wrapped[tool_name] = _make_poolact_wrapper(
+        wrapped[tool_name] = _make_ledger_wrapper(
             tool_name, func, cache, ledger, agent_id,
         )
     return wrapped
 
 
-def _make_poolact_wrapper(
+def _make_ledger_wrapper(
     tool_name: str,
     original_fn: Callable,
     cache: SharedObservationCache,
@@ -488,11 +484,12 @@ _DOC_ID_RE = re.compile(r"doc_id=(\d+)")
 
 @dataclass
 class SearchNode:
-    """A search_meta query node in the exploration graph."""
+    """A search_meta or search query node in the exploration graph."""
     query: str
     visited_by: Set[int] = field(default_factory=set)
     visits: int = 0
     returned_doc_ids: List[int] = field(default_factory=list)
+    article_title: str = ""  # For single-tool search (Phantom Wiki)
     completion_time: float = float("inf")
 
 
@@ -535,6 +532,25 @@ class GraphEdge:
     agents: Set[int] = field(default_factory=set)
 
 
+@dataclass
+class ActionClaim:
+    """A pending-or-completed claim on a tool action.
+
+    Lifecycle: record_claim() sets start_time (completion_time=inf).
+    complete_claim() sets completion_time when the tool finishes.
+
+    Visibility from another agent at time *t*:
+      - start_time > t  → invisible (hasn't started yet)
+      - start_time ≤ t AND completion_time > t  → in-progress
+      - completion_time ≤ t  → completed (cache handles this)
+    """
+    agent_id: int
+    tool_name: str
+    display: str          # Human-readable summary for graph injection
+    start_time: float = 0.0
+    completion_time: float = float("inf")
+
+
 class SharedExplorationGraph:
     """Thread-safe graph tracking search_meta and fetch_doc operations.
 
@@ -572,6 +588,172 @@ class SharedExplorationGraph:
 
         # Per-agent state: last node visited (for edge tracking)
         self._agent_last_node: Dict[int, str] = {}
+
+        # Pending claims: (tool_name, canonical_payload) -> [ActionClaim]
+        # Used by the PoolAct wrapper to prevent duplicate work.
+        self._claims: Dict[Tuple[str, str], List[ActionClaim]] = {}
+
+    # ------------------------------------------------------------------
+    # Claim helpers (shared canonical key with cache)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _canonicalize(payload: str) -> str:
+        """Canonicalize a JSON payload string for claim key matching."""
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return payload
+        if isinstance(data, dict):
+            return json.dumps(data, sort_keys=True, separators=(",", ":"))
+        if isinstance(data, list):
+            return json.dumps(data, separators=(",", ":"))
+        return payload
+
+    @staticmethod
+    def _claim_display(tool_name: str, payload: str) -> str:
+        """Build a human-readable one-liner for a claim."""
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+
+        if tool_name == "search" and isinstance(data, dict):
+            q = data.get("query", payload)
+            return 'search "{}"'.format(str(q)[:60])
+        if tool_name == "search_meta" and isinstance(data, dict):
+            q = data.get("query", payload)
+            return 'search_meta "{}"'.format(str(q)[:60])
+        if tool_name == "human_feedback" and isinstance(data, dict):
+            nda = data.get("nda_id", "?")
+            evs = data.get("evidence_ids", [])
+            return "verify nda:{} ev:{}".format(nda, evs)
+        if tool_name == "evaluate_config":
+            summary = _summarize_payload(payload)
+            return "evaluate {}".format(summary)
+        if tool_name == "fetch_doc" and isinstance(data, dict):
+            doc_id = data.get("doc_id", "?")
+            return "fetch doc={}".format(doc_id)
+        return "{} {}".format(tool_name, _summarize_payload(payload))
+
+    def record_claim(
+        self,
+        tool_name: str,
+        payload: str,
+        agent_id: int,
+        *,
+        start_time: float = 0.0,
+    ) -> None:
+        """Record that *agent_id* has started executing *tool_name(payload)*.
+
+        Creates an ActionClaim with ``completion_time=inf`` (pending).
+        """
+        key = (tool_name, self._canonicalize(payload))
+        display = self._claim_display(tool_name, payload)
+        claim = ActionClaim(
+            agent_id=agent_id,
+            tool_name=tool_name,
+            display=display,
+            start_time=start_time,
+        )
+        with self._lock:
+            self._claims.setdefault(key, []).append(claim)
+
+    def has_pending_claim(
+        self,
+        tool_name: str,
+        payload: str,
+        agent_id: int,
+    ) -> bool:
+        """Return True if *agent_id* already has a pending claim."""
+        key = (tool_name, self._canonicalize(payload))
+        with self._lock:
+            for claim in self._claims.get(key, []):
+                if (claim.agent_id == agent_id
+                        and claim.completion_time == float("inf")):
+                    return True
+        return False
+
+    def complete_claim(
+        self,
+        tool_name: str,
+        payload: str,
+        agent_id: int,
+        *,
+        completion_time: float = 0.0,
+    ) -> None:
+        """Mark *agent_id*'s pending claim as completed."""
+        key = (tool_name, self._canonicalize(payload))
+        with self._lock:
+            for claim in reversed(self._claims.get(key, [])):
+                if (claim.agent_id == agent_id
+                        and claim.completion_time == float("inf")):
+                    claim.completion_time = completion_time
+                    break
+
+    def is_in_progress_by_other(
+        self,
+        tool_name: str,
+        payload: str,
+        agent_id: int,
+        *,
+        visible_at: Optional[float] = None,
+    ) -> bool:
+        """Check if another agent has an in-progress claim for this action.
+
+        Returns True if any **other** agent's claim satisfies:
+          ``start_time <= visible_at``  AND  ``completion_time > visible_at``
+        i.e. it has started but not yet finished from the observer's
+        perspective.
+        """
+        key = (tool_name, self._canonicalize(payload))
+        with self._lock:
+            for claim in self._claims.get(key, []):
+                if claim.agent_id == agent_id:
+                    continue
+                if visible_at is not None:
+                    if claim.start_time > visible_at:
+                        continue  # Hasn't started yet from my perspective
+                    if claim.completion_time <= visible_at:
+                        continue  # Already completed
+                return True
+        return False
+
+    def get_visible_pending(
+        self,
+        *,
+        visible_at: Optional[float] = None,
+        agent_id: Optional[int] = None,
+    ) -> List[ActionClaim]:
+        """Return claims that appear in-progress to the observer.
+
+        Used by ``format_for_injection`` to populate the 'In Progress'
+        section of the graph display.
+        """
+        pending: List[ActionClaim] = []
+        with self._lock:
+            for claims in self._claims.values():
+                for claim in claims:
+                    if visible_at is not None:
+                        if claim.start_time > visible_at:
+                            continue
+                        if claim.completion_time <= visible_at:
+                            continue
+                    # Optionally skip own claims (show only others')
+                    if agent_id is not None and claim.agent_id == agent_id:
+                        continue
+                    pending.append(ActionClaim(
+                        agent_id=claim.agent_id,
+                        tool_name=claim.tool_name,
+                        display=claim.display,
+                        start_time=claim.start_time,
+                        completion_time=claim.completion_time,
+                    ))
+        return pending
+
+    # ------------------------------------------------------------------
+    # Node key helpers
+    # ------------------------------------------------------------------
 
     def _search_key(self, query: str) -> str:
         return 'S:"{}"'.format(query)
@@ -619,6 +801,36 @@ class SharedExplorationGraph:
                 node.returned_doc_ids = returned_doc_ids[:5]
 
             # Add edge from previous node
+            prev = self._agent_last_node.get(agent_id)
+            if prev:
+                self._add_edge(prev, skey, agent_id)
+            self._agent_last_node[agent_id] = skey
+
+    def record_search(
+        self,
+        agent_id: int,
+        query: str,
+        article_title: str,
+        *,
+        completion_time: float = 0.0,
+    ) -> None:
+        """Record a single-tool search call (Phantom Wiki V17).
+
+        One node per query, storing the returned article title.
+        """
+        with self._lock:
+            skey = self._search_key(query)
+            if query not in self._search_nodes:
+                self._search_nodes[query] = SearchNode(
+                    query=query, article_title=article_title,
+                )
+            node = self._search_nodes[query]
+            node.visited_by.add(agent_id)
+            node.visits += 1
+            node.completion_time = min(node.completion_time, completion_time)
+            if not node.article_title and article_title:
+                node.article_title = article_title
+
             prev = self._agent_last_node.get(agent_id)
             if prev:
                 self._add_edge(prev, skey, agent_id)
@@ -713,17 +925,20 @@ class SharedExplorationGraph:
         self,
         *,
         visible_before: Optional[float] = None,
+        agent_id: Optional[int] = None,
     ) -> str:
         """Format the graph for LLM context injection.
 
         In default mode: shows full graph with content snippets.
-        In diversity mode: hides content snippets, adds diversity
-        instructions, and highlights unfetched document leads.
+        In diversity mode: unified coverage-map format that frames
+        shared results as explored territory and highlights gaps.
 
         Args:
             visible_before: If set, only include nodes whose
                 completion_time <= visible_before.  ``None`` (default)
                 means see everything (backward compat).
+            agent_id: The viewing agent's ID.  Used in diversity mode
+                to label own vs others' results.
 
         Returns empty string if no nodes recorded.
         """
@@ -764,19 +979,27 @@ class SharedExplorationGraph:
                 if k[0] in visible_keys and k[1] in visible_keys
             }
 
-        if not search_nodes and not fetch_nodes and not eval_nodes:
+        # Collect visible pending claims
+        pending_claims = self.get_visible_pending(
+            visible_at=visible_before, agent_id=agent_id,
+        )
+
+        if not search_nodes and not fetch_nodes and not eval_nodes \
+                and not pending_claims:
             return ""
 
-        # Tuning mode: only eval nodes present
-        if eval_nodes and not search_nodes and not fetch_nodes:
-            if self._diversity_mode:
-                return self._format_tuning_diversity(eval_nodes, end_nodes, edges)
-            return self._format_tuning_default(eval_nodes, end_nodes, edges)
-
+        # Diversity mode: unified coverage-map format for all scenarios
         if self._diversity_mode:
-            return self._format_diversity(
-                search_nodes, fetch_nodes, end_nodes, edges,
+            return self._format_unified(
+                search_nodes, fetch_nodes, eval_nodes,
+                end_nodes, edges,
+                agent_id=agent_id,
+                pending_claims=pending_claims,
             )
+
+        # Non-diversity mode: original formats
+        if eval_nodes and not search_nodes and not fetch_nodes:
+            return self._format_tuning_default(eval_nodes, end_nodes, edges)
         return self._format_default(
             search_nodes, fetch_nodes, end_nodes, edges,
         )
@@ -818,6 +1041,10 @@ class SharedExplorationGraph:
                     "    returned_docs=[{}]".format(
                         ",".join(str(d) for d in node.returned_doc_ids)
                     )
+                )
+            if node.article_title:
+                lines.append(
+                    '    article="{}"'.format(node.article_title)
                 )
 
         # Fetch nodes (sorted by visit count desc, then doc_id)
@@ -881,122 +1108,188 @@ class SharedExplorationGraph:
 
         return "\n".join(lines)
 
-    def _format_diversity(
+    def _format_unified(
         self,
         search_nodes: Dict[str, SearchNode],
         fetch_nodes: Dict[int, FetchNode],
+        eval_nodes: Dict[str, EvalNode],
         end_nodes: Dict[str, EndNode],
         edges: Dict[Tuple[str, str], GraphEdge],
+        *,
+        agent_id: Optional[int] = None,
+        pending_claims: Optional[List[ActionClaim]] = None,
     ) -> str:
-        """Diversity-encouraging format that prevents herding.
+        """Unified coverage-map format for all scenarios in diversity mode.
 
-        Key differences from default:
-        - No content snippets in F:doc nodes (title only)
-        - Adds diversity instructions
-        - Highlights unfetched document leads
-        - Shows END nodes and edges for full topology
+        Design principles:
+        1. Show IN-PROGRESS actions first (most actionable — avoid these)
+        2. Show COMPLETED actions as explored territory
+        3. Edges show exploration paths taken by agents
+        4. COVERAGE GAP highlights what's NOT been tried
+        5. Agent identity labels own vs others' work
         """
-        fetched_ids = set(fetch_nodes.keys())
-
-        # Collect unfetched doc_ids from search results
-        unfetched_leads = []
-        for query, node in search_nodes.items():
-            for doc_id in node.returned_doc_ids:
-                if doc_id not in fetched_ids and doc_id not in unfetched_leads:
-                    unfetched_leads.append(doc_id)
-
+        agent_label = "Agent {}".format(agent_id) if agent_id is not None else "You"
         lines = [
-            "[Shared Exploration Graph]",
-            "You are one of {} agents exploring in parallel.".format(
+            "[Parallel Exploration — {} of {}]".format(agent_label, self._n_agents),
+            "You are one of {} agents solving this task in parallel.".format(
                 self._n_agents
             ),
-            "IMPORTANT: Your unique value is exploring DIFFERENT paths.",
-            "Try queries and documents that other agents have NOT tried.",
-            "Cached fetches cost 0s.",
+            "Shared state below shows what other agents have explored and are exploring.",
+            "Use this to plan your next action — prioritize paths not yet explored.",
             "",
-            "=== Explored ===",
         ]
 
-        # Search nodes — compact format, no returned_docs
-        for query, node in sorted(
-            search_nodes.items(),
-            key=lambda x: (-x[1].visits, x[0]),
-        ):
-            lines.append(
-                '  S:"{}" ({}x by [{}])'.format(
-                    query,
-                    node.visits,
-                    ",".join(str(a) for a in sorted(node.visited_by)),
-                )
-            )
+        pending = pending_claims or []
+        has_search = bool(search_nodes)
+        has_eval = bool(eval_nodes)
+        is_audit = has_eval and any(
+            n.config_display.startswith("nda:") for n in eval_nodes.values()
+        )
 
-        # Fetch nodes — title only, no content snippet
-        for doc_id, node in sorted(
-            fetch_nodes.items(),
-            key=lambda x: (-x[1].visits, x[0]),
-        ):
-            title_part = ""
-            if node.title:
-                title_part = ' "{}"'.format(node.title)
-            lines.append(
-                "  F:doc={}{} ({}x by [{}])".format(
-                    doc_id,
-                    title_part,
-                    node.visits,
-                    ",".join(str(a) for a in sorted(node.visited_by)),
+        # === In Progress === (show before explored — most actionable)
+        if pending:
+            lines.append("== In Progress ==")
+            for claim in sorted(pending, key=lambda c: c.start_time):
+                lines.append(
+                    "  {} [agent {}]".format(claim.display, claim.agent_id)
                 )
-            )
-
-        # End nodes (answers submitted by other agents)
-        if end_nodes:
             lines.append("")
-            lines.append("=== Endpoints ===")
-            for answer, node in sorted(
-                end_nodes.items(),
-                key=lambda x: -len(x[1].by),
+        else:
+            lines.append("== In Progress ==")
+            lines.append("  None.")
+            lines.append("")
+
+        # === Already Explored ===
+        lines.append("== Already Explored ==")
+
+        if has_search:
+            for query, node in sorted(
+                search_nodes.items(),
+                key=lambda x: (-x[1].visits, x[0]),
             ):
-                short = answer[:60].replace('"', "'")
-                lines.append('  END:"{}" by=[{}]'.format(
-                    short,
-                    ",".join(str(a) for a in sorted(node.by)),
-                ))
+                who = sorted(node.visited_by)
+                marker = " (you)" if agent_id in who else ""
+                title_part = ' -> "{}"'.format(node.article_title) if node.article_title else ""
+                lines.append(
+                    '  search "{}"{} [agents {}]{}'.format(
+                        query, title_part,
+                        ",".join(str(a) for a in who), marker,
+                    )
+                )
 
-        # Edges
+        if fetch_nodes:
+            for doc_id, node in sorted(fetch_nodes.items()):
+                who = sorted(node.visited_by)
+                marker = " (you)" if agent_id in who else ""
+                title = ' "{}"'.format(node.title) if node.title else ""
+                lines.append(
+                    "  fetch doc={}{} [agents {}]{}".format(
+                        doc_id,
+                        title,
+                        ",".join(str(a) for a in who),
+                        marker,
+                    )
+                )
+
+        if has_eval:
+            # Group by NDA for audit, or show all for tuning
+            sorted_nodes = sorted(
+                eval_nodes.values(),
+                key=lambda n: (n.perf is not None, n.perf or 0.0),
+                reverse=True,
+            )
+            for node in sorted_nodes:
+                who = sorted(node.visited_by)
+                marker = " (you)" if agent_id in who else ""
+                if is_audit:
+                    lines.append(
+                        "  {} [agents {}]{}".format(
+                            node.config_display,
+                            ",".join(str(a) for a in who), marker,
+                        )
+                    )
+                else:
+                    perf_str = "{:.6f}".format(node.perf) if node.perf is not None else "INVALID"
+                    lines.append(
+                        "  {} -> {} [agents {}]{}".format(
+                            node.config_display, perf_str,
+                            ",".join(str(a) for a in who), marker,
+                        )
+                    )
+
+        if not has_search and not fetch_nodes and not has_eval:
+            lines.append("  None completed yet.")
+
+        # === Exploration Paths ===
+        lines.append("")
+        lines.append("== Exploration Paths ==")
         if edges:
-            lines.append("")
-            lines.append("=== Edges ===")
             for (src, tgt), edge in sorted(
                 edges.items(),
                 key=lambda x: -x[1].count,
             ):
+                agents_str = ",".join(str(a) for a in sorted(edge.agents))
                 if edge.count > 1:
                     lines.append(
-                        "  {} --> {} [{}x]".format(src, tgt, edge.count)
+                        "  {} --> {} [{}x, agents {}]".format(
+                            src, tgt, edge.count, agents_str,
+                        )
                     )
                 else:
-                    lines.append("  {} --> {}".format(src, tgt))
+                    lines.append(
+                        "  {} --> {} [agents {}]".format(
+                            src, tgt, agents_str,
+                        )
+                    )
+        else:
+            lines.append("  No multi-step paths recorded yet.")
 
-        # Unfetched leads section
-        if unfetched_leads:
-            lines.append("")
-            lines.append("=== Unfetched Leads ===")
+        # === Coverage Gap ===
+        lines.append("")
+        lines.append("== Coverage Gap ==")
+
+        if is_audit:
+            # Show only how many NDAs have been attempted — no
+            # Resolved/Unresolved judgments that reduce agent independence.
+            attempted_ndas: set = set()
+            for node in eval_nodes.values():
+                disp = node.config_display
+                nda_part = disp.split("ev:")[0].strip() if "ev:" in disp else disp
+                attempted_ndas.add(nda_part)
             lines.append(
-                "These docs appeared in search results but nobody "
-                "fetched them yet:"
+                "  {} NDAs attempted so far.".format(len(attempted_ndas))
             )
-            lines.append(
-                "  [{}]".format(
-                    ",".join(str(d) for d in unfetched_leads[:15])
+        elif has_eval:
+            valid = [n for n in eval_nodes.values() if n.perf is not None]
+            if valid:
+                best = max(n.perf for n in valid)
+                lines.append(
+                    "  {} unique configs evaluated, best: {:.6f}".format(
+                        len(eval_nodes), best,
+                    )
                 )
+            else:
+                lines.append("  No valid configuration found yet.")
+        elif has_search:
+            fetched_ids = set(fetch_nodes.keys())
+            unfetched = []
+            for node in search_nodes.values():
+                for did in node.returned_doc_ids:
+                    if did not in fetched_ids and did not in unfetched:
+                        unfetched.append(did)
+            lines.append(
+                "  {} queries explored so far.".format(len(search_nodes))
             )
-
-        # Warnings
-        warnings = self._detect_warnings(search_nodes)
-        if warnings:
-            lines.append("")
-            lines.append("=== Warnings ===")
-            for w in warnings:
-                lines.append(w)
+            if unfetched:
+                lines.append(
+                    "  Unfetched leads: [{}]".format(
+                        ",".join(str(d) for d in unfetched[:10])
+                    )
+                )
+            else:
+                lines.append("  Try a query not listed above.")
+        else:
+            lines.append("  Select an action not listed above.")
 
         return "\n".join(lines)
 
@@ -1070,119 +1363,6 @@ class SharedExplorationGraph:
 
         return "\n".join(lines)
 
-    def _format_tuning_diversity(
-        self,
-        eval_nodes: Dict[str, EvalNode],
-        end_nodes: Dict[str, EndNode],
-        edges: Dict[Tuple[str, str], GraphEdge],
-    ) -> str:
-        """Informational format for tuning: shared landscape, soft diversity.
-
-        Shows configs with performance so agents can learn the landscape.
-        Explicitly tells agents that re-evaluating cached configs costs 0s,
-        encouraging natural exploitation of cache hits while still allowing
-        exploration.  Avoids aggressive "try DIFFERENT" instructions that
-        prevent cache hits under tight budgets.
-        """
-        lines = [
-            "[Shared Evaluation History]",
-            "You are one of {} agents working in parallel.".format(
-                self._n_agents
-            ),
-            "Below are ALL actions evaluated so far (by any agent).",
-            "Re-submitting a previously-tried action costs 0s (cached).",
-            "Use these results to make informed decisions.",
-            "",
-            "=== Actions Evaluated ===",
-        ]
-
-        # Sort by perf descending (None last)
-        sorted_nodes = sorted(
-            eval_nodes.values(),
-            key=lambda n: (n.perf is not None, n.perf or 0.0),
-            reverse=True,
-        )
-
-        for node in sorted_nodes:
-            perf_str = "{:.6f}".format(node.perf) if node.perf is not None else "INVALID"
-            lines.append(
-                "  {} -> {} (by [{}])".format(
-                    node.config_display,
-                    perf_str,
-                    ",".join(str(a) for a in sorted(node.visited_by)),
-                )
-            )
-
-        # End nodes
-        if end_nodes:
-            lines.append("")
-            lines.append("=== Endpoints ===")
-            for answer, node in sorted(
-                end_nodes.items(),
-                key=lambda x: -len(x[1].by),
-            ):
-                short = answer[:60].replace('"', "'")
-                lines.append('  END:"{}" by=[{}]'.format(
-                    short,
-                    ",".join(str(a) for a in sorted(node.by)),
-                ))
-
-        # Edges
-        if edges:
-            lines.append("")
-            lines.append("=== Edges ===")
-            for (src, tgt), edge in sorted(
-                edges.items(),
-                key=lambda x: -x[1].count,
-            ):
-                if edge.count > 1:
-                    lines.append(
-                        "  {} --> {} [{}x]".format(src, tgt, edge.count)
-                    )
-                else:
-                    lines.append("  {} --> {}".format(src, tgt))
-
-        # Summary stats — audit vs tuning have different goals
-        valid = [n for n in eval_nodes.values() if n.perf is not None]
-        is_audit = any(
-            n.config_display.startswith("nda:") for n in eval_nodes.values()
-        )
-        if valid and is_audit:
-            correct = sum(1 for n in valid if n.perf == 1.0)
-            incomplete = sum(1 for n in valid if n.perf == 0.5)
-            irrelevant = sum(1 for n in valid if n.perf == 0.0)
-            n_unique_ndas = len(set(
-                n.config_display.split("ev:")[0].strip()
-                for n in eval_nodes.values()
-            ))
-            lines.append("")
-            lines.append(
-                "=== Progress: {}/{} NDAs attempted, {} Correct, "
-                "{} Incomplete, {} Irrelevant ===".format(
-                    n_unique_ndas, n_unique_ndas,
-                    correct, incomplete, irrelevant,
-                )
-            )
-            lines.append(
-                "Goal: get ALL NDAs to Correct. Re-submitting a "
-                "cached action costs 0s."
-            )
-        elif valid:
-            best_perf = max(n.perf for n in valid)
-            n_unique = len(eval_nodes)
-            lines.append("")
-            lines.append(
-                "Best score so far: {:.6f} from {} unique actions.".format(
-                    best_perf, n_unique,
-                )
-            )
-            lines.append(
-                "You can re-submit a known-good action (free) or "
-                "try new approaches to improve."
-            )
-
-        return "\n".join(lines)
-
     @staticmethod
     def _detect_warnings(
         search_nodes: Dict[str, SearchNode],
@@ -1201,12 +1381,19 @@ class SharedExplorationGraph:
     def stats(self) -> Dict[str, Any]:
         """Return graph statistics."""
         with self._lock:
+            total_claims = sum(len(v) for v in self._claims.values())
+            pending_claims = sum(
+                1 for claims in self._claims.values()
+                for c in claims if c.completion_time == float("inf")
+            )
             return {
                 "search_nodes": len(self._search_nodes),
                 "fetch_nodes": len(self._fetch_nodes),
                 "eval_nodes": len(self._eval_nodes),
                 "end_nodes": len(self._end_nodes),
                 "edges": len(self._edges),
+                "total_claims": total_claims,
+                "pending_claims": pending_claims,
                 "total_visits": sum(
                     n.visits for n in self._search_nodes.values()
                 ) + sum(
@@ -1220,6 +1407,26 @@ class SharedExplorationGraph:
 # ---------------------------------------------------------------------------
 # Helper: parse search_meta and fetch_doc results for graph recording
 # ---------------------------------------------------------------------------
+
+def _parse_search_payload(payload_str: str) -> str:
+    """Extract query from Phantom Wiki search payload."""
+    try:
+        data = json.loads(payload_str)
+        return str(data.get("query", "")).strip()
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return payload_str.strip()
+
+
+def _parse_search_result_title(result_str: str) -> str:
+    """Extract article title from Phantom Wiki search result.
+
+    Format: 'Article: <title>\\n\\n<content>'
+    """
+    if result_str.startswith("Article: "):
+        first_line = result_str.split("\n", 1)[0]
+        return first_line[len("Article: "):].strip()
+    return ""
+
 
 def _parse_search_meta_result(result_str: str) -> List[int]:
     """Extract doc_ids from search_meta result string."""
@@ -1291,23 +1498,13 @@ def _parse_evaluate_config(
 
     if isinstance(data, dict):
         config_key = json.dumps(data, sort_keys=True, separators=(",", ":"))
-        # Compact display: abbreviate long configs
         items = sorted(data.items())
-        if len(items) <= 6:
-            config_display = "{" + ",".join(
-                "{}:{}".format(k, v) for k, v in items
-            ) + "}"
-        else:
-            shown = items[:4]
-            config_display = "{" + ",".join(
-                "{}:{}".format(k, v) for k, v in shown
-            ) + ",...+" + str(len(items) - 4) + "}"
+        config_display = "{" + ",".join(
+            "{}:{}".format(k, v) for k, v in items
+        ) + "}"
     elif isinstance(data, list):
         config_key = json.dumps(data, separators=(",", ":"))
-        config_display = "[" + ",".join(str(v) for v in data[:6])
-        if len(data) > 6:
-            config_display += ",...+" + str(len(data) - 6)
-        config_display += "]"
+        config_display = "[" + ",".join(str(v) for v in data) + "]"
     else:
         return "", "", None
 
@@ -1333,10 +1530,10 @@ def _parse_evaluate_config(
 
 
 # ---------------------------------------------------------------------------
-# PoLACT wrapper (caching + graph recording)
+# PoolAct wrapper (caching + graph recording)
 # ---------------------------------------------------------------------------
 
-def wrap_tools_with_polact(
+def wrap_tools_with_poolact(
     tools: Dict[str, Callable],
     cache: SharedObservationCache,
     graph: SharedExplorationGraph,
@@ -1345,11 +1542,18 @@ def wrap_tools_with_polact(
     clock: Optional[AgentClock] = None,
     overhead_scale: float = 1.0,
 ) -> Dict[str, Callable]:
-    """Wrap tool functions with caching + graph recording for PoLACT.
+    """Wrap tools with the PoolAct strategy described in the paper.
 
     Combines:
     - Layer 0 (caching): exact-match deduplication with zero-cost hits
     - Layer 2 (graph): records exploration topology for context injection
+    - Layer 3 (claims): pending-action claims for "In Progress" visibility
+
+    Every tool call records a pending claim **before** execution and
+    marks it completed **after**.  This populates the graph's
+    "In Progress" section, giving other agents soft guidance about
+    what's currently being worked on.  No hard blocking — the LLM
+    decides how to respond to the information.
 
     Args:
         tools: Dict of tool_name -> callable.
@@ -1362,16 +1566,22 @@ def wrap_tools_with_polact(
     Returns:
         New tools dict with wrapped callables.
     """
+    # Before the graph implementation was finalized, the public prototype
+    # used this name for a flat ledger.  Keep that call shape working while
+    # making the graph implementation the unambiguous default.
+    if isinstance(graph, SharedExplorationLedger):
+        return wrap_tools_with_ledger(tools, cache, graph, agent_id)
+
     wrapped = {}
     for tool_name, func in tools.items():
-        wrapped[tool_name] = _make_polact_wrapper(
+        wrapped[tool_name] = _make_poolact_graph_wrapper(
             tool_name, func, cache, graph, agent_id,
             clock=clock, overhead_scale=overhead_scale,
         )
     return wrapped
 
 
-def _make_polact_wrapper(
+def _make_poolact_graph_wrapper(
     tool_name: str,
     original_fn: Callable,
     cache: SharedObservationCache,
@@ -1381,26 +1591,68 @@ def _make_polact_wrapper(
     clock: Optional[AgentClock] = None,
     overhead_scale: float = 1.0,
 ) -> Callable:
-    """Create a wrapper with caching + graph recording."""
+    """Create a wrapper with caching + graph recording + pending claims.
+
+    No hard blocking.  Claims populate the graph's "In Progress"
+    section.  The LLM sees this via the observation augmenter and
+    decides how to act.
+
+    Flow:
+    1. Check cache (time-gated) → if hit, return cached result (0s).
+    2. Record claim if not already registered by pre_tool_hook.
+    3. Execute tool, advance clock.
+    4. Complete claim, cache result, record in graph.
+
+    When used with ``make_pre_tool_hook()``, claims are recorded
+    early (right after the LLM outputs the Action) so other threads
+    can see them during their own LLM calls.  The wrapper then skips
+    duplicate claim recording (step 2) but still completes the claim.
+    """
     def wrapper(payload: str) -> Any:
         vb = clock.now if clock is not None else None
-        # Check cache first
+
+        # 1. Cache hit — result already available (instant, no overhead).
+        # A pre_tool_hook may already have recorded this action as pending;
+        # complete that claim here or it would remain "In Progress" forever.
         cached = cache.get(tool_name, payload, visible_before=vb)
         if cached is not None:
             result = _zero_overhead(cached)
-            # Record in graph — pass inf so min() won't lower existing ct
+            graph.complete_claim(
+                tool_name, payload, agent_id,
+                completion_time=vb if vb is not None else 0.0,
+            )
             _record_in_graph(
                 graph, agent_id, tool_name, payload, cached,
-                completion_time=float("inf"),
+                completion_time=vb if vb is not None else 0.0,
             )
             return result
 
-        # Cache miss — call original tool
-        result = original_fn(payload)
+        # 2. Record claim only if pre_tool_hook hasn't already done it.
+        start_time = vb if vb is not None else 0.0
+        if not graph.has_pending_claim(tool_name, payload, agent_id):
+            graph.record_claim(
+                tool_name, payload, agent_id, start_time=start_time,
+            )
+
+        # 3. Execute tool
+        try:
+            result = original_fn(payload)
+        except BaseException:
+            # Failed tools must not leave a permanent pending claim.  There
+            # is no completed observation to cache or add to the graph.
+            graph.complete_claim(
+                tool_name, payload, agent_id, completion_time=start_time,
+            )
+            raise
         raw_overhead = _extract_overhead_from_result(result)
-        ct = (clock.now + raw_overhead * overhead_scale) if clock is not None else 0.0
+        scaled_overhead = raw_overhead * overhead_scale
+        ct = (clock.now + scaled_overhead) if clock is not None else 0.0
+
+        # 4. Complete claim + cache + graph
+        graph.complete_claim(
+            tool_name, payload, agent_id, completion_time=ct,
+        )
         cache.put(tool_name, payload, result, completion_time=ct)
-        # Record in graph
         _record_in_graph(
             graph, agent_id, tool_name, payload, result,
             completion_time=ct,
@@ -1432,7 +1684,16 @@ def _record_in_graph(
     else:
         result_str = str(result)
 
-    if tool_name == "search_meta":
+    if tool_name == "search":
+        query = _parse_search_payload(payload)
+        title = _parse_search_result_title(result_str)
+        if query:
+            graph.record_search(
+                agent_id, query, title,
+                completion_time=completion_time,
+            )
+
+    elif tool_name == "search_meta":
         query = _parse_search_meta_payload(payload)
         doc_ids = _parse_search_meta_result(result_str)
         if query:
@@ -1515,13 +1776,14 @@ def _parse_human_feedback(
 
 
 # ---------------------------------------------------------------------------
-# Graph augmenter for PoLACT context injection
+# Graph augmenter for PoolAct context injection
 # ---------------------------------------------------------------------------
 
 def make_graph_augmenter(
     graph: SharedExplorationGraph,
     *,
     clock: Optional[AgentClock] = None,
+    agent_id: Optional[int] = None,
 ) -> Callable[[str], str]:
     """Create an observation_augmenter that appends the exploration graph.
 
@@ -1529,17 +1791,73 @@ def make_graph_augmenter(
     ``run_react_loop()`` to inject the graph into each agent's
     observation context after every tool call.
 
+    The graph is **appended** so the LLM reads its own query result
+    first (preserving query→result coherence), then sees coordination
+    context for planning the next action.
+
     Args:
         graph: Shared exploration graph instance.
         clock: Optional AgentClock for time-gated visibility.
+        agent_id: The agent's ID, used to label own vs others' results.
 
     Returns:
         A callable ``(observation: str) -> str`` that appends the graph.
     """
     def augmenter(observation: str) -> str:
         vb = clock.now if clock is not None else None
-        graph_text = graph.format_for_injection(visible_before=vb)
+        graph_text = graph.format_for_injection(
+            visible_before=vb, agent_id=agent_id,
+        )
         if graph_text:
             return "{}\n\n{}".format(observation, graph_text)
         return observation
     return augmenter
+
+
+def make_pre_tool_hook(
+    graph: SharedExplorationGraph,
+    agent_id: int,
+    *,
+    clock: Optional[AgentClock] = None,
+) -> Callable[[str, str], None]:
+    """Create a pre_tool_hook that records claims early.
+
+    Called by ``run_react_loop()`` right after the LLM outputs an
+    Action — before the tool wrapper executes.  This gives other
+    parallel agents a full LLM-call-duration window (~3s real time)
+    to see the claim as "In Progress" in the graph.
+
+    The PoolAct wrapper's own claim recording is skipped when a claim
+    already exists (idempotent).
+    """
+    def hook(tool_name: str, payload: str) -> None:
+        start_time = clock.now if clock is not None else 0.0
+        if not graph.has_pending_claim(tool_name, payload, agent_id):
+            graph.record_claim(
+                tool_name, payload, agent_id, start_time=start_time,
+            )
+    return hook
+
+
+def wrap_tools_with_polact(
+    tools: Dict[str, Callable],
+    cache: SharedObservationCache,
+    graph: SharedExplorationGraph,
+    agent_id: int,
+    *,
+    clock: Optional[AgentClock] = None,
+    overhead_scale: float = 1.0,
+) -> Dict[str, Callable]:
+    """Compatibility alias for :func:`wrap_tools_with_poolact`.
+
+    ``polact`` was an internal typo retained by early experiment scripts.
+    New code should use ``wrap_tools_with_poolact``.
+    """
+    return wrap_tools_with_poolact(
+        tools,
+        cache,
+        graph,
+        agent_id,
+        clock=clock,
+        overhead_scale=overhead_scale,
+    )
