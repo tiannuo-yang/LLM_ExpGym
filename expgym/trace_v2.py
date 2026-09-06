@@ -6,7 +6,6 @@ while summaries such as token totals and printable steps are derived by readers.
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -15,8 +14,14 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
+
+try:  # Python 3.7 is required by the pinned HPOBench container.
+    from importlib import metadata as importlib_metadata
+except ImportError:  # pragma: no cover - exercised only in the HPOBench image
+    import importlib_metadata  # type: ignore[no-redef]
 
 
 TRACE_SCHEMA_NAME = "expgym.trace"
@@ -31,6 +36,39 @@ def _sha256_file(path: Path) -> Optional[str]:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@lru_cache(maxsize=4)
+def _source_files(repo_root: Path) -> Tuple[Path, ...]:
+    source_paths: List[Path] = []
+    for directory in ("expgym", "scripts", "schemas", "tests"):
+        root = repo_root / directory
+        if root.is_dir():
+            source_paths.extend(
+                path
+                for path in root.rglob("*")
+                if path.is_file()
+                and "__pycache__" not in path.parts
+                and path.suffix.lower()
+                in {".py", ".sh", ".json", ".yaml", ".yml", ".md"}
+            )
+    entrypoint = repo_root / "demo_experiment.py"
+    if entrypoint.is_file():
+        source_paths.append(entrypoint)
+    return tuple(sorted(source_paths))
+
+
+@lru_cache(maxsize=4)
+def source_tree_sha256(repo_root: Path) -> str:
+    """Hash runtime, scripts, schemas, and tests for resume/provenance checks."""
+    source_digest = hashlib.sha256()
+    for path in _source_files(repo_root):
+        relative = path.relative_to(repo_root).as_posix()
+        source_digest.update(relative.encode("utf-8"))
+        source_digest.update(b"\0")
+        source_digest.update(path.read_bytes())
+        source_digest.update(b"\0")
+    return source_digest.hexdigest()
 
 
 def _git_provenance(repo_root: Path) -> Dict[str, object]:
@@ -54,28 +92,6 @@ def _git_provenance(repo_root: Path) -> Dict[str, object]:
         status_output = ""
     status_lines = [line for line in status_output.splitlines() if line]
     diff = run("diff", "--binary", "HEAD")
-    source_paths: List[Path] = []
-    for directory in ("expgym", "scripts", "schemas", "tests"):
-        root = repo_root / directory
-        if root.is_dir():
-            source_paths.extend(
-                path
-                for path in root.rglob("*")
-                if path.is_file()
-                and "__pycache__" not in path.parts
-                and path.suffix.lower()
-                in {".py", ".sh", ".json", ".yaml", ".yml", ".md"}
-            )
-    entrypoint = repo_root / "demo_experiment.py"
-    if entrypoint.is_file():
-        source_paths.append(entrypoint)
-    source_digest = hashlib.sha256()
-    for path in sorted(source_paths):
-        relative = path.relative_to(repo_root).as_posix()
-        source_digest.update(relative.encode("utf-8"))
-        source_digest.update(b"\0")
-        source_digest.update(path.read_bytes())
-        source_digest.update(b"\0")
     return {
         "commit": commit,
         "dirty": bool(status_lines),
@@ -83,8 +99,8 @@ def _git_provenance(repo_root: Path) -> Dict[str, object]:
         "tracked_diff_sha256": (
             hashlib.sha256(diff.encode("utf-8")).hexdigest() if diff else None
         ),
-        "source_tree_sha256": source_digest.hexdigest(),
-        "source_file_count": len(source_paths),
+        "source_tree_sha256": source_tree_sha256(repo_root),
+        "source_file_count": len(_source_files(repo_root)),
     }
 
 
@@ -92,8 +108,8 @@ def _environment_provenance() -> Dict[str, object]:
     packages: Dict[str, Optional[str]] = {}
     for name in ("openai", "numpy", "pyyaml", "huggingface-hub", "pyarrow"):
         try:
-            packages[name] = importlib.metadata.version(name)
-        except importlib.metadata.PackageNotFoundError:
+            packages[name] = importlib_metadata.version(name)
+        except importlib_metadata.PackageNotFoundError:
             packages[name] = None
     return {
         "python": sys.version.split()[0],
@@ -471,5 +487,8 @@ def write_trace_v2(path: Path, trace: Dict[str, object]) -> None:
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
     except Exception:
-        temp_path.unlink(missing_ok=True)
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
         raise

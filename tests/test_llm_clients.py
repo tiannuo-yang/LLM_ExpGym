@@ -1,5 +1,8 @@
 import json
 import unittest
+import urllib.error
+from email.message import Message
+from io import BytesIO
 
 from expgym.llm_clients import (
     DEFAULT_GEMINI_URL,
@@ -24,6 +27,17 @@ class _CaptureTransport:
         self.request = request
         self.timeout = timeout
         return json.dumps(self.payload).encode("utf-8")
+
+
+class _SequenceTransport:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.calls = 0
+
+    def __call__(self, _request, _timeout):
+        payload = self.payloads[self.calls]
+        self.calls += 1
+        return json.dumps(payload).encode("utf-8")
 
 
 class OpenAICompatibleLLMTest(unittest.TestCase):
@@ -97,6 +111,70 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
             with self.subTest(given=given):
                 llm = OpenAICompatibleLLM(api_key="k", base_url=given)
                 self.assertEqual(llm.config.base_url, expected)
+
+    def test_max_retries_zero_fails_after_one_attempt(self) -> None:
+        calls = 0
+
+        def unavailable(_request, _timeout):
+            nonlocal calls
+            calls += 1
+            raise urllib.error.HTTPError(
+                "http://fake",
+                503,
+                "Unavailable",
+                Message(),
+                BytesIO(b'{"error":"down"}'),
+            )
+
+        llm = OpenAICompatibleLLM(
+            api_key="k",
+            transport=unavailable,
+            max_retries=0,
+        )
+        with self.assertRaisesRegex(RuntimeError, "API error"):
+            llm.generate("test")
+        self.assertEqual(calls, 1)
+
+    def test_retry_after_is_bounded(self) -> None:
+        headers = Message()
+        headers["Retry-After"] = "999"
+        llm = OpenAICompatibleLLM(
+            api_key="k",
+            retry_max_seconds=7,
+        )
+        self.assertEqual(llm._retry_delay(0, headers), 7)
+
+    def test_retries_empty_success_response(self) -> None:
+        transport = _SequenceTransport(
+            [
+                {"choices": [{"message": {"content": None}}]},
+                {"choices": [{"message": {"content": "Recovered"}}]},
+            ]
+        )
+        llm = OpenAICompatibleLLM(
+            api_key="k",
+            transport=transport,
+            max_retries=1,
+            retry_base_seconds=0,
+        )
+
+        output = llm.generate("test")
+
+        self.assertEqual(output.text, "Recovered")
+        self.assertEqual(output.request_attempts, 2)
+        self.assertEqual(transport.calls, 2)
+
+    def test_empty_response_fails_after_retry_limit(self) -> None:
+        transport = _CaptureTransport(
+            {"choices": [{"message": {"content": None}}]}
+        )
+        llm = OpenAICompatibleLLM(
+            api_key="k",
+            transport=transport,
+            max_retries=0,
+        )
+        with self.assertRaisesRegex(RuntimeError, "missing message content"):
+            llm.generate("test")
 
 
 class GeminiHelperTest(unittest.TestCase):

@@ -6,6 +6,7 @@ import json
 import math
 import random
 import os
+import threading
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +46,7 @@ PARAMETER_RANGES: List[ParameterRange] = [
     ParameterRange("gradient_accumulation", 1, 16),
 ]
 
-# --- HPOBench support (surrogate-only). ---
+# --- HPOBench paper-task support. ---
 
 HPOBENCH_ROOT = os.environ.get(
     "HPOBENCH_ROOT",
@@ -142,11 +143,20 @@ def _apply_fidelity_settings(
 
 
 _HPOBENCH_CACHE: Dict[str, Any] = {}
+_HPOBENCH_CACHE_LOCK = threading.Lock()
+_HPOBENCH_EVAL_LOCKS: Dict[str, threading.Lock] = {}
+_HPOBENCH_FALLBACK_EVAL_LOCK = threading.Lock()
 
 
 def _load_hpobench(task_name: str) -> HPOBenchTask:
-    if task_name in _HPOBENCH_CACHE:
+    with _HPOBENCH_CACHE_LOCK:
+        if task_name not in _HPOBENCH_CACHE:
+            _HPOBENCH_CACHE[task_name] = _load_hpobench_uncached(task_name)
+            _HPOBENCH_EVAL_LOCKS[task_name] = threading.Lock()
         return _HPOBENCH_CACHE[task_name]
+
+
+def _load_hpobench_uncached(task_name: str) -> HPOBenchTask:
     if not os.path.isdir(HPOBENCH_ROOT):
         raise FileNotFoundError(
             f"HPOBench not found at {HPOBENCH_ROOT}. Please download it first."
@@ -189,7 +199,6 @@ def _load_hpobench(task_name: str) -> HPOBenchTask:
         fidelity = {"dataset_fraction": 1.0}
         fidelity = _apply_fidelity_settings(task_name, fidelity_space, fidelity)
         result = HPOBenchTask(name=task_name, benchmark=bench, config_space=cs, fidelity=fidelity)
-        _HPOBENCH_CACHE[task_name] = result
         return result
 
     if task_name.startswith("hpobench:nasbench201:"):
@@ -197,19 +206,14 @@ def _load_hpobench(task_name: str) -> HPOBenchTask:
         if len(parts) < 3:
             raise ValueError("NASBench201 task must be hpobench:nasbench201:<dataset>")
         dataset = parts[2]
-        from hpobench.benchmarks.nas import nasbench_201
+        from expgym.compact_nasbench201 import CompactNasBench201Benchmark
 
-        mapping = {
-            "cifar10-valid": nasbench_201.Cifar10ValidNasBench201Benchmark,
-            "cifar100": nasbench_201.Cifar100NasBench201Benchmark,
-            "imagenet16-120": nasbench_201.ImageNetNasBench201Benchmark,
-        }
-        if dataset not in mapping:
+        if dataset not in {"cifar10-valid", "cifar100", "imagenet16-120"}:
             raise ValueError(
                 "Unknown NASBench201 dataset. Choose from: "
                 "cifar10-valid, cifar100, imagenet16-120"
             )
-        bench = mapping[dataset](rng=1)
+        bench = CompactNasBench201Benchmark(dataset=dataset, rng=1)
         cs = bench.get_configuration_space(seed=1)
         fidelity_space = bench.get_fidelity_space(seed=1)
         fidelity = {}
@@ -217,7 +221,6 @@ def _load_hpobench(task_name: str) -> HPOBenchTask:
             fidelity[hp.name] = hp.default_value
         fidelity = _apply_fidelity_settings(task_name, fidelity_space, fidelity)
         result = HPOBenchTask(name=task_name, benchmark=bench, config_space=cs, fidelity=fidelity)
-        _HPOBENCH_CACHE[task_name] = result
         return result
 
     if task_name.startswith("hpobench:nasbench101:"):
@@ -225,42 +228,11 @@ def _load_hpobench(task_name: str) -> HPOBenchTask:
         if len(parts) < 3:
             raise ValueError("NASBench101 task must be hpobench:nasbench101:<A|B|C>")
         variant = parts[2].upper()
-        from hpobench.benchmarks.nas import nasbench_101
+        from expgym.compact_nasbench101 import CompactNasBench101Benchmark
 
-        variant_map = {
-            "A": nasbench_101.NASCifar10ABenchmark,
-            "B": nasbench_101.NASCifar10BBenchmark,
-            "C": nasbench_101.NASCifar10CBenchmark,
-        }
-        if variant not in variant_map:
+        if variant not in {"A", "B", "C"}:
             raise ValueError("NASBench101 variant must be A, B, or C.")
-        # Pre-load the NASBench API once and share across A/B/C variants.
-        # Each variant's __init__ would load nasbench_full.tfrecord (~4GB);
-        # we intercept with a cached copy to avoid duplicate loads.
-        _shared_nb_api = None
-        for cached in _HPOBENCH_CACHE.values():
-            if (cached.name.startswith("hpobench:nasbench101:")
-                    and hasattr(cached.benchmark, 'benchmark')
-                    and hasattr(cached.benchmark.benchmark, 'dataset')):
-                _shared_nb_api = cached.benchmark.benchmark.dataset
-                break
-        if _shared_nb_api is not None:
-            # Temporarily monkey-patch NASCifar10.__init__ to skip loading
-            from tabular_benchmarks.nas_cifar10 import NASCifar10
-            _orig_init = NASCifar10.__init__
-            def _patched_init(self, data_dir, multi_fidelity=True):
-                self.multi_fidelity = multi_fidelity
-                self.dataset = _shared_nb_api
-                self.X, self.y_valid, self.y_test, self.costs = [], [], [], []
-                self.y_star_valid = 0.04944576819737756
-                self.y_star_test = 0.056824247042338016
-            NASCifar10.__init__ = _patched_init
-            try:
-                bench = variant_map[variant](rng=1)
-            finally:
-                NASCifar10.__init__ = _orig_init
-        else:
-            bench = variant_map[variant](rng=1)
+        bench = CompactNasBench101Benchmark(variant=variant, rng=1)
         cs = bench.get_configuration_space(seed=1)
         fidelity_space = bench.get_fidelity_space(seed=1)
         fidelity = {}
@@ -268,7 +240,6 @@ def _load_hpobench(task_name: str) -> HPOBenchTask:
             fidelity[hp.name] = hp.default_value
         fidelity = _apply_fidelity_settings(task_name, fidelity_space, fidelity)
         result = HPOBenchTask(name=task_name, benchmark=bench, config_space=cs, fidelity=fidelity)
-        _HPOBENCH_CACHE[task_name] = result
         return result
 
     if task_name.startswith("hpobench:paramnet:"):
@@ -314,7 +285,6 @@ def _load_hpobench(task_name: str) -> HPOBenchTask:
             fidelity[hp.name] = hp.default_value
         fidelity = _apply_fidelity_settings(task_name, fidelity_space, fidelity)
         result = HPOBenchTask(name=task_name, benchmark=bench, config_space=cs, fidelity=fidelity)
-        _HPOBENCH_CACHE[task_name] = result
         return result
 
     raise ValueError(f"Unknown tuning task: {task_name}")
@@ -363,7 +333,17 @@ def _describe_config_space(cs: Any) -> str:
 
 
 def _hpobench_evaluate(task: HPOBenchTask, config: Dict[str, Any]) -> Tuple[float, float]:
-    result = task.benchmark.objective_function(configuration=config, fidelity=task.fidelity)
+    # Benchmark instances are shared across PoolAct agents. Guard mutable
+    # ConfigSpace/surrogate state when agents evaluate concurrently.
+    lock = _HPOBENCH_EVAL_LOCKS.get(
+        getattr(task, "name", ""),
+        _HPOBENCH_FALLBACK_EVAL_LOCK,
+    )
+    with lock:
+        result = task.benchmark.objective_function(
+            configuration=config,
+            fidelity=task.fidelity,
+        )
     obj_value = float(result.get("function_value", 1.0))
     cost = float(result.get("cost", 0.0))
     if 1.0 < obj_value <= 100.0:
@@ -375,18 +355,18 @@ def _hpobench_evaluate(task: HPOBenchTask, config: Dict[str, Any]) -> Tuple[floa
 
 
 def list_hpobench_tasks() -> List[str]:
-    datasets = ["adult", "higgs", "letter", "mnist", "optdigits", "poker"]
-    tasks = ["hpobench:svm_surrogate"]
-    for dataset in datasets:
-        # for mode in ["steps", "time"]:
-        for mode in ["steps"]:
-            tasks.append(f"hpobench:paramnet:{dataset}:{mode}")
-            # tasks.append(f"hpobench:paramnet:{dataset}:{mode}:reduced")
-    for dataset in ["cifar10-valid", "cifar100", "imagenet16-120"]:
-        tasks.append(f"hpobench:nasbench201:{dataset}")
-    for variant in ["A", "B", "C"]:
-        tasks.append(f"hpobench:nasbench101:{variant}")
-    return tasks
+    """Return exactly the nine data-complete tasks in the paper matrix."""
+    return [
+        "hpobench:paramnet:adult:steps",
+        "hpobench:paramnet:higgs:steps",
+        "hpobench:paramnet:letter:steps",
+        "hpobench:nasbench101:A",
+        "hpobench:nasbench101:B",
+        "hpobench:nasbench101:C",
+        "hpobench:nasbench201:cifar10-valid",
+        "hpobench:nasbench201:cifar100",
+        "hpobench:nasbench201:imagenet16-120",
+    ]
 
 # --- Environment mechanics (deterministic perf/overhead surfaces). ---
 
@@ -415,10 +395,6 @@ def _hash_noise(values: List[float], scale: float) -> float:
 
 def _performance(vec: List[float]) -> float:
     raw = _denormalize(vec)
-    num_layers = raw["num_layers"]
-    hidden_width = raw["hidden_width"]
-    attention_heads = raw["attention_heads"]
-    ffn_expansion = raw["ffn_expansion"]
     dropout_rate = raw["dropout_x100"] / 100.0
     lr = raw["learning_rate_x1e5"] * 1e-5
     weight_decay = raw["weight_decay_x1e4"] * 1e-4
@@ -697,12 +673,13 @@ def build_fake_plan(
         payloads = [format_config(cfg) for cfg in candidate_configs]
         return [("evaluate_config", payload) for payload in payloads]
     task = _load_hpobench(tuning_task)
-    if seed is not None:
-        task.config_space.seed(seed)
-    configs = [
-        dict(task.config_space.sample_configuration())
-        for _ in range(max(1, probes))
-    ]
+    with _HPOBENCH_EVAL_LOCKS[task.name]:
+        if seed is not None:
+            task.config_space.seed(seed)
+        configs = [
+            dict(task.config_space.sample_configuration())
+            for _ in range(max(1, probes))
+        ]
     payloads = [json.dumps(cfg) for cfg in configs]
     return [("evaluate_config", payload) for payload in payloads]
 

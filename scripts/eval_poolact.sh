@@ -6,8 +6,9 @@ cd "$ROOT_DIR"
 
 # ``scripts/setup.sh`` creates this environment. Prefer it automatically so
 # readers do not have to remember to activate the venv in every new shell.
-if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
-  export PATH="$ROOT_DIR/.venv/bin:$PATH"
+VENV_DIR="${EXPGYM_VENV:-$ROOT_DIR/.venv}"
+if [[ -x "$VENV_DIR/bin/python" ]]; then
+  export PATH="$VENV_DIR/bin:$PATH"
 fi
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -24,7 +25,7 @@ else
 fi
 
 BACKEND="${EXPGYM_BACKEND:-$DEFAULT_BACKEND}"
-MODEL="${EXPGYM_MODEL:-${SUB2API_MODEL:-${EXPGYM_OPENROUTER_MODEL:-openai/gpt-4.1-nano}}}"
+MODEL="${EXPGYM_MODEL:-}"
 SCENARIO="tuning"
 TASK="neural_network_training"
 QUESTION_INDEX="0"
@@ -104,11 +105,34 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+  EXPGYM_VENV="$VENV_DIR" bash scripts/setup.sh
+  export PATH="$VENV_DIR/bin:$PATH"
+fi
+PYTHON_BIN="$VENV_DIR/bin/python"
+
+if [[ -z "$MODEL" ]]; then
+  case "$BACKEND" in
+    sub2api) MODEL="${SUB2API_MODEL:-gpt-5.4}" ;;
+    openai) MODEL="${EXPGYM_OPENAI_MODEL:-gpt-4o-mini}" ;;
+    gemini) MODEL="${EXPGYM_GEMINI_MODEL:-gemini-2.5-flash}" ;;
+    vllm) MODEL="${EXPGYM_VLLM_MODEL:-local-model}" ;;
+    fake) MODEL="fake" ;;
+    *) MODEL="${EXPGYM_OPENROUTER_MODEL:-openai/gpt-4.1-nano}" ;;
+  esac
+fi
+
 if [[ "$WITH_AUTO_DATA" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+  "$PYTHON_BIN" -m pip install --disable-pip-version-check --quiet \
+    -r requirements-data.txt
   case "$SCENARIO" in
-    restricted_search) python scripts/download_data.py --only phantom-wiki ;;
-    evidence_audit) python scripts/download_data.py --only contract-nli ;;
-    tuning) : ;;
+    restricted_search) "$PYTHON_BIN" scripts/download_data.py --only phantom-wiki ;;
+    evidence_audit) "$PYTHON_BIN" scripts/download_data.py --only contract-nli ;;
+    tuning)
+      if [[ "$TASK" == hpobench:* ]]; then
+        "$PYTHON_BIN" scripts/download_data.py --only hpobench
+      fi
+      ;;
   esac
 fi
 
@@ -125,7 +149,7 @@ if [[ -z "$OUTPUT_DIR" ]]; then
 fi
 
 CMD=(
-  python scripts/run_poolact.py
+  "$PYTHON_BIN" scripts/run_poolact.py
   --backend "$BACKEND"
   --model "$MODEL"
   --scenario "$SCENARIO"

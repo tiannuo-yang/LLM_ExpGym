@@ -36,9 +36,19 @@ if [[ -f "$PID_FILE" ]]; then
   rm -f "$PID_FILE"
 fi
 
-ENV_PYTHON="${EXPGYM_CONDA_PREFIX:-/path/to/conda/envs}/${ENV_NAME}/bin/python"
+ENV_PYTHON="${EXPGYM_VLLM_PYTHON:-}"
+if [[ -z "$ENV_PYTHON" && -n "${EXPGYM_CONDA_PREFIX:-}" ]]; then
+  ENV_PYTHON="$EXPGYM_CONDA_PREFIX/bin/python"
+fi
+if [[ -z "$ENV_PYTHON" ]] && command -v conda >/dev/null 2>&1; then
+  ENV_PREFIX="$(conda env list | awk -v env="$ENV_NAME" '$1 == env {print $NF; exit}')"
+  if [[ -n "$ENV_PREFIX" ]]; then
+    ENV_PYTHON="$ENV_PREFIX/bin/python"
+  fi
+fi
 if [[ ! -x "$ENV_PYTHON" ]]; then
-  echo "Python not found at $ENV_PYTHON"
+  echo "Python for conda environment '$ENV_NAME' was not found." >&2
+  echo "Run scripts/setup_vllm_env.sh or set EXPGYM_VLLM_PYTHON." >&2
   exit 1
 fi
 

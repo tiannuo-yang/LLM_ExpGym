@@ -74,8 +74,8 @@ def _read_parquet_table(path: str, columns: List[str]):
     except ImportError as exc:  # pragma: no cover - depends on optional data deps
         raise RuntimeError(
             "Restricted search needs pyarrow to read Phantom Wiki parquet files. "
-            "Install it with `python -m pip install pyarrow`, or run "
-            "`bash scripts/smoke.sh --with-auto-data`."
+            "Run `bash scripts/setup.sh --with-data` to install the data "
+            "dependencies and download the benchmark snapshot."
         ) from exc
     return pq.read_table(path, columns=columns)
 

@@ -12,7 +12,7 @@ objects:
    decision's pending claim are one serialized critical section.
 
 The serialized result identifies this contract as
-`paper-graph-lock-v1` (`expgym.poolact.POOLACT_PROTOCOL_VERSION`).
+`paper-graph-lock-v2` (`expgym.poolact.POOLACT_PROTOCOL_VERSION`).
 
 After the claim is recorded, the lock is released and the tool executes in
 parallel with other agents' tools.
@@ -158,9 +158,10 @@ For a single item, each strategy writes:
 ```
 
 `result.json` contains individual answers, aggregate answer and score, cache
-and graph statistics, the complete resolved configuration, and hashes of all
-PoolAct implementation files. Files are written atomically; `--resume` skips a
-result only when its stored configuration exactly matches the requested run.
+and graph statistics, the complete resolved configuration, and a fingerprint
+of the repository source tree. Files are written atomically; `--resume` skips a
+result only after validating the configuration, source fingerprint, aggregate
+score, every agent trace, and the separate per-agent files.
 
 With `--questions`, the same tree appears under `<output>/item_N/` for each
 selected item, and `<output>/summary.json` contains the per-item results and

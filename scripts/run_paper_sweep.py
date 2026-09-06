@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -34,13 +35,19 @@ from demo_experiment import (  # noqa: E402
     _SCENARIOS,
     _call_scenario,
     _resolve_system_prompt,
+    _resolve_answer_evaluator,
     _resolve_tools,
     build_llm,
     resolve_base_cost,
     resolve_cost_regime,
 )
 from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
-from expgym.trace_v2 import build_trace_v2, write_trace_v2  # noqa: E402
+from expgym.trace_v2 import (  # noqa: E402
+    build_trace_v2,
+    load_trace_v2,
+    source_tree_sha256,
+    write_trace_v2,
+)
 
 PAPER_MODELS: Dict[str, str] = {
     "dsv32": "deepseek/deepseek-v3.2",
@@ -183,12 +190,34 @@ def _default_key_file() -> Path:
     )
 
 
+def _backend_base_url(backend: str) -> Optional[str]:
+    if os.environ.get("EXPGYM_BASE_URL"):
+        return os.environ["EXPGYM_BASE_URL"]
+    return {
+        "sub2api": os.environ.get("SUB2API_BASE_URL"),
+        "openrouter": os.environ.get("OPENROUTER_BASE_URL"),
+        "openai": os.environ.get("OPENAI_BASE_URL"),
+    }.get(backend)
+
+
+def _backend_model(backend: str) -> str:
+    return {
+        "sub2api": os.environ.get("SUB2API_MODEL", "gpt-5.4"),
+        "openai": os.environ.get("EXPGYM_OPENAI_MODEL", "gpt-4o-mini"),
+        "fake": "fake",
+    }.get(
+        backend,
+        os.environ.get("EXPGYM_OPENROUTER_MODEL", DEFAULT_MODEL),
+    )
+
+
 def _load_api_key(path: Optional[Path], backend: str = "openrouter") -> Optional[str]:
-    if backend == "sub2api":
-        env_key = os.environ.get("SUB2API_API_KEY")
-        if env_key:
-            return env_key.strip()
-    env_key = os.environ.get("OPENROUTER_API_KEY")
+    env_name = {
+        "openai": "OPENAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "sub2api": "SUB2API_API_KEY",
+    }.get(backend)
+    env_key = os.environ.get(env_name, "") if env_name else ""
     if env_key:
         return env_key.strip()
     if path is not None and path.is_file():
@@ -201,13 +230,23 @@ def _split_csv(value: str) -> List[str]:
 
 
 def _parse_indices(value: str) -> List[int]:
-    value = value.strip()
-    if ":" in value:
-        start_s, end_s = value.split(":", 1)
+    raw = value.strip()
+    if not raw:
+        raise ValueError("index selector must not be empty")
+    if ":" in raw:
+        if raw.count(":") != 1:
+            raise ValueError("index selector must contain at most one ':'")
+        start_s, end_s = raw.split(":", 1)
         start = int(start_s or 0)
         end = int(end_s)
-        return list(range(start, end))
-    return [int(part) for part in _split_csv(value)]
+        indices = list(range(start, end))
+    else:
+        indices = [int(part) for part in _split_csv(raw)]
+    if not indices:
+        raise ValueError("index selector selected no items")
+    if any(index < 0 for index in indices):
+        raise ValueError("indices must be non-negative")
+    return list(dict.fromkeys(indices))
 
 
 def _sanitize(value: str) -> str:
@@ -229,6 +268,8 @@ def _parse_models(raw_models: str, overrides: Sequence[str]) -> List[Tuple[str, 
             result.append((raw, mapping[raw]))
         else:
             result.append((_sanitize(raw), raw))
+    if not result:
+        raise ValueError("at least one model is required")
     return result
 
 
@@ -255,6 +296,13 @@ def _build_jobs(args: argparse.Namespace) -> List[Job]:
     search_indices = _parse_indices(args.search_indices)
     audit_indices = _parse_indices(args.audit_indices)
     audit_orders = _load_audit_orders(args.audit_orders, args.audit_reps)
+
+    if not scenarios:
+        raise ValueError("at least one scenario is required")
+    if not cost_regimes:
+        raise ValueError("at least one cost regime is required")
+    if "tuning" in scenarios and not tuning_tasks:
+        raise ValueError("at least one tuning task is required")
 
     for scenario in scenarios:
         if scenario not in SCENARIOS:
@@ -375,7 +423,11 @@ def _format_result_summary(result: Dict[str, Any], path: Path) -> str:
     return " | ".join(parts)
 
 
-def _namespace_for_job(args: argparse.Namespace, job: Job, api_key: str) -> argparse.Namespace:
+def _namespace_for_job(
+    args: argparse.Namespace,
+    job: Job,
+    api_key: Optional[str],
+) -> argparse.Namespace:
     ns = argparse.Namespace()
     ns.scenario = job.scenario
     ns.backend = getattr(args, "backend", "openrouter")
@@ -396,6 +448,10 @@ def _namespace_for_job(args: argparse.Namespace, job: Job, api_key: str) -> argp
     ns.max_steps = args.max_steps
     ns.time_budget = None
     ns.max_evals = args.max_evals
+    ns.request_timeout = getattr(args, "request_timeout", 600.0)
+    ns.max_retries = getattr(args, "max_retries", 10)
+    ns.retry_base_seconds = getattr(args, "retry_base_seconds", 3.0)
+    ns.retry_max_seconds = getattr(args, "retry_max_seconds", 120.0)
     ns.cost_regime = job.cost_regime
     ns.beta = None
     ns.baseline = "both"
@@ -411,29 +467,57 @@ def _namespace_for_job(args: argparse.Namespace, job: Job, api_key: str) -> argp
     return ns
 
 
-def _answer_evaluator_for(scenario: Dict[str, object], ns: argparse.Namespace):
-    builder = scenario.get("build_answer_evaluator")
-    if builder is None:
-        return None
-    candidates = [
-        {
-            "data_source": getattr(ns, "data_source", None),
-            "cc_split": getattr(ns, "cc_split", None),
+def _resume_key(args: argparse.Namespace, job: Job) -> str:
+    identity = {
+        "source_tree_sha256": source_tree_sha256(REPO_ROOT),
+        "backend": args.backend,
+        "base_url": args.base_url,
+        "job": asdict(job),
+        "temperature": (
+            args.temperature_tuning
+            if job.scenario == "tuning"
+            else args.temperature_eval
+        ),
+        "max_steps": args.max_steps,
+        "max_evals": args.max_evals,
+        "prompt_cache": _prompt_cache_config(args, job),
+        "transport": {
+            "timeout": getattr(args, "request_timeout", 600.0),
+            "max_retries": getattr(args, "max_retries", 10),
+            "retry_base_seconds": getattr(args, "retry_base_seconds", 3.0),
+            "retry_max_seconds": getattr(args, "retry_max_seconds", 120.0),
         },
-        {"data_source": getattr(ns, "data_source", None)},
-        {"cc_split": getattr(ns, "cc_split", None)},
-        {},
-    ]
-    for kwargs in candidates:
-        clean = {k: v for k, v in kwargs.items() if v is not None}
-        try:
-            return builder(ns.question_index, **clean)
-        except TypeError:
-            continue
-    return builder(ns.question_index)
+    }
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def _run_job(args: argparse.Namespace, job: Job, api_key: str) -> Dict[str, Any]:
+def _resume_trace_is_valid(path: Path, args: argparse.Namespace, job: Job) -> bool:
+    """Accept a completion marker only when it is valid for this exact run."""
+    try:
+        if args.trace_format == "v2":
+            trace = load_trace_v2(path)
+            return trace.get("run", {}).get("resume_key") == _resume_key(args, job)
+        result = json.loads(path.read_text(encoding="utf-8"))
+        return (
+            result.get("job") == asdict(job)
+            and result.get("_resume_key") == _resume_key(args, job)
+            and (result.get("score_check") or {}).get("ok") is True
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _run_job(
+    args: argparse.Namespace,
+    job: Job,
+    api_key: Optional[str],
+) -> Dict[str, Any]:
     ns = _namespace_for_job(args, job, api_key)
     random.seed(ns.seed)
     scenario = _SCENARIOS[job.scenario]
@@ -446,12 +530,17 @@ def _run_job(args: argparse.Namespace, job: Job, api_key: str) -> Dict[str, Any]
     include_cost = mode == "time_aware"
     system_prompt = _resolve_system_prompt(scenario, include_overhead, ns)
     tools = _resolve_tools(scenario, ns)
-    llm = build_llm(ns.backend, [], ns, system_prompt=system_prompt)
+    fake_plan = (
+        _call_scenario(scenario["build_fake_plan"], ns.probes, ns)
+        if ns.backend == "fake"
+        else []
+    )
+    llm = build_llm(ns.backend, fake_plan, ns, system_prompt=system_prompt)
     context = _call_scenario(scenario["build_context"], include_overhead, ns)
     instruction_notes = _call_scenario(
         scenario["build_instruction_notes"], include_overhead, ns
     )
-    answer_evaluator = _answer_evaluator_for(scenario, ns)
+    answer_evaluator = _resolve_answer_evaluator(scenario, ns)
     result = run_react_loop(
         llm=llm,
         tools=tools,
@@ -472,7 +561,7 @@ def _run_job(args: argparse.Namespace, job: Job, api_key: str) -> Dict[str, Any]
         "c_base": c_base,
         "time_budget": time_budget,
     }
-    result["score_check"] = _score_check(result, tools, answer_evaluator)
+    result["score_check"] = _score_result(result, tools, answer_evaluator)
     if ns.trace_format == "v2":
         config = asdict(llm.config) if hasattr(llm, "config") else {}
         auth_configured = bool(config.pop("api_key", None))
@@ -485,8 +574,17 @@ def _run_job(args: argparse.Namespace, job: Job, api_key: str) -> Dict[str, Any]
         timeout = config.pop("timeout", None)
         config.pop("system_prompt", None)
         extra_headers = config.pop("extra_headers", {}) or {}
+        max_retries = config.pop("max_retries", ns.max_retries)
+        retry_base_seconds = config.pop(
+            "retry_base_seconds", ns.retry_base_seconds
+        )
+        retry_max_seconds = config.pop("retry_max_seconds", ns.retry_max_seconds)
+        retry_http_statuses = list(
+            config.pop("retry_http_statuses", (429, 500, 502, 503, 504))
+        )
         result["_trace_v2_runtime"] = {
             "run": {
+                "resume_key": _resume_key(args, job),
                 "seed": ns.seed,
                 "backend": {
                     "name": ns.backend,
@@ -499,8 +597,10 @@ def _run_job(args: argparse.Namespace, job: Job, api_key: str) -> Dict[str, Any]
                 "prompt_cache": prompt_cache,
                 "transport": {
                     "timeout_seconds": timeout,
-                    "max_retries": 10,
-                    "retry_http_statuses": [429, 500, 502, 503],
+                    "max_retries": max_retries,
+                    "retry_base_seconds": retry_base_seconds,
+                    "retry_max_seconds": retry_max_seconds,
+                    "retry_http_statuses": retry_http_statuses,
                 },
             },
             "limits": {
@@ -510,6 +610,8 @@ def _run_job(args: argparse.Namespace, job: Job, api_key: str) -> Dict[str, Any]
                 "max_context_tokens": None,
             },
         }
+    else:
+        result["_resume_key"] = _resume_key(args, job)
     return result
 
 
@@ -549,9 +651,26 @@ def _score_check(
     if not answer:
         return {"ok": False, "reason": "missing answer"}
     if answer_evaluator is not None:
-        try:
+        parameters = inspect.signature(answer_evaluator).parameters.values()
+        accepts_records = any(
+            parameter.kind in {
+                inspect.Parameter.VAR_POSITIONAL,
+            }
+            for parameter in parameters
+        ) or len(
+            [
+                parameter
+                for parameter in parameters
+                if parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                }
+            ]
+        ) >= 2
+        if accepts_records:
             recomputed = answer_evaluator(answer, result.get("tool_records", []))
-        except TypeError:
+        else:
             recomputed = answer_evaluator(answer)
         if isinstance(recomputed, dict):
             metrics = result.get("answer_metrics") or {}
@@ -601,6 +720,34 @@ def _score_check(
     }
 
 
+def _score_result(
+    result: Dict[str, Any],
+    tools: Dict[str, Callable[[str], Any]],
+    answer_evaluator: Optional[Callable[..., Any]],
+) -> Dict[str, Any]:
+    """Verify a score and fill a final tuning score when feedback was withheld.
+
+    An over-budget tool result is deliberately absent from ``eval_records`` so
+    the model cannot benefit from it. The submitted configuration still needs
+    an offline outcome score for the experiment matrix. This does not add a
+    model-visible observation, a tool-call count, or simulated run cost.
+    """
+    check = _score_check(result, tools, answer_evaluator)
+    recomputed = check.get("recomputed_perf")
+    if (
+        answer_evaluator is None
+        and result.get("answer_perf") is None
+        and not result.get("eval_records")
+        and isinstance(recomputed, (int, float))
+        and not isinstance(recomputed, bool)
+        and math.isfinite(float(recomputed))
+    ):
+        result["answer_perf"] = float(recomputed)
+        result["answer_score_source"] = "offline_final_answer"
+        check = _score_check(result, tools, answer_evaluator)
+    return check
+
+
 def _float_close(actual: Any, expected: Any) -> bool:
     if actual is None or expected is None:
         return actual == expected
@@ -628,24 +775,38 @@ def _preflight(args: argparse.Namespace, jobs: Sequence[Job]) -> None:
         return
     errors: List[str] = []
     if any(j.scenario == "tuning" and j.tuning_task.startswith("hpobench:") for j in jobs):
-        hpobench_setup = REPO_ROOT / "data" / "hpo_tuning" / "HPOBench" / "setup.py"
+        from expgym.task_tuning import HPOBENCH_ROOT
+
+        hpobench_setup = Path(HPOBENCH_ROOT) / "setup.py"
         if not hpobench_setup.exists():
             errors.append(
-                "HPOBench source is missing. Run: python scripts/download_data.py"
+                f"HPOBench source is missing at {HPOBENCH_ROOT}. "
+                "Run: python scripts/download_data.py"
             )
         try:
             import ConfigSpace  # noqa: F401
         except Exception:
             errors.append(
-                "HPOBench Python deps are missing. Run: bash scripts/recreate_expgym_env.sh"
+                "HPOBench Python deps are missing. Use scripts/run_hpobench_docker.sh."
             )
         if any(j.tuning_task.startswith("hpobench:nasbench101:") for j in jobs):
-            try:
-                import nasbench  # noqa: F401
-                import tabular_benchmarks  # noqa: F401
-            except Exception:
+            from expgym.compact_nasbench101 import default_data_path
+
+            if not default_data_path().is_file():
                 errors.append(
-                    "NASBench101 deps are missing. Run: bash scripts/recreate_expgym_env.sh"
+                    "NASBench101 compact data is missing. "
+                    "Run: python scripts/download_data.py --only hpobench"
+                )
+        if any(j.tuning_task.startswith("hpobench:nasbench201:") for j in jobs):
+            from expgym.compact_nasbench201 import DATASET_FILES, default_data_dir
+
+            if not all(
+                (default_data_dir() / filename).is_file()
+                for filename in DATASET_FILES.values()
+            ):
+                errors.append(
+                    "NASBench201 compact data is missing. "
+                    "Run: python scripts/download_data.py --only hpobench"
                 )
     if any(j.scenario == "restricted_search" for j in jobs):
         from expgym.task_restricted_search import CORPUS_DIR, QA_DIR
@@ -695,7 +856,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--backend",
-        choices=["openai", "openrouter", "sub2api"],
+        choices=["fake", "openai", "openrouter", "sub2api"],
         default=os.environ.get("EXPGYM_BACKEND", "openrouter"),
         help="OpenAI-compatible backend used for every job.",
     )
@@ -706,11 +867,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--models",
-        default=(
-            os.environ.get("EXPGYM_MODELS")
-            or os.environ.get("SUB2API_MODEL")
-            or DEFAULT_MODEL
-        ),
+        default=os.environ.get("EXPGYM_MODELS", ""),
         help=(
             "Comma-separated aliases or OpenRouter IDs. Default: "
             f"{DEFAULT_MODEL}. Paper aliases: {','.join(PAPER_MODELS.keys())}."
@@ -735,7 +892,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-indices", default=DEFAULT_SEARCH_INDICES)
     parser.add_argument("--search-data-source", default="phantom_seed1")
     parser.add_argument("--audit-indices", default=DEFAULT_AUDIT_INDICES)
-    parser.add_argument("--cc-split", default="cc-large")
+    parser.add_argument(
+        "--cc-split",
+        choices=["cc-small", "cc-medium", "cc-large"],
+        default="cc-large",
+    )
     parser.add_argument(
         "--audit-orders",
         type=Path,
@@ -749,14 +910,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-evals", type=int, default=30)
     parser.add_argument("--temperature-tuning", type=float, default=0.7)
     parser.add_argument("--temperature-eval", type=float, default=0.0)
-    parser.add_argument("--api-key-file", type=Path, default=_default_key_file())
+    parser.add_argument("--api-key-file", type=Path, default=None)
+    parser.add_argument("--api-key", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--base-url",
-        default=(
-            os.environ.get("EXPGYM_BASE_URL")
-            or os.environ.get("SUB2API_BASE_URL")
-            or os.environ.get("OPENROUTER_BASE_URL")
-        ),
+        default=None,
     )
     parser.add_argument(
         "--prompt-cache-key",
@@ -783,6 +941,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--openrouter-referer", default=None)
     parser.add_argument("--openrouter-title", default="ExpGym sweep")
+    parser.add_argument("--request-timeout", type=float, default=600.0)
+    parser.add_argument("--max-retries", type=int, default=10)
+    parser.add_argument("--retry-base-seconds", type=float, default=3.0)
+    parser.add_argument("--retry-max-seconds", type=float, default=120.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--skip-preflight", action="store_true")
@@ -793,20 +955,45 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    jobs = _build_jobs(args)
+    if not args.models.strip():
+        args.models = _backend_model(args.backend)
+    if args.base_url is None:
+        args.base_url = _backend_base_url(args.backend)
+    if args.api_key_file is None and args.backend == "openrouter":
+        args.api_key_file = _default_key_file()
+    if args.max_steps < 1:
+        raise SystemExit("--max-steps must be at least 1")
+    if args.max_evals < 1:
+        raise SystemExit("--max-evals must be at least 1")
+    if args.max_retries < 0:
+        raise SystemExit("--max-retries must be non-negative")
+    if args.retry_base_seconds < 0 or args.retry_max_seconds < 0:
+        raise SystemExit("retry delays must be non-negative")
+    if args.request_timeout <= 0:
+        raise SystemExit("--request-timeout must be positive")
+    if args.limit is not None and args.limit < 1:
+        raise SystemExit("--limit must be at least 1")
+    for name in ("tuning_reps", "search_reps", "audit_reps"):
+        if getattr(args, name) < 1:
+            raise SystemExit(f"--{name.replace('_', '-')} must be at least 1")
+    try:
+        jobs = _build_jobs(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.dry_run:
         _print_dry_run(jobs, args)
         return 0
-    api_key = _load_api_key(args.api_key_file, args.backend)
-    if not api_key:
+    api_key = args.api_key or _load_api_key(args.api_key_file, args.backend)
+    if args.backend != "fake" and not api_key:
         if args.backend == "sub2api":
             raise SystemExit(
                 "SUB2API_API_KEY is not set. Source the Sub2API client env or "
                 "export SUB2API_API_KEY."
             )
+        env_name = "OPENAI_API_KEY" if args.backend == "openai" else "OPENROUTER_API_KEY"
         raise SystemExit(
-            "OPENROUTER_API_KEY is not set and no key file was found. "
-            "Set OPENROUTER_API_KEY or pass --api-key-file PATH."
+            f"{env_name} is not set and no key file was found. "
+            f"Set {env_name} or pass --api-key-file PATH."
         )
     _preflight(args, jobs)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -814,8 +1001,10 @@ def main() -> int:
     for idx, job in enumerate(jobs, start=1):
         path = _trace_path(args.output_dir, job, args.trace_format)
         if args.resume and path.exists():
-            print(f"[{idx}/{len(jobs)}] skip existing {path}")
-            continue
+            if _resume_trace_is_valid(path, args, job):
+                print(f"[{idx}/{len(jobs)}] skip verified {path}")
+                continue
+            print(f"[{idx}/{len(jobs)}] rerun stale/invalid {path}")
         print(f"[{idx}/{len(jobs)}] run {job.scenario} {job.model_alias} {job.cost_regime}")
         start = time.time()
         try:

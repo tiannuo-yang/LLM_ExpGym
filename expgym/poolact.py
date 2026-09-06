@@ -34,7 +34,7 @@ from expgym.extras.parallel_cache import (
     wrap_tools_with_poolact,
 )
 
-POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v1"
+POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v2"
 
 
 @dataclass
@@ -176,6 +176,31 @@ def _evaluate_aggregate(
     return None, None
 
 
+def _canonical_audit_label(value: Any) -> str:
+    """Normalize common label spellings to the task's public answer format."""
+    raw = re.sub(r"[^a-z]", "", str(value or "").lower())
+    return {
+        "entailment": "Entailment",
+        "entailed": "Entailment",
+        "contradiction": "Contradiction",
+        "contradicted": "Contradiction",
+        "notmentioned": "NotMentioned",
+        "neutral": "NotMentioned",
+    }.get(raw, str(value or "").strip())
+
+
+def _canonical_evidence_ids(value: Any) -> tuple[Any, ...]:
+    if not isinstance(value, list):
+        return ()
+    normalized = set()
+    for item in value:
+        try:
+            normalized.add(int(item))
+        except (TypeError, ValueError):
+            normalized.add(str(item))
+    return tuple(sorted(normalized, key=lambda item: (str(type(item)), str(item))))
+
+
 def aggregate_results(
     scenario: str,
     results: Sequence[Dict[str, Any]],
@@ -212,7 +237,11 @@ def aggregate_results(
 
     if scenario == "restricted_search":
         keys = [_search_vote_key(answer) for answer in individual_answers]
-        winning_key = Counter(keys).most_common(1)[0][0]
+        counts = Counter(keys)
+        winning_key = max(
+            counts,
+            key=lambda key: (counts[key], bool(key), -keys.index(key)),
+        )
         winner_index = keys.index(winning_key)
         answer = str(individual_answers[winner_index])
         perf, metrics = _evaluate_aggregate(answer_evaluator, answer)
@@ -246,12 +275,12 @@ def aggregate_results(
             for parsed in parsed_answers
             if isinstance(parsed.get(hypothesis_id), dict)
         ]
-        labels = [str(entry.get("label", "")) for entry in entries]
+        labels = [_canonical_audit_label(entry.get("label")) for entry in entries]
         if not labels:
             continue
         winning_label = Counter(labels).most_common(1)[0][0]
         evidence = [
-            tuple(sorted(entry.get("evidence_ids") or [], key=str))
+            _canonical_evidence_ids(entry.get("evidence_ids"))
             for entry, label in zip(entries, labels)
             if label == winning_label
         ]

@@ -7,17 +7,13 @@ import gc
 from multiprocessing import Pool
 from typing import Dict, Any, List, Tuple
 
+from expgym.compact_nasbench101 import default_data_path
 from expgym.task_tuning import list_hpobench_tasks, _load_hpobench, _hpobench_evaluate
 
 DEFAULT_SEED = 1206
 DEFAULT_SAMPLES = 1000
 DEFAULT_WORKERS = 4
 OUTPUT_PATH = os.path.join("data", "hpo_tuning", "oracle3.json")
-NASBENCH101_FILE = os.path.join(
-    os.path.expanduser("~/.local/share/hpobench"),
-    "nasbench_101",
-    "nasbench_full.tfrecord",
-)
 
 
 def _summarize_task(task_name: str, samples: int, seed: int) -> Dict[str, Any]:
@@ -132,11 +128,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.samples <= 0:
+        parser.error("--samples must be positive")
+    if args.workers <= 0:
+        parser.error("--workers must be positive")
+
     tasks = list_hpobench_tasks()
-    if not os.path.exists(NASBENCH101_FILE):
+    if not default_data_path().is_file():
         tasks = [t for t in tasks if not t.startswith("hpobench:nasbench101:")]
     if args.tasks:
         selected = set(args.tasks)
+        unknown = selected.difference(tasks)
+        if unknown:
+            parser.error(f"unknown task(s): {', '.join(sorted(unknown))}")
         tasks = [t for t in tasks if t in selected]
     if os.path.exists(args.output):
         with open(args.output, "r", encoding="utf-8") as handle:
@@ -162,7 +166,9 @@ def main() -> None:
             handle.write(msg + "\n")
 
     def _write_results() -> None:
-        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        parent = os.path.dirname(args.output)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as handle:
             json.dump(results, handle, indent=2, sort_keys=True)
 
@@ -196,7 +202,7 @@ def main() -> None:
                 _log(f"[done] {task_name}")
                 _write_results()
 
-    # NAS tasks are memory-heavy; run sequentially to avoid worker OOM kills.
+    # Reuse one compact table per process and keep evaluation order deterministic.
     for task_name in nas_tasks:
         _log(f"[start] {task_name}")
         try:

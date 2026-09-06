@@ -16,8 +16,6 @@ from expgym.task_tuning import (
 def _has_hpobench_deps() -> bool:
     try:
         import ConfigSpace  # noqa: F401
-        import nasbench  # noqa: F401
-        import tabular_benchmarks  # noqa: F401
     except Exception:
         return False
     return True
@@ -41,6 +39,7 @@ class TestHPOBenchTasks(unittest.TestCase):
 
     def test_list_includes_nasbench101(self) -> None:
         tasks = list_hpobench_tasks()
+        self.assertEqual(len(tasks), 9)
         for variant in ["A", "B", "C"]:
             self.assertIn(f"hpobench:nasbench101:{variant}", tasks)
 
@@ -92,12 +91,10 @@ class TestHPOBenchTasks(unittest.TestCase):
 
     @unittest.skipUnless(
         os.environ.get("EXPGYM_ENABLE_HPOBENCH_TESTS") == "1" and _has_hpobench_deps(),
-        "HPOBench NASBench101 deps not installed or tests disabled.",
+        "HPOBench ConfigSpace dependency not installed or tests disabled.",
     )
     def test_nasbench101_config_space_has_ops(self) -> None:
-        from tabular_benchmarks.nas_cifar10 import NASCifar10A
-
-        cs = NASCifar10A.get_configuration_space()
+        cs = _load_hpobench("hpobench:nasbench101:A").config_space
         names = {hp.name for hp in cs.get_hyperparameters()}
         self.assertIn("op_node_0", names)
         self.assertTrue(any(name.startswith("edge_") for name in names))
@@ -107,7 +104,7 @@ class TestHPOBenchTasks(unittest.TestCase):
         "HPOBench deps not installed or tests disabled.",
     )
     def test_fake_plan_matches_hpobench_space(self) -> None:
-        task_name = "hpobench:svm_surrogate"
+        task_name = "hpobench:nasbench201:cifar10-valid"
         plan = build_fake_plan(2, tuning_task=task_name)
         self.assertEqual(len(plan), 2)
         task = _load_hpobench(task_name)
@@ -122,9 +119,15 @@ class TestHPOBenchTasks(unittest.TestCase):
         "HPOBench deps not installed or tests disabled.",
     )
     def test_hpobench_out_of_range_returns_message(self) -> None:
-        task = _load_hpobench("hpobench:svm_surrogate")
+        task = _load_hpobench("hpobench:nasbench201:cifar10-valid")
+        config = {
+            hp.name: hp.default_value
+            for hp in task.config_space.get_hyperparameters()
+        }
+        config["1<-0"] = "not-an-operation"
         output, overhead = evaluate_hpobench_action(
-            task, json.dumps({"C": 1000.0, "gamma": 0.1})
+            task,
+            json.dumps(config),
         )
         self.assertIsInstance(output, str)
         self.assertIn("out of range", output)

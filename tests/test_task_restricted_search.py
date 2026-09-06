@@ -13,7 +13,6 @@ from expgym.task_restricted_search import (
     _name_f1,
     _normalize_name,
     _parse_data_source,
-    _stable_float,
     build_answer_evaluator,
     build_context,
     build_fake_plan,

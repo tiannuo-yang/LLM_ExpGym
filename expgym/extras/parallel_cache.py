@@ -13,11 +13,11 @@ Provides:
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 import threading
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -943,11 +943,14 @@ class SharedExplorationGraph:
         Returns empty string if no nodes recorded.
         """
         with self._lock:
-            search_nodes = dict(self._search_nodes)
-            fetch_nodes = dict(self._fetch_nodes)
-            end_nodes = dict(self._end_nodes)
-            eval_nodes = dict(self._eval_nodes)
-            edges = dict(self._edges)
+            # Formatting happens after releasing the lock. Deep-copy mutable
+            # nodes/sets so concurrent agents cannot mutate the snapshot while
+            # it is being iterated.
+            search_nodes = copy.deepcopy(self._search_nodes)
+            fetch_nodes = copy.deepcopy(self._fetch_nodes)
+            end_nodes = copy.deepcopy(self._end_nodes)
+            eval_nodes = copy.deepcopy(self._eval_nodes)
+            edges = copy.deepcopy(self._edges)
 
         # Apply time-gating filter if requested
         if visible_before is not None:

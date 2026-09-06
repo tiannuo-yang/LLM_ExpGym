@@ -12,12 +12,11 @@ fi
 
 if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" && "${EXPGYM_FORCE_HPOBENCH_INSTALL:-0}" != "1" ]]; then
   cat >&2 <<'EOF'
-HPOBench/NASBench101 needs the legacy TensorFlow 1.15 stack, which has no
-native macOS arm64 wheels. Use the default smoke/search/audit runs on this
-machine, or build the full HPOBench environment on Linux/x86_64.
+ParamNet needs a legacy Python 3.7/scikit-learn stack, which is not reliably
+available as native macOS arm64 packages. Use the supported Docker runner.
 
 Set EXPGYM_FORCE_HPOBENCH_INSTALL=1 only if you know your Python/package
-indexes provide compatible TensorFlow 1.15 wheels.
+indexes provide compatible Python 3.7 and scikit-learn wheels.
 EOF
   exit 1
 fi
@@ -40,17 +39,12 @@ export PYTHONNOUSERSITE=1
   "scipy==1.4.1" \
   "pyyaml>=6.0,<7" \
   "ConfigSpace==0.4.21" \
+  "importlib-metadata>=4,<7" \
   "tqdm" \
-  "protobuf<4" \
-  "tensorflow==1.15.0" \
   "scikit-learn==0.23.2"
 
 # Install HPOBench from the local checkout.
 "$ENV_PREFIX/bin/python" -m pip install -e "$ROOT_DIR/data/hpo_tuning/HPOBench"
-
-# NASBench-101 dependencies (needed for hpobench:nasbench101:* tasks).
-"$ENV_PREFIX/bin/python" -m pip install git+https://github.com/automl/nas_benchmarks.git@master
-"$ENV_PREFIX/bin/python" -m pip install git+https://github.com/google-research/nasbench.git@master
 
 # Optional: print env python for verification.
 "$ENV_PREFIX/bin/python" - <<'PY'
@@ -58,7 +52,5 @@ import sys
 print('expgym-hpobench python:', sys.executable)
 import ConfigSpace  # noqa: F401
 import hpobench  # noqa: F401
-import nasbench  # noqa: F401
-import tabular_benchmarks  # noqa: F401
-print('HPOBench/NASBench imports OK')
+print('HPOBench imports OK')
 PY

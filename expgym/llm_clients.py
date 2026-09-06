@@ -15,17 +15,19 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Union
-
-logger = logging.getLogger("expgym")
+from email.message import Message
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from expgym.react_loop import LLMBackend, LLMOutput
+
+logger = logging.getLogger("expgym")
 
 Transport = Callable[[urllib.request.Request, float], bytes]
 DEFAULT_OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 DEFAULT_VLLM_URL = "http://localhost:8000/v1/chat/completions"
 DEFAULT_SUB2API_URL = "http://127.0.0.1:8080/v1/chat/completions"
+DEFAULT_RETRY_HTTP_STATUSES = (429, 500, 502, 503, 504)
 
 
 def _normalize_chat_completions_url(base_url: str) -> str:
@@ -123,6 +125,10 @@ class OpenAIConfig:
     max_tokens: Optional[int] = None
     nothink_prefix: bool = False
     prompt_cache_key: Optional[str] = None
+    max_retries: int = 10
+    retry_base_seconds: float = 3.0
+    retry_max_seconds: float = 120.0
+    retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES
 
 
 class OpenAICompatibleLLM(LLMBackend):
@@ -150,10 +156,18 @@ class OpenAICompatibleLLM(LLMBackend):
         max_tokens: Optional[int] = None,
         nothink_prefix: bool = False,
         prompt_cache_key: Optional[str] = None,
+        max_retries: int = 10,
+        retry_base_seconds: float = 3.0,
+        retry_max_seconds: float = 120.0,
+        retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES,
     ) -> None:
         key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not key:
             raise ValueError("An API key is required for OpenAICompatibleLLM")
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        if retry_base_seconds < 0 or retry_max_seconds < 0:
+            raise ValueError("retry delays must be non-negative")
         self.config = OpenAIConfig(
             api_key=key,
             model=model,
@@ -173,8 +187,68 @@ class OpenAICompatibleLLM(LLMBackend):
             prompt_cache_key=(
                 prompt_cache_key.strip() if prompt_cache_key and prompt_cache_key.strip() else None
             ),
+            max_retries=max_retries,
+            retry_base_seconds=retry_base_seconds,
+            retry_max_seconds=retry_max_seconds,
+            retry_http_statuses=tuple(retry_http_statuses),
         )
         self._transport = transport
+
+    def _build_request(self, payload: Dict[str, object]) -> urllib.request.Request:
+        return urllib.request.Request(
+            self.config.base_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+                **self.config.extra_headers,
+            },
+            method="POST",
+        )
+
+    def _retry_delay(self, attempt: int, headers: Optional[Message] = None) -> float:
+        """Return a bounded exponential delay, honoring numeric Retry-After."""
+        if headers is not None:
+            retry_after = headers.get("Retry-After")
+            if retry_after:
+                try:
+                    return max(
+                        0.0,
+                        min(float(retry_after), self.config.retry_max_seconds),
+                    )
+                except ValueError:
+                    pass
+        exponential = self.config.retry_base_seconds * (2 ** attempt)
+        return min(exponential, self.config.retry_max_seconds)
+
+    @staticmethod
+    def _decode_response(raw: bytes) -> Tuple[Dict[str, object], str]:
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("API returned invalid JSON") from exc
+        if not isinstance(data, dict):
+            raise ValueError("API response is not an object")
+        choices = data.get("choices") or []
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise ValueError("API returned no choices")
+        message = choices[0].get("message")
+        if not isinstance(message, dict) or "content" not in message:
+            raise ValueError("API choice missing message content")
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text = "\n".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            ).strip()
+        else:
+            text = ""
+        if not text:
+            raise ValueError("API choice missing message content")
+        return data, text
 
     def generate(self, messages: Union[str, List[Dict[str, str]]]) -> LLMOutput:
         if isinstance(messages, str):
@@ -214,58 +288,61 @@ class OpenAICompatibleLLM(LLMBackend):
             payload["chat_template_kwargs"] = self.config.chat_template_kwargs
         if self.config.prompt_cache_key is not None:
             payload["prompt_cache_key"] = self.config.prompt_cache_key
-        request = urllib.request.Request(
-            self.config.base_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json",
-                **self.config.extra_headers,
-            },
-            method="POST",
-        )
-        max_retries = 10
-        for attempt in range(max_retries + 1):
+        for attempt in range(self.config.max_retries + 1):
+            request = self._build_request(payload)
             try:
                 raw = self._transport(request, self.config.timeout)
-                break
             except urllib.error.HTTPError as exc:
                 code = exc.code
                 body = exc.read().decode("utf-8", "ignore")
-                if code in (429, 500, 502, 503) and attempt < max_retries:
-                    wait = min(2 ** attempt * 3, 120)
-                    logger.warning("HTTP %d, retry %d/%d in %ds", code, attempt + 1, max_retries, wait)
+                if (
+                    code in self.config.retry_http_statuses
+                    and attempt < self.config.max_retries
+                ):
+                    wait = self._retry_delay(attempt, exc.headers)
+                    logger.warning(
+                        "HTTP %d, retry %d/%d in %.1fs",
+                        code,
+                        attempt + 1,
+                        self.config.max_retries,
+                        wait,
+                    )
                     import time as _time
                     _time.sleep(wait)
-                    # rebuild request (body consumed)
-                    request = urllib.request.Request(
-                        self.config.base_url,
-                        data=json.dumps(payload).encode("utf-8"),
-                        headers={
-                            "Authorization": f"Bearer {self.config.api_key}",
-                            "Content-Type": "application/json",
-                            **self.config.extra_headers,
-                        },
-                        method="POST",
-                    )
                     continue
                 raise RuntimeError(f"API error: {body}") from exc
-            except urllib.error.URLError as exc:
-                if attempt < max_retries:
-                    wait = min(2 ** attempt * 3, 120)
-                    logger.warning("URLError, retry %d/%d in %ds: %s", attempt + 1, max_retries, wait, exc)
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                if attempt < self.config.max_retries:
+                    wait = self._retry_delay(attempt)
+                    logger.warning(
+                        "URLError, retry %d/%d in %.1fs: %s",
+                        attempt + 1,
+                        self.config.max_retries,
+                        wait,
+                        exc,
+                    )
                     import time as _time
                     _time.sleep(wait)
                     continue
                 raise RuntimeError(f"API connection failed: {exc}") from exc
+            try:
+                data, text = self._decode_response(raw)
+            except ValueError as exc:
+                if attempt < self.config.max_retries:
+                    wait = self._retry_delay(attempt)
+                    logger.warning(
+                        "%s, retry %d/%d in %.1fs",
+                        exc,
+                        attempt + 1,
+                        self.config.max_retries,
+                        wait,
+                    )
+                    import time as _time
+                    _time.sleep(wait)
+                    continue
+                raise RuntimeError(str(exc)) from exc
+            break
 
-        data = json.loads(raw.decode("utf-8"))
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError("API returned no choices")
-        message = choices[0].get("message")
-        if not message or "content" not in message:
-            raise RuntimeError("API choice missing message content")
         usage = data.get("usage") or {}
         prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
@@ -285,7 +362,7 @@ class OpenAICompatibleLLM(LLMBackend):
             else None
         )
         return LLMOutput(
-            text=str(message["content"]).strip(),
+            text=text,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             cached_prompt_tokens=cached_prompt_tokens,

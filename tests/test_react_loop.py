@@ -208,6 +208,39 @@ class RunReactLoopTest(unittest.TestCase):
         # Fallback activates: answer is replaced with best eval (cfg_01, perf=0.42).
         self.assertAlmostEqual(result["answer_perf"], 0.42, places=2)
 
+    def test_json_action_ignores_joined_trailing_answer_directive(self) -> None:
+        """A missing newline before Answer must not corrupt valid JSON."""
+        class JoinedDirectiveLLM(LLMBackend):
+            def __init__(self) -> None:
+                self._called = False
+
+            def generate(self, messages) -> LLMOutput:
+                if self._called:
+                    return LLMOutput(text='Answer: {"x": 1}')
+                self._called = True
+                return LLMOutput(
+                    text=(
+                        'Thought: test\n'
+                        'Action: evaluate_config {"x": 1}'
+                        'Answer: {"x": 1}'
+                    )
+                )
+
+        def tool(payload: str) -> Tuple[float, float]:
+            self.assertEqual(payload, '{"x": 1}')
+            return 0.5, 10.0
+
+        result = run_react_loop(
+            llm=JoinedDirectiveLLM(),
+            tools={"evaluate_config": tool},
+            max_steps=1,
+        )
+
+        self.assertTrue(result["aborted"])
+        self.assertEqual(result["evaluations"], 1)
+        self.assertEqual(result["answer_perf"], 0.5)
+        self.assertEqual(result["total_overhead"], 10.0)
+
     def test_fallback_preserves_zero_score_when_all_evals_invalid(self) -> None:
         class ZeroOnlyLLM(LLMBackend):
             def __init__(self) -> None:
@@ -675,21 +708,10 @@ class HTTP500RetryTest(unittest.TestCase):
     """Tests for HTTP 500 being included in the retry list (Change 3)."""
 
     def test_retry_codes_include_500(self) -> None:
-        """Verify that HTTP 500 is in the retryable status codes.
+        """Verify that HTTP 500 is in the configured retry status codes."""
+        from expgym.llm_clients import DEFAULT_RETRY_HTTP_STATUSES
 
-        We inspect the source code of llm_clients.py to confirm the tuple
-        includes 500. This is a static analysis test since actually triggering
-        HTTP 500 retries would require mocking network calls.
-        """
-        import inspect
-        from expgym import llm_clients
-        source = inspect.getsource(llm_clients.OpenAICompatibleLLM.generate)
-        # The retry condition should include 500
-        self.assertIn("500", source,
-                      "HTTP 500 should be in the retry status codes")
-        # Verify the exact tuple pattern
-        self.assertIn("429, 500, 502, 503", source,
-                      "Retry codes should be (429, 500, 502, 503)")
+        self.assertIn(500, DEFAULT_RETRY_HTTP_STATUSES)
 
     def test_http_500_triggers_retry(self) -> None:
         """Simulate an HTTP 500 followed by a successful response.
@@ -793,7 +815,6 @@ class HTTP500RetryTest(unittest.TestCase):
                 fp=__import__("io").BytesIO(b'{"error": "bad request"}'),
             )
 
-        from expgym.llm_clients import OpenAICompatibleLLM
         import unittest.mock
         with unittest.mock.patch("time.sleep"):
             client = OpenAICompatibleLLM(

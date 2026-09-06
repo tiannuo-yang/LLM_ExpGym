@@ -6,8 +6,9 @@ cd "$ROOT_DIR"
 
 # ``scripts/setup.sh`` creates this environment. Prefer it automatically so
 # readers do not have to remember to activate the venv in every new shell.
-if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
-  export PATH="$ROOT_DIR/.venv/bin:$PATH"
+VENV_DIR="${EXPGYM_VENV:-$ROOT_DIR/.venv}"
+if [[ -x "$VENV_DIR/bin/python" ]]; then
+  export PATH="$VENV_DIR/bin:$PATH"
 fi
 
 if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -23,7 +24,7 @@ else
   DEFAULT_BACKEND="openrouter"
 fi
 BACKEND="${EXPGYM_BACKEND:-$DEFAULT_BACKEND}"
-MODEL="${EXPGYM_MODEL:-${SUB2API_MODEL:-${EXPGYM_OPENROUTER_MODEL:-openai/gpt-4.1-nano}}}"
+MODEL="${EXPGYM_MODEL:-}"
 SCENARIO="tuning"
 QUESTIONS="0"
 TASK="neural_network_training"
@@ -33,7 +34,7 @@ WITH_AUTO_DATA=0
 CONTRACT_NLI_ARCHIVE="${CONTRACT_NLI_ARCHIVE:-}"
 MAX_STEPS=""
 MAX_EVALS=""
-BASE_URL="${EXPGYM_BASE_URL:-${SUB2API_BASE_URL:-}}"
+BASE_URL="${EXPGYM_BASE_URL:-}"
 PROMPT_CACHE_KEY="${EXPGYM_PROMPT_CACHE_KEY:-}"
 PROMPT_CACHE_SCOPE="${EXPGYM_PROMPT_CACHE_SCOPE:-job}"
 TRACE_FORMAT="${EXPGYM_TRACE_FORMAT:-v2}"
@@ -42,6 +43,10 @@ SEED=""
 TEMPERATURE=""
 LIMIT=""
 DRY_RUN=0
+REQUEST_TIMEOUT=""
+MAX_RETRIES=""
+RETRY_BASE_SECONDS=""
+RETRY_MAX_SECONDS=""
 SEARCH_DATA_SOURCE="phantom_seed1"
 CC_SPLIT="cc-large"
 
@@ -57,7 +62,7 @@ Data:
   --with-auto-data calls scripts/download_data.py automatically.
 
 Common options:
-  --backend NAME                openrouter | openai | sub2api.
+  --backend NAME                openrouter | openai | sub2api | fake.
   --model MODEL                 OpenRouter/OpenAI-compatible model id.
   --base-url URL                OpenAI-compatible API base URL.
   --prompt-cache-key KEY        Cache namespace; derives one stable key per job.
@@ -76,6 +81,8 @@ Common options:
   --contract-nli-archive PATH   Optional offline ContractNLI zip override.
   --max-steps N                 ReAct step limit.
   --max-evals N                 Tool call limit.
+  --request-timeout SECONDS     Timeout for one API attempt.
+  --max-retries N               Retries for transient API failures.
   --dry-run                     Print planned jobs only; no model calls/traces.
 
 Examples:
@@ -169,6 +176,22 @@ while [[ $# -gt 0 ]]; do
       MAX_EVALS="${2:?--max-evals requires a value}"
       shift 2
       ;;
+    --request-timeout)
+      REQUEST_TIMEOUT="${2:?--request-timeout requires a value}"
+      shift 2
+      ;;
+    --max-retries)
+      MAX_RETRIES="${2:?--max-retries requires a value}"
+      shift 2
+      ;;
+    --retry-base-seconds)
+      RETRY_BASE_SECONDS="${2:?--retry-base-seconds requires a value}"
+      shift 2
+      ;;
+    --retry-max-seconds)
+      RETRY_MAX_SECONDS="${2:?--retry-max-seconds requires a value}"
+      shift 2
+      ;;
     --search-data-source)
       SEARCH_DATA_SOURCE="${2:?--search-data-source requires a value}"
       shift 2
@@ -200,8 +223,35 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "$MODEL" ]]; then
+  case "$BACKEND" in
+    sub2api) MODEL="${SUB2API_MODEL:-gpt-5.4}" ;;
+    openai) MODEL="${EXPGYM_OPENAI_MODEL:-gpt-4o-mini}" ;;
+    fake) MODEL="fake" ;;
+    *) MODEL="${EXPGYM_OPENROUTER_MODEL:-openai/gpt-4.1-nano}" ;;
+  esac
+fi
+if [[ -z "$BASE_URL" ]]; then
+  case "$BACKEND" in
+    sub2api) BASE_URL="${SUB2API_BASE_URL:-}" ;;
+    openrouter) BASE_URL="${OPENROUTER_BASE_URL:-}" ;;
+  esac
+fi
+
 if [[ -n "$BASE_URL" ]]; then
   EXTRA_ARGS+=(--base-url "$BASE_URL")
+fi
+if [[ -n "$REQUEST_TIMEOUT" ]]; then
+  EXTRA_ARGS+=(--request-timeout "$REQUEST_TIMEOUT")
+fi
+if [[ -n "$MAX_RETRIES" ]]; then
+  EXTRA_ARGS+=(--max-retries "$MAX_RETRIES")
+fi
+if [[ -n "$RETRY_BASE_SECONDS" ]]; then
+  EXTRA_ARGS+=(--retry-base-seconds "$RETRY_BASE_SECONDS")
+fi
+if [[ -n "$RETRY_MAX_SECONDS" ]]; then
+  EXTRA_ARGS+=(--retry-max-seconds "$RETRY_MAX_SECONDS")
 fi
 EXTRA_ARGS+=(--prompt-cache-scope "$PROMPT_CACHE_SCOPE")
 if [[ -n "$PROMPT_CACHE_KEY" ]]; then

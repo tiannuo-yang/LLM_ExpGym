@@ -89,7 +89,7 @@ def resolve_cost_regime(
     if args.cost_regime != "custom":
         beta = preset["beta"]
         show_cost = preset["show_cost"]
-        time_budget = None if (beta is math.inf) else float(beta) * c_base
+        time_budget = None if math.isinf(float(beta)) else float(beta) * c_base
         baselines = ["time_aware"] if show_cost else ["no_budget"]
         return time_budget, baselines
 
@@ -125,6 +125,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            **_transport_options(args),
         )
     if backend == "gemini":
         from expgym.llm_clients import build_gemini_client
@@ -137,6 +138,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            **_transport_options(args),
         )
     if backend == "openrouter":
         from expgym.llm_clients import build_openrouter_client
@@ -151,6 +153,7 @@ def build_llm(
             referer=args.openrouter_referer,
             title=args.openrouter_title,
             prompt_cache_key=prompt_cache_key,
+            **_transport_options(args),
         )
     if backend == "vllm":
         from expgym.llm_clients import build_vllm_client
@@ -167,6 +170,7 @@ def build_llm(
             base_url=args.base_url,
             chat_template_kwargs=chat_kwargs,
             prompt_cache_key=prompt_cache_key,
+            **_transport_options(args),
         )
     if backend == "sub2api":
         from expgym.llm_clients import build_sub2api_client
@@ -179,8 +183,19 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            **_transport_options(args),
         )
     raise ValueError(f"Unknown backend: {backend}")
+
+
+def _transport_options(args: argparse.Namespace) -> Dict[str, object]:
+    """Resolve shared HTTP timeout/retry settings for every real backend."""
+    return {
+        "timeout": getattr(args, "request_timeout", 600.0),
+        "max_retries": getattr(args, "max_retries", 10),
+        "retry_base_seconds": getattr(args, "retry_base_seconds", 3.0),
+        "retry_max_seconds": getattr(args, "retry_max_seconds", 120.0),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -232,6 +247,10 @@ def parse_args() -> argparse.Namespace:
         help="Number of seeded configs the fake LLM probes before answering.",
     )
     parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--request-timeout", type=float, default=600.0)
+    parser.add_argument("--max-retries", type=int, default=10)
+    parser.add_argument("--retry-base-seconds", type=float, default=3.0)
+    parser.add_argument("--retry-max-seconds", type=float, default=120.0)
     parser.add_argument(
         "--time-budget",
         type=float,
@@ -350,10 +369,7 @@ def main() -> None:
         instruction_notes = _call_scenario(
             scenario["build_instruction_notes"], include_overhead, args
         )
-        answer_builder = scenario.get("build_answer_evaluator")
-        answer_evaluator = (
-            answer_builder(args.question_index) if answer_builder is not None else None
-        )
+        answer_evaluator = _resolve_answer_evaluator(scenario, args)
         result = run_react_loop(
             llm=llm,
             tools=tools,
@@ -486,6 +502,29 @@ def _resolve_tools(scenario: Scenario, args: argparse.Namespace) -> dict:
         }
         return tools_spec(**kwargs)
     return tools_spec
+
+
+def _resolve_answer_evaluator(
+    scenario: Scenario,
+    args: argparse.Namespace,
+):
+    """Build a scenario evaluator without masking TypeErrors from its body."""
+    import inspect
+
+    builder = scenario.get("build_answer_evaluator")
+    if builder is None:
+        return None
+    signature = inspect.signature(builder)
+    candidates = {
+        "data_source": getattr(args, "data_source", None),
+        "cc_split": getattr(args, "cc_split", None),
+    }
+    kwargs = {
+        name: value
+        for name, value in candidates.items()
+        if name in signature.parameters and value is not None
+    }
+    return builder(getattr(args, "question_index", 0), **kwargs)
 
 
 def _resolve_system_prompt(

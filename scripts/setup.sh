@@ -49,9 +49,11 @@ PY
 
 echo "[setup] installing Python dependencies"
 "$PYTHON_BIN" -m pip install --upgrade pip
-"$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements.txt" -r "$ROOT_DIR/requirements-data.txt"
+"$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements.txt"
 
 if [[ "$DOWNLOAD_DATA" -eq 1 ]]; then
+  echo "[setup] installing dataset dependencies"
+  "$PYTHON_BIN" -m pip install -r "$ROOT_DIR/requirements-data.txt"
   echo "[setup] downloading external datasets"
   "$PYTHON_BIN" "$ROOT_DIR/scripts/download_data.py"
 fi

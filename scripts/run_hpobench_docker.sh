@@ -22,8 +22,8 @@ usage() {
   cat <<'EOF'
 Usage: bash scripts/run_hpobench_docker.sh [wrapper options] [runner options]
 
-Builds/runs a linux/amd64 Docker image with Python 3.7, TensorFlow 1.15,
-HPOBench, NASBench101, and NASBench201 dependencies.
+Builds/runs a linux/amd64 Python 3.7 image for the pinned HPOBench ParamNet
+models. NASBench101/201 use verified compact tables generated during setup.
 
 Wrapper options:
   --no-build       Use the existing Docker image instead of building first.
@@ -44,12 +44,9 @@ With --poolact, the default smoke instead uses:
   --cost-regime cost_tight
   --agents 2 --strategies poolact
 
-The container stores HPOBench data under:
+The container stores verified HPOBench data under:
   data/hpo_tuning/hpobench_data/
   data/hpo_tuning/hpobench_cache/
-
-Full NASBench201 runs need >= 16 GiB available to Docker containers.
-ParamNet-only and NASBench101-only runs need less.
 
 Docker setup:
   Linux: install/start Docker Engine.
@@ -134,30 +131,6 @@ if ! "$DOCKER_BIN" info >/dev/null 2>&1; then
   exit 1
 fi
 
-needs_nasbench201=0
-for arg in "${RUNNER_ARGS[@]}"; do
-  if [[ "$arg" == "all-hpobench" || "$arg" == hpobench:nasbench201:* ]]; then
-    needs_nasbench201=1
-  fi
-done
-if [[ "$needs_nasbench201" -eq 1 && "${EXPGYM_HPOBENCH_ALLOW_LOW_MEMORY:-0}" != "1" ]]; then
-  mem_total="$("$DOCKER_BIN" info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
-  min_mem=$((16 * 1024 * 1024 * 1024))
-  if [[ "$mem_total" =~ ^[0-9]+$ && "$mem_total" -lt "$min_mem" ]]; then
-    cat >&2 <<EOF
-Docker has less than 16 GiB available to containers (${mem_total} bytes).
-NASBench201 can OOM below this limit.
-
-On Docker Desktop, increase memory in Settings > Resources > Advanced, then
-restart Docker Desktop and rerun this command. On macOS this is stored in:
-  ~/Library/Group Containers/group.com.docker/settings-store.json
-
-Set EXPGYM_HPOBENCH_ALLOW_LOW_MEMORY=1 to bypass this preflight.
-EOF
-    exit 1
-  fi
-fi
-
 if [[ "$BUILD_IMAGE" -eq 1 ]]; then
   "$DOCKER_BIN" build \
     --platform "$PLATFORM" \
@@ -178,19 +151,58 @@ DOCKER_MOUNTS=(
   -v "$ROOT_DIR:/workspace/LLM_ExpGym"
 )
 
-if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
-  DOCKER_ENV+=(-e OPENROUTER_API_KEY)
-else
-  KEY_FILE="${OPENROUTER_API_KEY_FILE:-"$ROOT_DIR/../openrouter.key"}"
-  if [[ ! -f "$KEY_FILE" ]]; then
-    echo "OPENROUTER_API_KEY is unset and key file was not found: $KEY_FILE" >&2
-    echo "Set OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE." >&2
-    exit 1
+RUN_BACKEND="${EXPGYM_BACKEND:-openrouter}"
+for ((i = 0; i < ${#RUNNER_ARGS[@]}; i++)); do
+  if [[ "${RUNNER_ARGS[$i]}" == "--backend" && $((i + 1)) -lt ${#RUNNER_ARGS[@]} ]]; then
+    RUN_BACKEND="${RUNNER_ARGS[$((i + 1))]}"
   fi
-  KEY_FILE_ABS="$(cd "$(dirname "$KEY_FILE")" && pwd)/$(basename "$KEY_FILE")"
-  DOCKER_MOUNTS+=(-v "$KEY_FILE_ABS:/workspace/openrouter.key:ro")
-  DOCKER_ENV+=(-e OPENROUTER_API_KEY_FILE=/workspace/openrouter.key)
-fi
+done
+
+case "$RUN_BACKEND" in
+  sub2api)
+    if [[ -z "${SUB2API_API_KEY:-}" ]]; then
+      echo "SUB2API_API_KEY is required for --backend sub2api." >&2
+      exit 1
+    fi
+    DOCKER_ENV+=(-e SUB2API_API_KEY)
+    if [[ -n "${SUB2API_BASE_URL:-}" ]]; then
+      DOCKER_SUB2API_BASE_URL="${SUB2API_BASE_URL/127.0.0.1/host.docker.internal}"
+      DOCKER_SUB2API_BASE_URL="${DOCKER_SUB2API_BASE_URL/localhost/host.docker.internal}"
+      DOCKER_ENV+=(-e "SUB2API_BASE_URL=$DOCKER_SUB2API_BASE_URL")
+    fi
+    if [[ -n "${SUB2API_MODEL:-}" ]]; then
+      DOCKER_ENV+=(-e SUB2API_MODEL)
+    fi
+    ;;
+  openai)
+    if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+      echo "OPENAI_API_KEY is required for --backend openai." >&2
+      exit 1
+    fi
+    DOCKER_ENV+=(-e OPENAI_API_KEY)
+    ;;
+  fake)
+    ;;
+  openrouter)
+    if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+      DOCKER_ENV+=(-e OPENROUTER_API_KEY)
+    else
+      KEY_FILE="${OPENROUTER_API_KEY_FILE:-"$ROOT_DIR/../openrouter.key"}"
+      if [[ ! -f "$KEY_FILE" ]]; then
+        echo "OPENROUTER_API_KEY is unset and key file was not found: $KEY_FILE" >&2
+        echo "Set OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE." >&2
+        exit 1
+      fi
+      KEY_FILE_ABS="$(cd "$(dirname "$KEY_FILE")" && pwd)/$(basename "$KEY_FILE")"
+      DOCKER_MOUNTS+=(-v "$KEY_FILE_ABS:/workspace/openrouter.key:ro")
+      DOCKER_ENV+=(-e OPENROUTER_API_KEY_FILE=/workspace/openrouter.key)
+    fi
+    ;;
+  *)
+    echo "Docker HPOBench does not support backend: $RUN_BACKEND" >&2
+    exit 2
+    ;;
+esac
 
 if [[ "$POOLACT_MODE" -eq 1 ]]; then
   RUNNER_SCRIPT="scripts/run_poolact.py"
@@ -200,6 +212,7 @@ fi
 
 "$DOCKER_BIN" run --rm \
   --platform "$PLATFORM" \
+  --add-host host.docker.internal:host-gateway \
   "${DOCKER_ENV[@]}" \
   "${DOCKER_MOUNTS[@]}" \
   -w /workspace/LLM_ExpGym \

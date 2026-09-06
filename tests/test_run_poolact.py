@@ -138,12 +138,38 @@ class PoolActCliTest(unittest.TestCase):
             self.assertEqual(result["shared_state"]["graph"]["pending_claims"], 0)
             self.assertEqual(
                 set(result["implementation_sha256"]),
-                {"runner", "api", "shared_state", "react_loop"},
+                {"source_tree"},
             )
+            self.assertGreater(result["shared_state"]["graph"]["end_nodes"], 0)
             self.assertTrue(
                 all(
                     agent["score_check"]["ok"]
                     for agent in result["agent_results"]
+                )
+            )
+            result_path = Path(directory) / "poolact" / "result.json"
+            loaded = run_poolact._load_resumable_result(
+                result_path,
+                item_output_dir=Path(directory),
+                strategy="poolact",
+                config=result["config"],
+                implementation=result["implementation_sha256"],
+                agents=2,
+                answer_evaluator=None,
+            )
+            self.assertIsNotNone(loaded)
+
+            result["aggregate"]["answer_perf"] += 0.1
+            result_path.write_text(json.dumps(result), encoding="utf-8")
+            self.assertIsNone(
+                run_poolact._load_resumable_result(
+                    result_path,
+                    item_output_dir=Path(directory),
+                    strategy="poolact",
+                    config=result["config"],
+                    implementation=result["implementation_sha256"],
+                    agents=2,
+                    answer_evaluator=None,
                 )
             )
 

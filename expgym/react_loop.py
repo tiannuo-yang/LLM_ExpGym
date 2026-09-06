@@ -759,7 +759,8 @@ def _extract_action(block: str) -> Optional[Tuple[str, str]]:
                 parts = payload.split(None, 1)
                 tool_name = _strip_markup_prefix(parts[0]) if parts else ""
                 if len(parts) > 1 and parts[1].strip():
-                    return tool_name.strip(), parts[1].strip()
+                    argument = parts[1].strip()
+                    return tool_name.strip(), _strip_json_protocol_suffix(argument)
                 body = ""
                 j = i
                 while j + 1 < len(lines):
@@ -771,6 +772,33 @@ def _extract_action(block: str) -> Optional[Tuple[str, str]]:
                 return tool_name.strip(), body
         i += 1
     return None
+
+
+def _strip_json_protocol_suffix(argument: str) -> str:
+    """Drop a joined ReAct directive after an otherwise complete JSON value.
+
+    Real chat models occasionally omit the requested newline and emit output
+    such as ``Action: tool {"x": 1}Answer: ...``.  Passing the joined suffix to
+    a JSON tool turns a valid action into a spurious parse error.  Only known
+    protocol labels are stripped; arbitrary trailing text remains malformed
+    and is still surfaced through the normal tool-error path.
+    """
+    if not argument or argument[0] not in "{[\"":
+        return argument
+    try:
+        _value, end = json.JSONDecoder().raw_decode(argument)
+    except (json.JSONDecodeError, TypeError):
+        return argument
+    trailing = argument[end:].lstrip()
+    if not trailing:
+        return argument[:end]
+    normalized = _normalize_label(trailing).lower()
+    if any(
+        normalized.startswith(label)
+        for label in ("thought:", "action:", "answer:", "observation:", "system:")
+    ):
+        return argument[:end]
+    return argument
 
 
 def _normalize_label(line: str) -> str:

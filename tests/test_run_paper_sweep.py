@@ -1,8 +1,10 @@
 import argparse
 from dataclasses import replace
+import os
 import re
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts import run_paper_sweep
 
@@ -26,6 +28,10 @@ def _args(**overrides):
         seed=1206,
         max_steps=10,
         max_evals=30,
+        request_timeout=600.0,
+        max_retries=10,
+        retry_base_seconds=3.0,
+        retry_max_seconds=120.0,
         temperature_tuning=0.7,
         temperature_eval=0.0,
         api_key_file=Path("../openrouter.key"),
@@ -47,6 +53,46 @@ def _args(**overrides):
 
 
 class PaperSweepMatrixTest(unittest.TestCase):
+    def test_index_selectors_reject_empty_negative_and_reversed_ranges(self):
+        for selector in ("", "-1", "3:3", "4:2", "1:2:3"):
+            with self.subTest(selector=selector):
+                with self.assertRaises(ValueError):
+                    run_paper_sweep._parse_indices(selector)
+
+    def test_api_key_environment_is_backend_specific(self):
+        environment = {
+            "OPENAI_API_KEY": "openai-key",
+            "OPENROUTER_API_KEY": "router-key",
+            "SUB2API_API_KEY": "sub2-key",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(
+                run_paper_sweep._load_api_key(None, "openai"),
+                "openai-key",
+            )
+            self.assertEqual(
+                run_paper_sweep._load_api_key(None, "openrouter"),
+                "router-key",
+            )
+            self.assertEqual(
+                run_paper_sweep._load_api_key(None, "sub2api"),
+                "sub2-key",
+            )
+
+    def test_default_model_is_backend_specific(self):
+        environment = {
+            "SUB2API_MODEL": "sub2-model",
+            "EXPGYM_OPENAI_MODEL": "openai-model",
+            "EXPGYM_OPENROUTER_MODEL": "router-model",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(run_paper_sweep._backend_model("sub2api"), "sub2-model")
+            self.assertEqual(run_paper_sweep._backend_model("openai"), "openai-model")
+            self.assertEqual(
+                run_paper_sweep._backend_model("openrouter"),
+                "router-model",
+            )
+
     def test_default_matrix_is_one_low_friction_smoke_job(self):
         jobs = run_paper_sweep._build_jobs(_args())
         self.assertEqual(len(jobs), 1)
@@ -271,6 +317,31 @@ class PaperSweepMatrixTest(unittest.TestCase):
         self.assertFalse(check["ok"])
         self.assertEqual(check["reason"], "missing numeric score")
 
+    def test_score_result_scores_a_withheld_tuning_answer_offline(self):
+        result = {
+            "answer": '{"x": 1}',
+            "answer_perf": None,
+            "eval_records": [],
+        }
+        check = run_paper_sweep._score_result(
+            result,
+            {"evaluate_config": lambda _payload: (0.75, 100.0)},
+            None,
+        )
+        self.assertTrue(check["ok"])
+        self.assertEqual(result["answer_perf"], 0.75)
+        self.assertEqual(result["answer_score_source"], "offline_final_answer")
+
+    def test_score_result_does_not_hide_missing_tool_score(self):
+        result = {"answer": "{}", "answer_perf": None, "eval_records": []}
+        check = run_paper_sweep._score_result(
+            result,
+            {"evaluate_config": lambda _payload: (None, 1.0)},
+            None,
+        )
+        self.assertFalse(check["ok"])
+        self.assertIsNone(result["answer_perf"])
+
     def test_score_check_accepts_invalid_config_as_zero(self):
         result = {"answer": "{}", "answer_perf": 0.0}
         check = run_paper_sweep._score_check(
@@ -285,6 +356,17 @@ class PaperSweepMatrixTest(unittest.TestCase):
         )
         self.assertTrue(check["ok"])
         self.assertEqual(check["recomputed_perf"], 0.0)
+
+    def test_score_check_does_not_mask_evaluator_type_error(self):
+        def broken_evaluator(_answer, _records):
+            raise TypeError("evaluator body failed")
+
+        with self.assertRaisesRegex(TypeError, "evaluator body failed"):
+            run_paper_sweep._score_check(
+                {"answer": "answer", "tool_records": []},
+                {},
+                broken_evaluator,
+            )
 
 
 if __name__ == "__main__":

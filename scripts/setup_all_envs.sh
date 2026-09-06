@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-./scripts/recreate_expgym_env.sh
-./scripts/setup_vllm_env.sh
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "Expgym and vLLM environments are installed."
+bash "$ROOT_DIR/scripts/setup.sh" --with-data
+bash "$ROOT_DIR/scripts/setup_vllm_env.sh" "$@"
+
+echo "ExpGym and vLLM environments are installed. HPOBench uses Docker on demand."

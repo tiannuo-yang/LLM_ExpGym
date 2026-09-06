@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -17,9 +18,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from demo_experiment import (  # noqa: E402
-    COST_REGIMES,
     _SCENARIOS,
     _call_scenario,
+    _resolve_answer_evaluator,
     _resolve_system_prompt,
     _resolve_tools,
     build_llm,
@@ -38,7 +39,8 @@ from expgym.poolact import (  # noqa: E402
     run_agents_parallel,
 )
 from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
-from scripts.run_paper_sweep import _score_check  # noqa: E402
+from scripts.run_paper_sweep import _score_result  # noqa: E402
+from expgym.trace_v2 import source_tree_sha256  # noqa: E402
 
 
 STRATEGIES = ("naive", "cached", "poolact")
@@ -84,29 +86,46 @@ def _parse_indices(value: str) -> List[int]:
 
 
 def _default_model() -> str:
-    return (
-        os.environ.get("SUB2API_MODEL")
-        or os.environ.get("EXPGYM_MODEL")
-        or os.environ.get("EXPGYM_OPENROUTER_MODEL")
-        or "openai/gpt-4.1-nano"
+    return os.environ.get("EXPGYM_MODEL", "")
+
+
+def _backend_model(backend: str) -> str:
+    return {
+        "sub2api": os.environ.get("SUB2API_MODEL", "gpt-5.4"),
+        "openai": os.environ.get("EXPGYM_OPENAI_MODEL", "gpt-4o-mini"),
+        "gemini": os.environ.get("EXPGYM_GEMINI_MODEL", "gemini-2.5-flash"),
+        "vllm": os.environ.get("EXPGYM_VLLM_MODEL", "local-model"),
+        "fake": "fake",
+    }.get(
+        backend,
+        os.environ.get("EXPGYM_OPENROUTER_MODEL", "openai/gpt-4.1-nano"),
     )
+
+
+def _backend_base_url(backend: str) -> Optional[str]:
+    if os.environ.get("EXPGYM_BASE_URL"):
+        return os.environ["EXPGYM_BASE_URL"]
+    return {
+        "sub2api": os.environ.get("SUB2API_BASE_URL"),
+        "openrouter": os.environ.get("OPENROUTER_BASE_URL"),
+        "openai": os.environ.get("OPENAI_BASE_URL"),
+        "gemini": os.environ.get("GEMINI_BASE_URL"),
+        "vllm": os.environ.get("VLLM_BASE_URL"),
+    }.get(backend)
 
 
 def _load_api_key(args: argparse.Namespace) -> Optional[str]:
     if args.api_key:
         return args.api_key.strip()
-    if args.backend == "sub2api":
-        env_names = ("SUB2API_API_KEY", "OPENROUTER_API_KEY")
-    elif args.backend == "openai":
-        env_names = ("OPENAI_API_KEY", "OPENROUTER_API_KEY")
-    elif args.backend == "gemini":
-        env_names = ("GEMINI_API_KEY", "OPENROUTER_API_KEY")
-    else:
-        env_names = ("OPENROUTER_API_KEY",)
-    for name in env_names:
-        value = os.environ.get(name)
-        if value:
-            return value.strip()
+    env_name = {
+        "sub2api": "SUB2API_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "gemini": "GEMINI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+    }.get(args.backend)
+    value = os.environ.get(env_name, "") if env_name else ""
+    if value:
+        return value.strip()
     if args.api_key_file and args.api_key_file.is_file():
         return args.api_key_file.read_text(encoding="utf-8").strip()
     return None
@@ -124,27 +143,6 @@ def _agent_cache_key(base: Optional[str], strategy: str, agent_id: int) -> Optio
     ).strip("._-") or "expgym"
     suffix = f"-{strategy}-a{agent_id}-{digest}"
     return prefix[: 64 - len(suffix)] + suffix
-
-
-def _answer_evaluator_for(
-    scenario: Dict[str, object], args: argparse.Namespace
-) -> Optional[Callable]:
-    builder = scenario.get("build_answer_evaluator")
-    if builder is None:
-        return None
-    candidates = [
-        {"data_source": args.data_source, "cc_split": args.cc_split},
-        {"data_source": args.data_source},
-        {"cc_split": args.cc_split},
-        {},
-    ]
-    for candidate in candidates:
-        kwargs = {key: value for key, value in candidate.items() if value is not None}
-        try:
-            return builder(args.question_index, **kwargs)
-        except TypeError:
-            continue
-    return builder(args.question_index)
 
 
 def _agent_namespace(
@@ -187,7 +185,13 @@ def _atomic_json(path: Path, value: object) -> None:
     temporary = Path(handle.name)
     try:
         with handle:
-            json.dump(value, handle, indent=2, ensure_ascii=False, default=str)
+            json.dump(
+                value,
+                handle,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -199,16 +203,7 @@ def _atomic_json(path: Path, value: object) -> None:
 
 
 def _implementation_manifest() -> Dict[str, str]:
-    files = {
-        "runner": REPO_ROOT / "scripts" / "run_poolact.py",
-        "api": REPO_ROOT / "expgym" / "poolact.py",
-        "shared_state": REPO_ROOT / "expgym" / "extras" / "parallel_cache.py",
-        "react_loop": REPO_ROOT / "expgym" / "react_loop.py",
-    }
-    return {
-        name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for name, path in files.items()
-    }
+    return {"source_tree": source_tree_sha256(REPO_ROOT)}
 
 
 def _resolved_config(
@@ -233,8 +228,15 @@ def _resolved_config(
         "max_steps": args.max_steps,
         "max_evals": args.max_evals,
         "max_context_tokens": args.max_context_tokens,
+        "probes": args.probes,
+        "base_url": args.base_url,
+        "prompt_cache_key": args.prompt_cache_key,
+        "vllm_disable_thinking": args.vllm_disable_thinking,
+        "request_timeout": args.request_timeout,
+        "max_retries": args.max_retries,
+        "retry_base_seconds": args.retry_base_seconds,
+        "retry_max_seconds": args.retry_max_seconds,
     }
-
 
 def _batch_strategy_metrics(
     items: Dict[str, Dict[str, Dict[str, Any]]],
@@ -247,9 +249,7 @@ def _batch_strategy_metrics(
             for item in items.values()
             if strategy in item
         ]
-        numeric_scores = [
-            float(score) for score in scores if isinstance(score, (int, float))
-        ]
+        numeric_scores = [float(score) for score in scores if _is_finite_number(score)]
         metrics[strategy] = {
             "completed_items": len(scores),
             "scored_items": len(numeric_scores),
@@ -258,6 +258,65 @@ def _batch_strategy_metrics(
             ),
         }
     return metrics
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _load_resumable_result(
+    result_path: Path,
+    *,
+    item_output_dir: Path,
+    strategy: str,
+    config: Dict[str, Any],
+    implementation: Dict[str, str],
+    agents: int,
+    answer_evaluator: Optional[Callable[..., Any]],
+) -> Optional[Dict[str, Any]]:
+    """Load a verified PoolAct completion marker, or return ``None``."""
+    try:
+        existing = json.loads(result_path.read_text(encoding="utf-8"))
+        if existing.get("config") != config:
+            return None
+        if existing.get("implementation_sha256") != implementation:
+            return None
+        if existing.get("strategy") != strategy or existing.get("agents") != agents:
+            return None
+        embedded_agents = existing.get("agent_results")
+        if not isinstance(embedded_agents, list) or len(embedded_agents) != agents:
+            return None
+        if not all(isinstance(agent, dict) for agent in embedded_agents):
+            return None
+        by_id = {agent.get("agent_id"): agent for agent in embedded_agents}
+        if set(by_id) != set(range(agents)):
+            return None
+        for agent_id in range(agents):
+            agent = by_id[agent_id]
+            if (agent.get("score_check") or {}).get("ok") is not True:
+                return None
+            agent_path = (
+                item_output_dir / strategy / "agents" / f"agent_{agent_id}.json"
+            )
+            if json.loads(agent_path.read_text(encoding="utf-8")) != agent:
+                return None
+        aggregate = existing.get("aggregate") or {}
+        if not _is_finite_number(aggregate.get("answer_perf")):
+            return None
+        recomputed_aggregate = aggregate_results(
+            str(config["scenario"]),
+            embedded_agents,
+            answer_evaluator=answer_evaluator,
+        )
+        if aggregate != recomputed_aggregate:
+            return None
+        return existing
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 def _run_strategy(
@@ -314,10 +373,14 @@ def _run_strategy(
             include_overhead,
             namespace,
         )
-        fake_plan = _call_scenario(
-            scenario["build_fake_plan"],
-            args.probes,
-            namespace,
+        fake_plan = (
+            _call_scenario(
+                scenario["build_fake_plan"],
+                args.probes,
+                namespace,
+            )
+            if args.backend == "fake"
+            else []
         )
         llm = build_llm(
             args.backend,
@@ -325,7 +388,7 @@ def _run_strategy(
             namespace,
             system_prompt=system_prompt,
         )
-        answer_evaluator = _answer_evaluator_for(scenario, namespace)
+        answer_evaluator = _resolve_answer_evaluator(scenario, namespace)
         started = time.perf_counter()
         result = run_react_loop(
             llm=llm,
@@ -350,20 +413,31 @@ def _run_strategy(
         result["agent_id"] = agent_id
         result["seed"] = namespace.seed
         result["strategy"] = strategy
-        result["score_check"] = _score_check(
+        result["score_check"] = _score_result(
             result,
             direct_tools,
             answer_evaluator,
         )
+        if coordinator is not None and result.get("answer"):
+            coordinator.graph.record_end(agent_id, str(result["answer"]))
         return result
 
     agent_results = run_agents_parallel(args.agents, run_agent)
-    aggregate_evaluator = _answer_evaluator_for(scenario, args)
+    failed_agents = [
+        result["agent_id"]
+        for result in agent_results
+        if not (result.get("score_check") or {}).get("ok")
+    ]
+    if failed_agents:
+        raise RuntimeError(f"score check failed for agents: {failed_agents}")
+    aggregate_evaluator = _resolve_answer_evaluator(scenario, args)
     aggregate = aggregate_results(
         args.scenario,
         agent_results,
         answer_evaluator=aggregate_evaluator,
     )
+    if not _is_finite_number(aggregate.get("answer_perf")):
+        raise RuntimeError("aggregate answer could not be scored")
     state: Optional[Dict[str, Any]] = None
     if cache is not None:
         state = {"cache": cache.stats()}
@@ -390,11 +464,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--api-key-file",
         type=Path,
-        default=Path(os.environ.get("OPENROUTER_API_KEY_FILE", "../openrouter.key")),
+        default=None,
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("EXPGYM_BASE_URL") or os.environ.get("SUB2API_BASE_URL"),
+        default=None,
     )
     parser.add_argument("--prompt-cache-key", default=os.environ.get("EXPGYM_PROMPT_CACHE_KEY"))
     parser.add_argument("--openrouter-referer", default=None)
@@ -427,6 +501,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--max-evals", type=int, default=30)
     parser.add_argument("--max-context-tokens", type=int, default=None)
+    parser.add_argument("--request-timeout", type=float, default=600.0)
+    parser.add_argument("--max-retries", type=int, default=10)
+    parser.add_argument("--retry-base-seconds", type=float, default=3.0)
+    parser.add_argument("--retry-max-seconds", type=float, default=120.0)
     parser.add_argument("--probes", type=int, default=4)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/poolact"))
     parser.add_argument("--resume", action="store_true")
@@ -436,8 +514,28 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not args.model:
+        args.model = _backend_model(args.backend)
+    if args.base_url is None:
+        args.base_url = _backend_base_url(args.backend)
+    if args.api_key_file is None and args.backend == "openrouter":
+        args.api_key_file = Path(
+            os.environ.get("OPENROUTER_API_KEY_FILE", "../openrouter.key")
+        )
     if args.agents < 1:
         raise SystemExit("--agents must be at least 1")
+    if args.max_steps < 1:
+        raise SystemExit("--max-steps must be at least 1")
+    if args.max_evals < 1:
+        raise SystemExit("--max-evals must be at least 1")
+    if args.max_context_tokens is not None and args.max_context_tokens < 1:
+        raise SystemExit("--max-context-tokens must be positive")
+    if args.request_timeout <= 0:
+        raise SystemExit("--request-timeout must be positive")
+    if args.max_retries < 0:
+        raise SystemExit("--max-retries must be non-negative")
+    if args.retry_base_seconds < 0 or args.retry_max_seconds < 0:
+        raise SystemExit("retry delays must be non-negative")
     if args.question_index is not None and args.question_index < 0:
         raise SystemExit("--question-index must be non-negative")
     if args.questions is not None and args.scenario == "tuning":
@@ -451,7 +549,7 @@ def main() -> int:
     if not args.dry_run and args.backend not in {"fake", "vllm"} and not api_key:
         raise SystemExit(
             f"No API key configured for backend={args.backend}. "
-            "Set OPENROUTER_API_KEY/SUB2API_API_KEY or pass --api-key."
+            "Set the matching backend API key or pass --api-key."
         )
 
     c_base = resolve_base_cost(args.scenario, args)
@@ -482,6 +580,11 @@ def main() -> int:
         item_args.question_index = question_index
         item_args.questions = None
         config = _resolved_config(item_args, time_budget)
+        resume_answer_evaluator = (
+            _resolve_answer_evaluator(_SCENARIOS[args.scenario], item_args)
+            if args.resume
+            else None
+        )
         item_output_dir = (
             args.output_dir / f"item_{question_index}"
             if args.questions is not None
@@ -491,21 +594,16 @@ def main() -> int:
         for strategy in args.strategies:
             result_path = item_output_dir / strategy / "result.json"
             if args.resume and result_path.is_file():
-                existing = json.loads(result_path.read_text(encoding="utf-8"))
-                agent_files_complete = all(
-                    (
-                        item_output_dir
-                        / strategy
-                        / "agents"
-                        / f"agent_{agent_id}.json"
-                    ).is_file()
-                    for agent_id in range(args.agents)
+                existing = _load_resumable_result(
+                    result_path,
+                    item_output_dir=item_output_dir,
+                    strategy=strategy,
+                    config=config,
+                    implementation=implementation,
+                    agents=args.agents,
+                    answer_evaluator=resume_answer_evaluator,
                 )
-                if (
-                    existing.get("config") == config
-                    and existing.get("implementation_sha256") == implementation
-                    and agent_files_complete
-                ):
+                if existing is not None:
                     completed[strategy] = existing
                     print(f"[resume] item={question_index} strategy={strategy}: {result_path}")
                     continue
