@@ -1,0 +1,53 @@
+--- a/expgym/react_loop.py
++++ b/expgym/react_loop.py
+@@ -724,7 +724,7 @@
+     lines = block.splitlines()
+     for i, line in enumerate(lines):
+         clean = _normalize_label(line)
+-        if "Answer:" in clean:
++        if clean.startswith("Answer:"):
+             first_part = clean.split("Answer:", 1)[-1].strip()
+             # Capture remaining lines after "Answer:" for multi-line answers
+             remaining = "\n".join(lines[i + 1:]).strip()
+--- a/tests/test_react_loop.py
++++ b/tests/test_react_loop.py
+@@ -403,6 +403,39 @@
+         from expgym.react_loop import _extract_answer
+         self._extract = _extract_answer
+ 
++    def test_letter_protocol_quote_does_not_override_final_answer(self) -> None:
++        # Real Kimi-K3 Letter/free/naive agent 3 quoted the protocol in its
++        # reasoning before submitting this valid final configuration.
++        expected = (
++            '{"average_units_per_layer_log2": 8.0, "batch_size_log2": 5.5, '
++            '"dropout_0": 0.25, "dropout_1": 0.25, '
++            '"final_lr_fraction_log2": -2.0, "initial_lr_log10": -4.0, '
++            '"num_layers": 5, "shape_parameter_1": 0.5}'
++        )
++        block = (
++            'The rule says "When confident in your final answer, reply with '
++            'ONLY: Answer: <your answer>". I\'m not fully confident, but the '
++            'system is forcing no tool calls this turn.\n\n'
++            'Answer: ' + expected
++        )
++        self.assertEqual(self._extract(block), expected)
++
++    def test_body_only_answer_reference_is_not_a_final_answer(self) -> None:
++        block = 'Thought: The instruction says "Answer: <your answer>".'
++        self.assertIsNone(self._extract(block))
++
++        class QuotingLLM(LLMBackend):
++            def __init__(self) -> None:
++                self.outputs = iter([block, "Answer: forced_choice"])
++
++            def generate(self, messages) -> LLMOutput:
++                return LLMOutput(text=next(self.outputs))
++
++        result = run_react_loop(llm=QuotingLLM(), tools={}, max_steps=3)
++        self.assertTrue(result["aborted"])
++        self.assertEqual(result["api_calls"], 2)
++        self.assertEqual(result["answer"], "forced_choice")
++
+     def test_single_line_answer(self) -> None:
+         """Single-line answer after Thought should return just the answer."""
+         block = "Thought: I have enough info.\nAnswer: hello"

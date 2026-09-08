@@ -1,0 +1,150 @@
+{
+  "validation_kind": "Static/fake validation",
+  "method": "Read-only human-context interpretation of original response_json.choices[0].message.content, checked against the actual _extract_action source; no LLM API, environment tool, or scorer was called.",
+  "source_order": "reports/full_v3_protocol_final.json['cap_candidate_evidence']",
+  "source_dump_root": "dumps/full-full_v3-ad4275b6",
+  "index_scope": "Even zero-based original indices 0, 2, ..., 20",
+  "offset_convention": "Zero-based Unicode character offsets in original message.content; line numbers are one-based.",
+  "classification_scope": "classification describes the Action: literal candidate selected by _extract_action, not every possible tool intention elsewhere in the response.",
+  "classification_counts": {
+    "thought_quote": 2,
+    "explicit_tool_intent": 9,
+    "ambiguous": 0
+  },
+  "explicit_tool_intent_layout_counts": {
+    "strict_line_start": 3,
+    "inline": 6
+  },
+  "limitations": [
+    "A recognized name or JSON-shaped argument is not evidence of schema acceptance, tool execution, an observation, or score impact.",
+    "No uncapped counterfactual execution or score was produced.",
+    "All 11 reviewed original responses contain exactly one literal Action:, after character 8000; there is no earlier Action: quotation masking a later Action: directive within this subset.",
+    "Index 6 has separate serialized native-tool text after its quoted Action: example; it is not an additional Action: directive and the actual parser does not recognize that format."
+  ],
+  "entries": [
+    {
+      "index": 0,
+      "request_id": "d9fb6af772f640d5a4fd0289f01f9aa9",
+      "classification": "thought_quote",
+      "strict_line_start": false,
+      "strict_line_start_removed_by_cap": false,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 8701, "line_one_based": 76, "strict_line_start": false}],
+      "excerpt": "The nda_id parameter — is it the hypothesis ID or the document ID? The example: Action: human_feedback {\"nda_id\": \"nda-11\", \"evidence_ids\": [3, 7]}. And hypotheses are named nda-10, nda-4, etc.",
+      "note": "The sole literal explicitly quotes the prompt example while discussing the meaning of nda_id. Its same-line trailing commentary is included by the substring-based _extract_action path. The response later plans to test nda-20 [11] and ends 'Let me start with nda-20.', but emits no further Action: directive. There is no real line-start Action to be removed or shadowed."
+    },
+    {
+      "index": 2,
+      "request_id": "ff5904821dd34269839d33090cf1b02e",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": true,
+      "strict_line_start_removed_by_cap": true,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 8691, "line_one_based": 57, "strict_line_start": true}],
+      "excerpt": "Let me focus on nda-7 first.\n\nAction: human_feedback {\"nda_id\": \"nda-7\", \"evidence_ids\": [8, 9, 17]}",
+      "note": "The final standalone directive matches the immediately preceding plan to test nda-7 with the combined evidence set. It is the sole Action: literal and its entire line begins after the cap. No quotation or earlier candidate masks it; no execution or score conclusion follows from this textual review."
+    },
+    {
+      "index": 4,
+      "request_id": "54991b53c67b477495c626fc7b5480f3",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": true,
+      "strict_line_start_removed_by_cap": true,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 8553, "line_one_based": 56, "strict_line_start": true}],
+      "excerpt": "Agent 2 is verifying nda-16 with [55, 56, 57, 58]. Let me verify a different one — perhaps nda-7 (sharing with third-parties) since it's ambiguous.\n\nAction: human_feedback {\"nda_id\": \"nda-7\", \"evidence_ids\": [17, 30]}",
+      "note": "The response explicitly chooses its next verification target and ends with that standalone directive. This is the sole Action: literal, fully after the cap; no earlier quotation or extra Action exists. The model's discussion of another agent is context, not independent proof of that agent's activity."
+    },
+    {
+      "index": 6,
+      "request_id": "df90cf6686354f3c8cba680a121f09c7",
+      "classification": "thought_quote",
+      "strict_line_start": false,
+      "strict_line_start_removed_by_cap": false,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 28766, "line_one_based": 195, "strict_line_start": false}],
+      "excerpt": "Wait, the example says Action: human_feedback {\"nda_id\": \"nda-11\", \"evidence_ids\": [3, 7]}. And the document is nda-11. Hmm, but the hypotheses are also labeled nda-XX.",
+      "native_marker_tool_intent": true,
+      "native_marker_character_zero_based": 29533,
+      "native_marker_excerpt": "Then based on feedback, adjust. Let me begin.<|open|>tools<|sep|><|open|>call tool=\"human_feedback\" index=\"1\"<|sep|><|open|>argument key=\"nda_id\" type=\"string\"<|sep|>nda-7",
+      "note": "The only Action: literal is explicitly a prompt-example quotation and is followed on its line by commentary; _extract_action chooses this quoted text, not a real Action directive. Separately the response ends with a clear attempted human_feedback call in serialized native-tool text, carrying nda-7 and [17, 30]. That text has no Action: literal, is not supported by _extract_action, and response.message.tool_calls is null. Both regions are beyond the cap. There is no later valid line-start Action being shadowed; the unsupported native format is a distinct protocol issue, not evidence of execution."
+    },
+    {
+      "index": 8,
+      "request_id": "32b82d5801c24feb83f054d2de0a47e2",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": false,
+      "strict_line_start_removed_by_cap": false,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 9006, "line_one_based": 60, "strict_line_start": false}],
+      "excerpt": "Let me start with a few feedback calls.Action: human_feedback {\"nda_id\": \"nda-15\", \"evidence_ids\": [16]}",
+      "note": "The next action follows the announced feedback plan for nda-15 [16], but the newline before Action: is missing. The current parser accepts an inline literal by testing substring membership, so this candidate is not merely a thought quotation. It is the only Action: and is entirely after the cap; there is no genuine line-start directive."
+    },
+    {
+      "index": 10,
+      "request_id": "d493b99b0683464b980c6ad42c5224dc",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": false,
+      "strict_line_start_removed_by_cap": false,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 13049, "line_one_based": 84, "strict_line_start": false}],
+      "excerpt": "The tool signature: human_feedback {\"nda_id\": \"...\", \"evidence_ids\": [...]}. Let me call it for nda-15 first.Action: human_feedback {\"nda_id\": \"nda-15\", \"evidence_ids\": [29, 35]}",
+      "note": "The line first mentions a generic signature, but that signature has no Action: label. The sole labeled occurrence comes after an explicit next-call decision and uses the concrete nda-15 [29, 35] proposed immediately before it. Thus it is an inline tool-intent directive rather than a quoted signature. No strict line-start or multiple Action exists, and the literal is fully beyond the cap."
+    },
+    {
+      "index": 12,
+      "request_id": "25b63a923ad94c4a8560b8f65732d78f",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": false,
+      "strict_line_start_removed_by_cap": false,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 10298, "line_one_based": 78, "strict_line_start": false}],
+      "excerpt": "Let me call human_feedback for a batch of these. I'll make multiple calls across turns. Let me start.Action: human_feedback {\"nda_id\": \"nda-3\", \"evidence_ids\": [7]}",
+      "note": "The action starts the stated plan to verify nda-3 and nda-1 with [7]. 'Multiple calls across turns' is prose planning, not multiple directives in this response: exactly one Action: occurs, inline after 'Let me start.' The current parser supports that placement. It is after the cap, with no true line-start Action."
+    },
+    {
+      "index": 14,
+      "request_id": "616687ae12db4f89b90f92b1c6035a08",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": false,
+      "strict_line_start_removed_by_cap": false,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 9519, "line_one_based": 85, "strict_line_start": false}],
+      "excerpt": "Let me use human_feedback on the uncertain ones. I'll do them one at a time.Action: human_feedback {\"nda_id\": \"nda-17\", \"evidence_ids\": [34]}",
+      "note": "The concrete nda-17 [34] directive follows the plan to check the uncertain hypothesis, not an example or recollection. It is inline solely because the preceding sentence lacks a separating newline. It is the only Action:, beyond the cap; no line-start Action or shadowing occurs."
+    },
+    {
+      "index": 16,
+      "request_id": "16515705ed994909831f9193591eab25",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": false,
+      "strict_line_start_removed_by_cap": false,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 9890, "line_one_based": 74, "strict_line_start": false}],
+      "excerpt": "Let me verify nda-7 first (sharing with third parties) with evidence [17], [8], [9].\nAnd nda-20 with no evidence (NotMentioned).\nAnd nda-8 with no evidence or [40].\n\nLet me call human_feedback for these.Action: human_feedback {\"nda_id\": \"nda-7\", \"evidence_ids\": [17]}",
+      "note": "The selected directive uses the stated first hypothesis and one proposed evidence choice. The broader list does not create additional Action: literals. This sole directive is appended inline to an immediate call-intent sentence and is beyond the cap; it is not a quotation or strict line-start directive."
+    },
+    {
+      "index": 18,
+      "request_id": "a876441349284408926545d6fb106203",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": true,
+      "strict_line_start_removed_by_cap": true,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 12030, "line_one_based": 126, "strict_line_start": true}],
+      "excerpt": "Let me try searching \"glass blower\" with different phrasings to find other glass blowers: \"glass blowing\", \"glassblower\", \"blows glass\".\n\nLet me try \"glassblower\".\n\nAction: search {\"query\": \"glassblower occupation\"}",
+      "note": "The response chooses a changed search phrasing and emits that search as its final standalone directive. It is the sole Action: literal and the entire directive begins after the cap. No quoted or competing Action masks it. This review does not establish the returned search results or downstream answer effect."
+    },
+    {
+      "index": 20,
+      "request_id": "a7bec99c747442818a82fd2358805a53",
+      "classification": "explicit_tool_intent",
+      "strict_line_start": false,
+      "strict_line_start_removed_by_cap": false,
+      "candidate_removed_by_cap": true,
+      "literal_positions": [{"character_zero_based": 9938, "line_one_based": 61, "strict_line_start": false}],
+      "excerpt": "Probe 1 with this candidate directly — if score is decent, selector interpretation confirmed and we can refine. This wastes no turn on defaults.Action: evaluate_config {\"edge_0\": 1, \"edge_1\": 2, \"edge_2\": 7, \"edge_3\": 8, \"edge_4\": 12, \"edge_5\": 16, \"edge_6\": 18, \"edge_7\": 19, \"edge_8\": 20",
+      "note": "After deriving a proposed NASBench-101 configuration, the response explicitly elects to probe it and appends evaluate_config inline to that decision. There is exactly one Action: literal, no quoted or line-start Action, and the entire candidate is after the cap. This classification concerns intended evaluation only; it does not certify configuration validity, evaluator acceptance, or performance."
+    }
+  ]
+}

@@ -1,0 +1,235 @@
+{
+  "schema": {
+    "name": "expgym.trace",
+    "version": "2.0.0"
+  },
+  "trace_id": "0c3f3996-afd1-4f79-9406-74df04e53310",
+  "provenance": {
+    "created_at": "2026-09-07T11:25:29.068129+00:00",
+    "repository": {
+      "commit": "703719150e8d44712ace50d6439686423dcd1328",
+      "dirty": true,
+      "changed_files": [
+        "demo_experiment.py",
+        "expgym/llm_clients.py",
+        "expgym/react_loop.py",
+        "expgym/task_tuning.py",
+        "scripts/run_paper_sweep.py",
+        "scripts/run_poolact.py",
+        "tests/test_llm_clients.py",
+        "tests/test_react_loop.py",
+        "tests/test_run_paper_sweep.py",
+        "tests/test_run_poolact.py",
+        "tests/test_task_tuning_hpobench.py",
+        "tests/test_api_dump_provenance.py",
+        "tests/test_generation_options.py",
+        "tests/test_invalid_final_configuration.py",
+        "tests/test_json_answer_lookup.py"
+      ],
+      "tracked_diff_sha256": "f82ebe47641bf028f7598bd55c1d0c41e1b8cb282a02e7ebfbc89d6cf93d62d1",
+      "source_tree_sha256": "c4e622baff06e111b7baedcb05fdeb65b10a315582e76a2e112f6e73dfb0069e",
+      "source_file_count": 53
+    },
+    "environment": {
+      "python": "3.11.15",
+      "platform": "Linux-5.15.0-1088-azure-x86_64-with-glibc2.35",
+      "packages": {
+        "openai": null,
+        "numpy": "2.4.6",
+        "pyyaml": "6.0.3",
+        "huggingface-hub": "1.30.0",
+        "pyarrow": "21.0.0"
+      }
+    },
+    "runner": "scripts/run_paper_sweep.py"
+  },
+  "run": {
+    "resume_key": "e6fcd1dac529b86134a1d8b56d781a13f20cdeddb44a26f16f38efef2a51a132",
+    "seed": 1207,
+    "backend": {
+      "name": "openai",
+      "base_url": "http://azure-uk-hpc-H200-instance-267:30141/v1/chat/completions",
+      "auth_configured": true,
+      "extra_header_names": []
+    },
+    "model": {
+      "id": "kimi-k3"
+    },
+    "generation": {
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "seed": 1207,
+      "chat_template_kwargs": {
+        "thinking": false
+      },
+      "top_k": null,
+      "provider": null,
+      "reasoning": null,
+      "max_tokens": 8192,
+      "nothink_prefix": false
+    },
+    "prompt_cache": {
+      "key": null,
+      "scope": "disabled"
+    },
+    "transport": {
+      "timeout_seconds": 600.0,
+      "max_retries": 5,
+      "retry_base_seconds": 1.0,
+      "retry_max_seconds": 30.0,
+      "retry_http_statuses": [
+        429,
+        500,
+        502,
+        503,
+        504
+      ]
+    },
+    "api_dump": {
+      "schema_version": "expgym.api_attempt.v1",
+      "client_id": "16600ea66ecf4636947738a671fddb30",
+      "run_id": "kimi-k3/full-full_v3-ad4275b6/expgym__evidence_audit__2__cost_moderate"
+    }
+  },
+  "task": {
+    "scenario": "evidence_audit",
+    "rep": 1,
+    "item": {
+      "kind": "document",
+      "id": 2,
+      "split": "cc-large"
+    },
+    "dataset": {
+      "name": "contract-nli",
+      "revision": {
+        "test_segments_sha256": "a81e3ecfc1d423f11289a1711ccd4d5cf3167f4d75576f5180bcc0b4c928fd23",
+        "hints_sha256": "25e9a4092a2688dcb1e933161056b4a6362e1b3941610fd0b5aa205745c96c59"
+      }
+    },
+    "hypothesis_order": [
+      "nda-13",
+      "nda-10",
+      "nda-12",
+      "nda-16",
+      "nda-3",
+      "nda-17",
+      "nda-15",
+      "nda-2",
+      "nda-19",
+      "nda-18",
+      "nda-20",
+      "nda-4",
+      "nda-1",
+      "nda-7",
+      "nda-5",
+      "nda-11",
+      "nda-8"
+    ],
+    "budget": {
+      "regime": "cost_moderate",
+      "mode": "time_aware",
+      "base_cost_seconds": 300.0,
+      "limit_seconds": 3000.0
+    },
+    "limits": {
+      "max_steps": 30,
+      "max_evaluations": 30,
+      "max_prompt_tokens": null,
+      "max_context_tokens": null
+    }
+  },
+  "messages": [
+    {
+      "id": "m0001",
+      "role": "system",
+      "content": "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>"
+    },
+    {
+      "id": "m0002",
+      "role": "user",
+      "content": "You are auditing a legal document against 17 hypotheses.\nYour goal: maximize the correctness of ALL labels and evidence IDs in your final answer.\nFor each hypothesis, determine: Entailment, Contradiction, or NotMentioned.\nFor Entailment/Contradiction, identify the exact evidence segment IDs.\n\nTool: human_feedback — verify your proposed evidence for a hypothesis. Can be called multiple times.\n  Input: {{\"nda_id\": \"...\", \"evidence_ids\": [segment_ids]}}\n\nUse human feedback to improve the correctness of your labels and evidence IDs.\n\nAction: human_feedback {\"nda_id\": \"nda-11\", \"evidence_ids\": [3, 7]}\nAnswer: {\"nda-11\": {\"label\": \"...\", \"evidence_ids\": [...]}, ...}\nYour final answer MUST include ALL 17 hypotheses.\n\nDocument segments:\n[0] Non-Disclosure\n[1] Agreement\n[2] Date:\n[3] Parties: [NAME OF INDIVIDUAL RECEIVING INFORMATION] of [address of individual] and FRODSHAM TOWN COUNCIL whose registered office is at CASTLE PARK HOUSE, CASTLE PARK, FRODSHAM, WA6 6SB (the Discloser)\n[4] 1. The Discloser intends to disclose information (the Confidential Information) to the Recipient for the purpose of recommendation of future land use of the decommissioned play area on Ship Street (the Purpose).\n[5] 2. The Recipient undertakes not to use the Confidential Information for any purpose except the Purpose, without first obtaining the written agreement of the Discloser.\n[6] 3. The Recipient undertakes to keep the Confidential Information secure and not to disclose it to any third party.\n[7] 4. The undertakings in clauses 2 and 3 above apply to all of the information disclosed by the Discloser to the Recipient, regardless of the way or form in which it is disclosed or recorded but they do not apply to:\n[8] a) any information which is or in future comes into the public domain (unless as a result of the breach of this Agreement); or\n[9] b) any information which is already known to the Recipient and which was not subject to any obligation of confidence before it was disclosed to the Recipient by the Discloser.\n[10] 5. Nothing in this Agreement will prevent the Recipient from making any disclosure of the Confidential Information required by law or by any competent authority.\n[11] 6. The Recipient will, on request from the Discloser, return all copies and records of the Confidential Information to the Discloser and will not retain any copies or records of the Confidential Information.\n[12] 7. Neither this Agreement nor the supply of any information grants the Recipient any licence, interest or right in respect of any intellectual property rights of the Discloser except the right to copy the Confidential Information solely for the Purpose.\n[13] 8. The undertakings in clauses 2 and 3 will continue in force indefinitely.\n[14] 9. This Agreement is governed by, and is to be construed in accordance with, English law.\n[15] The English Courts will have non-exclusive jurisdiction to deal with any dispute which has arisen or may arise out of, or in connection with, this Agreement.\n[16] Signed and Delivered as a Deed by:\n[17] [name of Recipient] in the presence of:\n[18] _____________________________\n[19] Signature\n[20] _____________________________\n[21] Signature of witness\n[22] _____________________________\n[23] Name of witness\n\nHypotheses:\n- nda-13: Permissible acquirement of similar information | Receiving Party may acquire information similar to Confidential Information from a third party.\n- nda-10: Confidentiality of Agreement | Receiving Party shall not disclose the fact that Agreement was agreed or negotiated.\n- nda-12: Permissible development of similar information | Receiving Party may independently develop information similar to Confidential Information.\n- nda-16: Return of confidential information | Receiving Party shall destroy or return some Confidential Information upon the termination of Agreement.\n- nda-3: Inclusion of verbally conveyed information | Confidential Information may include verbally conveyed information.\n- nda-17: Permissible copy | Receiving Party may create a copy of some Confidential Information in some circumstances.\n- nda-15: No licensing | Agreement shall not grant Receiving Party any right to Confidential Information.\n- nda-2: None-inclusion of non-technical information | Confidential Information shall only include technical information.\n- nda-19: Survival of obligations | Some obligations of Agreement may survive termination of Agreement.\n- nda-18: No solicitation | Receiving Party shall not solicit some of Disclosing Party's representatives.\n- nda-20: Permissible post-agreement possession | Receiving Party may retain some Confidential Information even after the return or destruction of Confidential Information.\n- nda-4: Limited use | Receiving Party shall not use any Confidential Information for any purpose other than the purposes stated in Agreement.\n- nda-1: Explicit identification | All Confidential Information shall be expressly identified by the Disclosing Party.\n- nda-7: Sharing with third-parties | Receiving Party may share some Confidential Information with some third-parties (including consultants, agents and professional advisors).\n- nda-5: Sharing with employees | Receiving Party may share some Confidential Information with some of Receiving Party's employees.\n- nda-11: No reverse engineering | Receiving Party shall not reverse engineer any objects which embody Disclosing Party's Confidential Information.\n- nda-8: Notice on compelled disclosure | Receiving Party shall notify Disclosing Party in case Receiving Party is required by law, regulation or judicial process to disclose any Confidential Information."
+    },
+    {
+      "id": "m0003",
+      "role": "assistant",
+      "content": "Thought: I'll analyze this NDA (a simple one-way NDA with Frodsham Town Council) against the 17 hypotheses. Most are straightforward, but a few are uncertain (nda-7 sharing with third-parties via compelled disclosure, nda-16 return \"on request\" vs \"upon termination\", nda-1/nda-2 contradiction vs not-mentioned). Let me verify the most uncertain ones with human feedback, starting with nda-7.<|open|>tools<|sep|><|open|>call tool=\"human_feedback\" index=\"1\"<|sep|><|open|>argument key=\"nda_id\" type=\"string\"<|sep|>nda-7<|close|>argument<|sep|><|open|>argument key=\"evidence_ids\" type=\"array\"<|sep|>[10]<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>"
+    },
+    {
+      "id": "m0004",
+      "role": "user",
+      "content": "System: Loop aborted (Missing Action directive). Respond immediately with Answer: <your final choice> and no other text."
+    },
+    {
+      "id": "m0005",
+      "role": "assistant",
+      "content": "Answer: {\"nda-13\": {\"label\": \"NotMentioned\", \"evidence_ids\": []}, \"nda-10\": {\"label\": \"NotMentioned\", \"evidence_ids\": []}, \"nda-12\": {\"label\": \"NotMentioned\", \"evidence_ids\": []}, \"nda-16\": {\"label\": \"Entailment\", \"evidence_ids\": [11]}, \"nda-3\": {\"label\": \"Entailment\", \"evidence_ids\": [7]}, \"nda-17\": {\"label\": \"Entailment\", \"evidence_ids\": [12]}, \"nda-15\": {\"label\": \"Entailment\", \"evidence_ids\": [12]}, \"nda-2\": {\"label\": \"Contradiction\", \"evidence_ids\": [7]}, \"nda-19\": {\"label\": \"Entailment\", \"evidence_ids\": [13]}, \"nda-18\": {\"label\": \"NotMentioned\", \"evidence_ids\": []}, \"nda-20\": {\"label\": \"Contradiction\", \"evidence_ids\": [11]}, \"nda-4\": {\"label\": \"Entailment\", \"evidence_ids\": [5]}, \"nda-1\": {\"label\": \"Contradiction\", \"evidence_ids\": [7]}, \"nda-7\": {\"label\": \"Entailment\", \"evidence_ids\": [10]}, \"nda-5\": {\"label\": \"NotMentioned\", \"evidence_ids\": []}, \"nda-11\": {\"label\": \"NotMentioned\", \"evidence_ids\": []}, \"nda-8\": {\"label\": \"NotMentioned\", \"evidence_ids\": []}}"
+    }
+  ],
+  "llm_calls": [
+    {
+      "id": "llm0001",
+      "input_message_ids": [
+        "m0001",
+        "m0002"
+      ],
+      "output_message_id": "m0003",
+      "forced": false,
+      "latency_seconds": 121.47665472701192,
+      "request_attempts": 1,
+      "usage": {
+        "input_tokens": 1389,
+        "output_tokens": 3474,
+        "cache": {
+          "reported": false,
+          "read_tokens": null,
+          "write_tokens": null
+        }
+      }
+    },
+    {
+      "id": "llm0002",
+      "input_message_ids": [
+        "m0001",
+        "m0002",
+        "m0003",
+        "m0004"
+      ],
+      "output_message_id": "m0005",
+      "forced": true,
+      "latency_seconds": 12.618844259530306,
+      "request_attempts": 1,
+      "usage": {
+        "input_tokens": 1657,
+        "output_tokens": 366,
+        "cache": {
+          "reported": false,
+          "read_tokens": null,
+          "write_tokens": null
+        }
+      }
+    }
+  ],
+  "tool_calls": [],
+  "outcome": {
+    "status": "terminated",
+    "termination_reason": "missing_action",
+    "answer_source": "forced_model_answer",
+    "answer_message_id": "m0005",
+    "score": {
+      "metrics": {
+        "label_acc": 0.7647058823529411,
+        "evidence_acc": 0.7647058823529411,
+        "verification_eff": 0.0
+      },
+      "primary_metric": "label_acc"
+    },
+    "score_cost_basis": "total_simulated_cost",
+    "validation": {
+      "passed": true,
+      "method": "repository_score_recompute"
+    }
+  },
+  "timing": {
+    "wall_time_seconds": 134.09645199775696
+  }
+}

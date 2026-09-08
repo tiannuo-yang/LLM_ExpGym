@@ -1,0 +1,411 @@
+{
+  "strategy": "naive",
+  "agents": 4,
+  "aggregate": {
+    "method": "majority_vote",
+    "answer": "Lynelle Huynh",
+    "answer_perf": 0.0,
+    "answer_metrics": null,
+    "individual_answers": [
+      "Lynelle Huynh",
+      "Unknown",
+      "Unknown",
+      "Lynelle Huynh"
+    ],
+    "individual_perfs": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "shared_state": null,
+  "agent_results": [
+    {
+      "answer": "Lynelle Huynh",
+      "answer_perf": 0.0,
+      "answer_overhead": 901.7581622768193,
+      "answer_metrics": null,
+      "steps": [
+        "System Prompt:",
+        "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>",
+        "",
+        "Prompt: Task description:\nYou are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 2 correct answers)\n\nQuestion: Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?",
+        "Thought: I need to find the person whose date of birth is 0948-02-09 first. Let me search for that date.",
+        "Action: search {\"query\": \"0948-02-09\"}",
+        "Tool input: {\"query\": \"0948-02-09\"}",
+        "Observation: Article: Lynelle Huynh\n\n# Lynelle Huynh\n\n## Family\nThe daughters of Lynelle Huynh are Elissa Huynh, Zenobia Swearingen.\nThe husband of Lynelle Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Lynelle Huynh are Dirk Eicher, Nicolle Savoy, Elvis Page, Annette Caesar.\n\n## Attributes\nThe date of birth of Lynelle Huynh is 0948-02-09.\nThe occupation of Lynelle Huynh is colour technologist.\nThe hobby of Lynelle Huynh is audiophile.\nThe gender of Lynelle Huynh is female.\n | cost=308s [time_left=592s]",
+        "Thought: The person with date of birth 0948-02-09 is Lynelle Huynh. Now I need to find her grandchild. Her daughters are Elissa Huynh and Zenobia Swearingen. I need to find the children of these daughters (Lynelle's grandchildren). Then for each grandchild, find their great-grandparent... wait, let me re-read the question.",
+        "\"Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?\"",
+        "So: Person = Lynelle Huynh. Grandchild of Lynelle = child of Elissa or Zenobia. Great-grandparent of that grandchild = parent of a grandparent of the grandchild.",
+        "The grandchild's grandparents are Lynelle & Jayson (on one side) and the other parents' parents. The great-grandparents would be parents of Lynelle, Jayson, or the other grandparents.",
+        "Hmm, but interestingly, Lynelle herself would be a great-grandparent of her own grandchild's child... no wait. Let's think: grandchild of Lynelle = G. G's parents are Elissa (or Zenobia) and their spouse. G's grandparents include Lynelle. G's great-grandparents are the parents of G's grandparents, i.e., parents of Lynelle, parents of Jayson, and parents of the other spouse.",
+        "Wait — but actually, \"great-grandparent of the grandchild\" — the grandchild's great-grandparents. Since Lynelle is a grandparent of G, Lynelle's parents are great-grandparents of G. So I need to find the parents of Lynelle Huynh (and possibly parents of Jayson Huynh and parents of the other spouse).",
+        "Let me first find the grandchildren. Search for Elissa Huynh and Zenobia Swearingen to find their children.",
+        "Actually, the chain is: start from Lynelle. Find grandchild (child of her daughters). Then find great-grandparent of that grandchild — which means going up: grandchild's parent's parent's parent. The grandchild's parent is Elissa/Zenobia, whose parent is Lynelle, whose parent is the great-grandparent. So effectively, the great-grandparent of the grandchild through Lynelle's line is Lynelle's parent.",
+        "But it could also be through the other lines. Typically these questions follow the chain: person → grandchild → great-grandparent. The great-grandparent relation is \"parent of parent of parent\". From the grandchild, going up three generations. The grandchild's parent is Elissa (say), Elissa's parent is Lynelle, Lynelle's parent is the answer. But also the grandchild has another parent (spouse of Elissa), and that parent's parents' parents are also great-grandparents.",
+        "Usually these wiki questions expect following the chain from the known person: the great-grandparent of the grandchild where the chain goes back through the original person's line. But to be thorough, I should check all grandparents of the grandchild and their parents. However, the wiki may only have articles for some people.",
+        "Let me first find the children of Elissa Huynh and Zenobia Swearingen.",
+        "Action: search {\"query\": \"Elissa Huynh\"}",
+        "Tool input: {\"query\": \"Elissa Huynh\"}",
+        "Observation: Article: Elissa Huynh\n\n# Elissa Huynh\n\n## Family\nThe sister of Elissa Huynh is Zenobia Swearingen.\nThe mother of Elissa Huynh is Lynelle Huynh.\nThe father of Elissa Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Elissa Huynh are Jerry Christenson, Ora Sprouse, Bret Quan.\n\n## Attributes\nThe date of birth of Elissa Huynh is 0977-05-17.\nThe occupation of Elissa Huynh is English as a second language teacher.\nThe hobby of Elissa Huynh is gold prospecting.\nThe gender of Elissa Huynh is female.\n | cost=304s [time_left=288s]",
+        "Thought: Elissa Huynh has no children listed. Let me check Zenobia Swearingen to find her children (Lynelle's grandchildren).",
+        "Action: search {\"query\": \"Zenobia Swearingen\"}",
+        "Tool input: {\"query\": \"Zenobia Swearingen\"}",
+        "Observation: [over-budget, result withheld]",
+        "Observation: [over-budget — result withheld. This evaluation exceeded the time budget.]\n\nSystem: Loop aborted (Time budget exceeded). Respond immediately with Answer: <your final choice> and no other text.",
+        "Answer: Lynelle Huynh"
+      ],
+      "total_overhead": 901.7581622768193,
+      "aborted": true,
+      "evaluations": 3,
+      "api_calls": 4,
+      "llm_time": 31.424259409308434,
+      "eval_time": 901.7581622768193,
+      "prompt_tokens": 4169,
+      "completion_tokens": 796,
+      "cached_prompt_tokens": 0,
+      "instruction_tokens": 410,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>"
+        },
+        {
+          "role": "user",
+          "content": "You are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 2 correct answers)\n\nQuestion: Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?"
+        },
+        {
+          "role": "assistant",
+          "content": "Thought: I need to find the person whose date of birth is 0948-02-09 first. Let me search for that date.\n\nAction: search {\"query\": \"0948-02-09\"}"
+        },
+        {
+          "role": "user",
+          "content": "Observation: Article: Lynelle Huynh\n\n# Lynelle Huynh\n\n## Family\nThe daughters of Lynelle Huynh are Elissa Huynh, Zenobia Swearingen.\nThe husband of Lynelle Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Lynelle Huynh are Dirk Eicher, Nicolle Savoy, Elvis Page, Annette Caesar.\n\n## Attributes\nThe date of birth of Lynelle Huynh is 0948-02-09.\nThe occupation of Lynelle Huynh is colour technologist.\nThe hobby of Lynelle Huynh is audiophile.\nThe gender of Lynelle Huynh is female.\n | cost=308s [time_left=592s]"
+        },
+        {
+          "role": "assistant",
+          "content": "Thought: The person with date of birth 0948-02-09 is Lynelle Huynh. Now I need to find her grandchild. Her daughters are Elissa Huynh and Zenobia Swearingen. I need to find the children of these daughters (Lynelle's grandchildren). Then for each grandchild, find their great-grandparent... wait, let me re-read the question.\n\n\"Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?\"\n\nSo: Person = Lynelle Huynh. Grandchild of Lynelle = child of Elissa or Zenobia. Great-grandparent of that grandchild = parent of a grandparent of the grandchild. \n\nThe grandchild's grandparents are Lynelle & Jayson (on one side) and the other parents' parents. The great-grandparents would be parents of Lynelle, Jayson, or the other grandparents.\n\nHmm, but interestingly, Lynelle herself would be a great-grandparent of her own grandchild's child... no wait. Let's think: grandchild of Lynelle = G. G's parents are Elissa (or Zenobia) and their spouse. G's grandparents include Lynelle. G's great-grandparents are the parents of G's grandparents, i.e., parents of Lynelle, parents of Jayson, and parents of the other spouse.\n\nWait — but actually, \"great-grandparent of the grandchild\" — the grandchild's great-grandparents. Since Lynelle is a grandparent of G, Lynelle's parents are great-grandparents of G. So I need to find the parents of Lynelle Huynh (and possibly parents of Jayson Huynh and parents of the other spouse).\n\nLet me first find the grandchildren. Search for Elissa Huynh and Zenobia Swearingen to find their children.\n\nActually, the chain is: start from Lynelle. Find grandchild (child of her daughters). Then find great-grandparent of that grandchild — which means going up: grandchild's parent's parent's parent. The grandchild's parent is Elissa/Zenobia, whose parent is Lynelle, whose parent is the great-grandparent. So effectively, the great-grandparent of the grandchild through Lynelle's line is Lynelle's parent.\n\nBut it could also be through the other lines. Typically these questions follow the chain: person → grandchild → great-grandparent. The great-grandparent relation is \"parent of parent of parent\". From the grandchild, going up three generations. The grandchild's parent is Elissa (say), Elissa's parent is Lynelle, Lynelle's parent is the answer. But also the grandchild has another parent (spouse of Elissa), and that parent's parents' parents are also great-grandparents.\n\nUsually these wiki questions expect following the chain from the known person: the great-grandparent of the grandchild where the chain goes back through the original person's line. But to be thorough, I should check all grandparents of the grandchild and their parents. However, the wiki may only have articles for some people.\n\nLet me first find the children of Elissa Huynh and Zenobia Swearingen.\n\nAction: search {\"query\": \"Elissa Huynh\"}"
+        },
+        {
+          "role": "user",
+          "content": "Observation: Article: Elissa Huynh\n\n# Elissa Huynh\n\n## Family\nThe sister of Elissa Huynh is Zenobia Swearingen.\nThe mother of Elissa Huynh is Lynelle Huynh.\nThe father of Elissa Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Elissa Huynh are Jerry Christenson, Ora Sprouse, Bret Quan.\n\n## Attributes\nThe date of birth of Elissa Huynh is 0977-05-17.\nThe occupation of Elissa Huynh is English as a second language teacher.\nThe hobby of Elissa Huynh is gold prospecting.\nThe gender of Elissa Huynh is female.\n | cost=304s [time_left=288s]"
+        },
+        {
+          "role": "assistant",
+          "content": "Thought: Elissa Huynh has no children listed. Let me check Zenobia Swearingen to find her children (Lynelle's grandchildren).\n\nAction: search {\"query\": \"Zenobia Swearingen\"}"
+        },
+        {
+          "role": "user",
+          "content": "Observation: [over-budget — result withheld. This evaluation exceeded the time budget.]\n\nSystem: Loop aborted (Time budget exceeded). Respond immediately with Answer: <your final choice> and no other text."
+        },
+        {
+          "role": "assistant",
+          "content": "Answer: Lynelle Huynh"
+        }
+      ],
+      "tool_records": [
+        [
+          "search",
+          "{\"query\": \"0948-02-09\"}",
+          "Article: Lynelle Huynh\n\n# Lynelle Huynh\n\n## Family\nThe daughters of Lynelle Huynh are Elissa Huynh, Zenobia Swearingen.\nThe husband of Lynelle Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Lynelle Huynh are Dirk Eicher, Nicolle Savoy, Elvis Page, Annette Caesar.\n\n## Attributes\nThe date of birth of Lynelle Huynh is 0948-02-09.\nThe occupation of Lynelle Huynh is colour technologist.\nThe hobby of Lynelle Huynh is audiophile.\nThe gender of Lynelle Huynh is female.\n"
+        ],
+        [
+          "search",
+          "{\"query\": \"Elissa Huynh\"}",
+          "Article: Elissa Huynh\n\n# Elissa Huynh\n\n## Family\nThe sister of Elissa Huynh is Zenobia Swearingen.\nThe mother of Elissa Huynh is Lynelle Huynh.\nThe father of Elissa Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Elissa Huynh are Jerry Christenson, Ora Sprouse, Bret Quan.\n\n## Attributes\nThe date of birth of Elissa Huynh is 0977-05-17.\nThe occupation of Elissa Huynh is English as a second language teacher.\nThe hobby of Elissa Huynh is gold prospecting.\nThe gender of Elissa Huynh is female.\n"
+        ],
+        [
+          "search",
+          "{\"query\": \"Zenobia Swearingen\"}",
+          "Article: Zenobia Swearingen\n\n# Zenobia Swearingen\n\n## Family\nThe sister of Zenobia Swearingen is Elissa Huynh.\nThe mother of Zenobia Swearingen is Lynelle Huynh.\nThe father of Zenobia Swearingen is Jayson Huynh.\nThe son of Zenobia Swearingen is Alexis Swearingen.\nThe daughter of Zenobia Swearingen is Delia Polk.\nThe husband of Zenobia Swearingen is Luciano Swearingen.\n\n## Friends\nThe friends of Zenobia Swearingen are Hope Gunther, David Wiggs, Mickey Archie.\n\n## Attributes\nThe date of birth of Zenobia Swearingen is 0979-09-19.\nThe occupation of Zenobia Swearingen is geoscientist.\nThe hobby of Zenobia Swearingen is aircraft spotting.\nThe gender of Zenobia Swearingen is female.\n"
+        ]
+      ],
+      "eval_records": [],
+      "wall_time_seconds": 31.42780351638794,
+      "api_dump": {
+        "schema_version": "expgym.api_attempt.v1",
+        "client_id": "4d0cb35e696648c1852c2396fb685479",
+        "run_id": "kimi-k3/full-full_v3-ad4275b6/poolact__restricted_search__16__cost_tight"
+      },
+      "agent_id": 0,
+      "seed": 1206,
+      "strategy": "naive",
+      "score_check": {
+        "ok": true,
+        "recomputed_perf": 0.0,
+        "reported_perf": 0.0
+      }
+    },
+    {
+      "answer": "Unknown",
+      "answer_perf": 0.0,
+      "answer_overhead": 0.0,
+      "answer_metrics": null,
+      "steps": [
+        "System Prompt:",
+        "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>",
+        "",
+        "Prompt: Task description:\nYou are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 2 correct answers)\n\nQuestion: Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?",
+        "Thought: I need to find the person whose date of birth is 0948-02-09. Let me search for that date of birth first.<|open|>tools<|sep|><|open|>call tool=\"search\" index=\"1\"<|sep|><|open|>argument key=\"query\" type=\"string\"<|sep|>0948-02-09<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>",
+        "System: Loop aborted (Missing Action directive). Respond immediately with Answer: <your final choice> and no other text.",
+        "Answer: Unknown"
+      ],
+      "total_overhead": 0.0,
+      "aborted": true,
+      "evaluations": 0,
+      "api_calls": 2,
+      "llm_time": 3.6248891726136208,
+      "eval_time": 0.0,
+      "prompt_tokens": 994,
+      "completion_tokens": 88,
+      "cached_prompt_tokens": 0,
+      "instruction_tokens": 410,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>"
+        },
+        {
+          "role": "user",
+          "content": "You are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 2 correct answers)\n\nQuestion: Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?"
+        },
+        {
+          "role": "assistant",
+          "content": "Thought: I need to find the person whose date of birth is 0948-02-09. Let me search for that date of birth first.<|open|>tools<|sep|><|open|>call tool=\"search\" index=\"1\"<|sep|><|open|>argument key=\"query\" type=\"string\"<|sep|>0948-02-09<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>"
+        },
+        {
+          "role": "user",
+          "content": "System: Loop aborted (Missing Action directive). Respond immediately with Answer: <your final choice> and no other text."
+        },
+        {
+          "role": "assistant",
+          "content": "Answer: Unknown"
+        }
+      ],
+      "tool_records": [],
+      "eval_records": [],
+      "wall_time_seconds": 3.625243466347456,
+      "api_dump": {
+        "schema_version": "expgym.api_attempt.v1",
+        "client_id": "f7a8b81574e74bbf8f61a22c754664ab",
+        "run_id": "kimi-k3/full-full_v3-ad4275b6/poolact__restricted_search__16__cost_tight"
+      },
+      "agent_id": 1,
+      "seed": 1207,
+      "strategy": "naive",
+      "score_check": {
+        "ok": true,
+        "recomputed_perf": 0.0,
+        "reported_perf": 0.0
+      }
+    },
+    {
+      "answer": "Unknown",
+      "answer_perf": 0.0,
+      "answer_overhead": 0.0,
+      "answer_metrics": null,
+      "steps": [
+        "System Prompt:",
+        "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>",
+        "",
+        "Prompt: Task description:\nYou are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 2 correct answers)\n\nQuestion: Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?",
+        "Thought: I need to find the person whose date of birth is 0948-02-09. Let me search for that date of birth first.<|open|>tools<|sep|><|open|>call tool=\"search\" index=\"1\"<|sep|><|open|>argument key=\"query\" type=\"string\"<|sep|>0948-02-09<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>",
+        "System: Loop aborted (Missing Action directive). Respond immediately with Answer: <your final choice> and no other text.",
+        "Answer: Unknown"
+      ],
+      "total_overhead": 0.0,
+      "aborted": true,
+      "evaluations": 0,
+      "api_calls": 2,
+      "llm_time": 4.486918307840824,
+      "eval_time": 0.0,
+      "prompt_tokens": 994,
+      "completion_tokens": 88,
+      "cached_prompt_tokens": 0,
+      "instruction_tokens": 410,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>"
+        },
+        {
+          "role": "user",
+          "content": "You are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 2 correct answers)\n\nQuestion: Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?"
+        },
+        {
+          "role": "assistant",
+          "content": "Thought: I need to find the person whose date of birth is 0948-02-09. Let me search for that date of birth first.<|open|>tools<|sep|><|open|>call tool=\"search\" index=\"1\"<|sep|><|open|>argument key=\"query\" type=\"string\"<|sep|>0948-02-09<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>"
+        },
+        {
+          "role": "user",
+          "content": "System: Loop aborted (Missing Action directive). Respond immediately with Answer: <your final choice> and no other text."
+        },
+        {
+          "role": "assistant",
+          "content": "Answer: Unknown"
+        }
+      ],
+      "tool_records": [],
+      "eval_records": [],
+      "wall_time_seconds": 4.487056225538254,
+      "api_dump": {
+        "schema_version": "expgym.api_attempt.v1",
+        "client_id": "767073a22a274444a8b13ff569fc55d5",
+        "run_id": "kimi-k3/full-full_v3-ad4275b6/poolact__restricted_search__16__cost_tight"
+      },
+      "agent_id": 2,
+      "seed": 1208,
+      "strategy": "naive",
+      "score_check": {
+        "ok": true,
+        "recomputed_perf": 0.0,
+        "reported_perf": 0.0
+      }
+    },
+    {
+      "answer": "Lynelle Huynh",
+      "answer_perf": 0.0,
+      "answer_overhead": 901.7581622768193,
+      "answer_metrics": null,
+      "steps": [
+        "System Prompt:",
+        "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>",
+        "",
+        "Prompt: Task description:\nYou are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 2 correct answers)\n\nQuestion: Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?",
+        "Thought: I need to find the person whose date of birth is 0948-02-09. I'll search for that date of birth to find the person.",
+        "Action: search {\"query\": \"0948-02-09\"}",
+        "Tool input: {\"query\": \"0948-02-09\"}",
+        "Observation: Article: Lynelle Huynh\n\n# Lynelle Huynh\n\n## Family\nThe daughters of Lynelle Huynh are Elissa Huynh, Zenobia Swearingen.\nThe husband of Lynelle Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Lynelle Huynh are Dirk Eicher, Nicolle Savoy, Elvis Page, Annette Caesar.\n\n## Attributes\nThe date of birth of Lynelle Huynh is 0948-02-09.\nThe occupation of Lynelle Huynh is colour technologist.\nThe hobby of Lynelle Huynh is audiophile.\nThe gender of Lynelle Huynh is female.\n | cost=308s [time_left=592s]",
+        "Thought: I found Lynelle Huynh, whose date of birth is 0948-02-09. Now I need to find her grandchild. Her daughters are Elissa Huynh and Zenobia Swearingen. The grandchild would be a child of one of her daughters. Let me search for Elissa Huynh first to see her children.",
+        "Action: search {\"query\": \"Elissa Huynh\"}",
+        "Tool input: {\"query\": \"Elissa Huynh\"}",
+        "Observation: Article: Elissa Huynh\n\n# Elissa Huynh\n\n## Family\nThe sister of Elissa Huynh is Zenobia Swearingen.\nThe mother of Elissa Huynh is Lynelle Huynh.\nThe father of Elissa Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Elissa Huynh are Jerry Christenson, Ora Sprouse, Bret Quan.\n\n## Attributes\nThe date of birth of Elissa Huynh is 0977-05-17.\nThe occupation of Elissa Huynh is English as a second language teacher.\nThe hobby of Elissa Huynh is gold prospecting.\nThe gender of Elissa Huynh is female.\n | cost=304s [time_left=288s]",
+        "Thought: Elissa Huynh has no children listed. Let me check Zenobia Swearingen, the other daughter of Lynelle Huynh, to find her children (who would be Lynelle's grandchildren).",
+        "Action: search {\"query\": \"Zenobia Swearingen\"}",
+        "Tool input: {\"query\": \"Zenobia Swearingen\"}",
+        "Observation: [over-budget, result withheld]",
+        "Observation: [over-budget — result withheld. This evaluation exceeded the time budget.]\n\nSystem: Loop aborted (Time budget exceeded). Respond immediately with Answer: <your final choice> and no other text.",
+        "Answer: Lynelle Huynh"
+      ],
+      "total_overhead": 901.7581622768193,
+      "aborted": true,
+      "evaluations": 3,
+      "api_calls": 4,
+      "llm_time": 9.78705421090126,
+      "eval_time": 901.7581622768193,
+      "prompt_tokens": 3022,
+      "completion_tokens": 227,
+      "cached_prompt_tokens": 0,
+      "instruction_tokens": 410,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>"
+        },
+        {
+          "role": "user",
+          "content": "You are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 2 correct answers)\n\nQuestion: Who is the great-grandparent of the grandchild of the person whose date of birth is 0948-02-09?"
+        },
+        {
+          "role": "assistant",
+          "content": "Thought: I need to find the person whose date of birth is 0948-02-09. I'll search for that date of birth to find the person.\nAction: search {\"query\": \"0948-02-09\"}"
+        },
+        {
+          "role": "user",
+          "content": "Observation: Article: Lynelle Huynh\n\n# Lynelle Huynh\n\n## Family\nThe daughters of Lynelle Huynh are Elissa Huynh, Zenobia Swearingen.\nThe husband of Lynelle Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Lynelle Huynh are Dirk Eicher, Nicolle Savoy, Elvis Page, Annette Caesar.\n\n## Attributes\nThe date of birth of Lynelle Huynh is 0948-02-09.\nThe occupation of Lynelle Huynh is colour technologist.\nThe hobby of Lynelle Huynh is audiophile.\nThe gender of Lynelle Huynh is female.\n | cost=308s [time_left=592s]"
+        },
+        {
+          "role": "assistant",
+          "content": "Thought: I found Lynelle Huynh, whose date of birth is 0948-02-09. Now I need to find her grandchild. Her daughters are Elissa Huynh and Zenobia Swearingen. The grandchild would be a child of one of her daughters. Let me search for Elissa Huynh first to see her children.\nAction: search {\"query\": \"Elissa Huynh\"}"
+        },
+        {
+          "role": "user",
+          "content": "Observation: Article: Elissa Huynh\n\n# Elissa Huynh\n\n## Family\nThe sister of Elissa Huynh is Zenobia Swearingen.\nThe mother of Elissa Huynh is Lynelle Huynh.\nThe father of Elissa Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Elissa Huynh are Jerry Christenson, Ora Sprouse, Bret Quan.\n\n## Attributes\nThe date of birth of Elissa Huynh is 0977-05-17.\nThe occupation of Elissa Huynh is English as a second language teacher.\nThe hobby of Elissa Huynh is gold prospecting.\nThe gender of Elissa Huynh is female.\n | cost=304s [time_left=288s]"
+        },
+        {
+          "role": "assistant",
+          "content": "Thought: Elissa Huynh has no children listed. Let me check Zenobia Swearingen, the other daughter of Lynelle Huynh, to find her children (who would be Lynelle's grandchildren).\nAction: search {\"query\": \"Zenobia Swearingen\"}"
+        },
+        {
+          "role": "user",
+          "content": "Observation: [over-budget — result withheld. This evaluation exceeded the time budget.]\n\nSystem: Loop aborted (Time budget exceeded). Respond immediately with Answer: <your final choice> and no other text."
+        },
+        {
+          "role": "assistant",
+          "content": "Answer: Lynelle Huynh"
+        }
+      ],
+      "tool_records": [
+        [
+          "search",
+          "{\"query\": \"0948-02-09\"}",
+          "Article: Lynelle Huynh\n\n# Lynelle Huynh\n\n## Family\nThe daughters of Lynelle Huynh are Elissa Huynh, Zenobia Swearingen.\nThe husband of Lynelle Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Lynelle Huynh are Dirk Eicher, Nicolle Savoy, Elvis Page, Annette Caesar.\n\n## Attributes\nThe date of birth of Lynelle Huynh is 0948-02-09.\nThe occupation of Lynelle Huynh is colour technologist.\nThe hobby of Lynelle Huynh is audiophile.\nThe gender of Lynelle Huynh is female.\n"
+        ],
+        [
+          "search",
+          "{\"query\": \"Elissa Huynh\"}",
+          "Article: Elissa Huynh\n\n# Elissa Huynh\n\n## Family\nThe sister of Elissa Huynh is Zenobia Swearingen.\nThe mother of Elissa Huynh is Lynelle Huynh.\nThe father of Elissa Huynh is Jayson Huynh.\n\n## Friends\nThe friends of Elissa Huynh are Jerry Christenson, Ora Sprouse, Bret Quan.\n\n## Attributes\nThe date of birth of Elissa Huynh is 0977-05-17.\nThe occupation of Elissa Huynh is English as a second language teacher.\nThe hobby of Elissa Huynh is gold prospecting.\nThe gender of Elissa Huynh is female.\n"
+        ],
+        [
+          "search",
+          "{\"query\": \"Zenobia Swearingen\"}",
+          "Article: Zenobia Swearingen\n\n# Zenobia Swearingen\n\n## Family\nThe sister of Zenobia Swearingen is Elissa Huynh.\nThe mother of Zenobia Swearingen is Lynelle Huynh.\nThe father of Zenobia Swearingen is Jayson Huynh.\nThe son of Zenobia Swearingen is Alexis Swearingen.\nThe daughter of Zenobia Swearingen is Delia Polk.\nThe husband of Zenobia Swearingen is Luciano Swearingen.\n\n## Friends\nThe friends of Zenobia Swearingen are Hope Gunther, David Wiggs, Mickey Archie.\n\n## Attributes\nThe date of birth of Zenobia Swearingen is 0979-09-19.\nThe occupation of Zenobia Swearingen is geoscientist.\nThe hobby of Zenobia Swearingen is aircraft spotting.\nThe gender of Zenobia Swearingen is female.\n"
+        ]
+      ],
+      "eval_records": [],
+      "wall_time_seconds": 9.79040540009737,
+      "api_dump": {
+        "schema_version": "expgym.api_attempt.v1",
+        "client_id": "7fe4b507096a48d5af3386342c6acbfe",
+        "run_id": "kimi-k3/full-full_v3-ad4275b6/poolact__restricted_search__16__cost_tight"
+      },
+      "agent_id": 3,
+      "seed": 1209,
+      "strategy": "naive",
+      "score_check": {
+        "ok": true,
+        "recomputed_perf": 0.0,
+        "reported_perf": 0.0
+      }
+    }
+  ],
+  "config": {
+    "poolact_protocol": "paper-graph-lock-v2",
+    "backend": "openai",
+    "model": "kimi-k3",
+    "scenario": "restricted_search",
+    "tuning_task": "neural_network_training",
+    "question_index": 16,
+    "data_source": "phantom_seed1",
+    "cc_split": "cc-large",
+    "cost_regime": "cost_tight",
+    "time_budget": 900.0,
+    "strategies": [
+      "naive",
+      "cached",
+      "poolact"
+    ],
+    "agents": 4,
+    "seed": 1206,
+    "temperature": 0.7,
+    "max_tokens": 8192,
+    "chat_template_kwargs": {
+      "thinking": false
+    },
+    "max_steps": 30,
+    "max_evals": 30,
+    "max_context_tokens": null,
+    "probes": 4,
+    "base_url": "http://azure-uk-hpc-H200-instance-267:30141/v1",
+    "prompt_cache_key": null,
+    "vllm_disable_thinking": false,
+    "request_timeout": 600.0,
+    "max_retries": 5,
+    "retry_base_seconds": 1.0,
+    "retry_max_seconds": 30.0
+  },
+  "implementation_sha256": {
+    "source_tree": "c4e622baff06e111b7baedcb05fdeb65b10a315582e76a2e112f6e73dfb0069e"
+  }
+}

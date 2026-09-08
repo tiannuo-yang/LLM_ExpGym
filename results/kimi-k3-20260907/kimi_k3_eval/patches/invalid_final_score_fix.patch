@@ -1,0 +1,275 @@
+--- a/expgym/task_tuning.py
++++ b/expgym/task_tuning.py
+@@ -4,6 +4,7 @@
+ import hashlib
+ import json
+ import math
++from numbers import Integral, Real
+ import random
+ import os
+ import threading
+@@ -68,6 +69,14 @@
+     fidelity: Dict[str, float]
+ 
+ 
++class InvalidConfigurationError(ValueError):
++    """Only model-supplied configuration syntax, shape, or values are invalid.
++
++    Backend/data failures must never be wrapped in this exception. Offline
++    final-answer scoring can assign zero without hiding infrastructure errors.
++    """
++
++
+ def _load_hpobench_config() -> Dict[str, Any]:
+     global _HPOBENCH_CONFIG_CACHE
+     if _HPOBENCH_CONFIG_CACHE is not None:
+@@ -541,14 +550,19 @@
+     allowed = {hp.name for hp in task.config_space.get_hyperparameters()}
+     fidelity_keys = set(task.fidelity.keys())
+     if isinstance(data, list):
+-        config = {hp.name: data[i] for i, hp in enumerate(task.config_space.get_hyperparameters())}
++        parameters = list(task.config_space.get_hyperparameters())
++        if len(data) != len(parameters):
++            raise InvalidConfigurationError(
++                f"Expected list of length {len(parameters)} for configuration vector"
++            )
++        config = {hp.name: value for hp, value in zip(parameters, data)}
+     elif isinstance(data, dict):
+         config = {k: v for k, v in data.items() if k in allowed}
+         unknown = [k for k in data.keys() if k not in allowed and k not in fidelity_keys]
+         if unknown:
+-            raise ValueError(f"Unknown hyperparameter(s) {set(unknown)}")
++            raise InvalidConfigurationError(f"Unknown hyperparameter(s) {set(unknown)}")
+     else:
+-        raise TypeError("Configuration payload must be dict or list")
++        raise InvalidConfigurationError("Configuration payload must be dict or list")
+     error = _validate_hpobench_config(task.config_space, config)
+     if error is not None:
+         return error, 0.0
+@@ -569,10 +583,42 @@
+     errors = []
+     for hp in config_space.get_hyperparameters():
+         value = config[hp.name]
++        # JSON scalars only. bool is not an integer hyperparameter, and
++        # nonfinite values must not reach ConfigSpace or a benchmark backend.
++        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
++            errors.append(f"{hp.name} invalid type")
++            continue
++        if isinstance(value, (int, float)):
++            try:
++                finite_value = math.isfinite(value)
++            except OverflowError:
++                finite_value = False
++            if not finite_value:
++                errors.append(f"{hp.name} must be finite")
++                continue
+         if hasattr(hp, "choices"):
+-            if value not in hp.choices:
++            matching = [choice for choice in hp.choices
++                        if not isinstance(choice, bool)
++                        and ((isinstance(value, str) and isinstance(choice, str))
++                             or (isinstance(value, (int, float)) and isinstance(choice, Real)))
++                        and value == choice]
++            if not matching:
+                 errors.append(f"{hp.name} out of range")
++            elif isinstance(matching[0], Integral):
++                # ConfigSpace 0.4 and 1.x differ on 1.0 for integer choices.
++                # Preserve its mathematical meaning, consistently in both.
++                config[hp.name] = int(value)
+         elif hasattr(hp, "lower") and hasattr(hp, "upper"):
++            if not isinstance(value, (int, float)):
++                errors.append(f"{hp.name} invalid type")
++                continue
++            is_integer = any("IntegerHyperparameter" in cls.__name__
++                             for cls in type(hp).__mro__)
++            if is_integer:
++                if value != int(value):
++                    errors.append(f"{hp.name} must be integer")
++                    continue
++                config[hp.name] = int(value)
+             if value < hp.lower or value > hp.upper:
+                 errors.append(f"{hp.name} out of range")
+     if errors:
+--- a/scripts/run_paper_sweep.py
++++ b/scripts/run_paper_sweep.py
+@@ -43,6 +43,7 @@
+     resolve_cost_regime,
+ )
+ from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
++from expgym.task_tuning import InvalidConfigurationError  # noqa: E402
+ from expgym.trace_v2 import (  # noqa: E402
+     build_trace_v2,
+     load_trace_v2,
+@@ -646,15 +647,13 @@
+     output = tool_result[0]
+     if not isinstance(output, str):
+         return False
+-    text = output.lower()
+-    zero_markers = [
+-        "invalid",
+-        "degenerate",
+-        "out of range",
+-        "missing",
+-        "tool error",
+-    ]
+-    return any(marker in text for marker in zero_markers)
++    # Only the tuning tool's explicit validation responses are zero scores.
++    # A generic "Missing data"/"Tool error" is an infrastructure failure.
++    return output.startswith((
++        "Invalid JSON payload:",
++        "Invalid config:",
++        "perf=0.000000 (invalid or degenerate configuration",
++    ))
+ 
+ 
+ def _score_check(
+@@ -712,11 +711,17 @@
+     try:
+         tool_result = tool(answer)
+         recomputed = _parse_tool_perf(tool_result)
++    except InvalidConfigurationError as exc:
++        return {
++            "ok": _float_close(result.get("answer_perf"), 0.0),
++            "recomputed_perf": 0.0,
++            "reported_perf": result.get("answer_perf"),
++            "invalid_configuration": str(exc),
++        }
+     except Exception as exc:
+         return {"ok": False, "reason": f"tool recompute failed: {exc}"}
+     if (
+         recomputed is None
+-        and _float_close(result.get("answer_perf"), 0.0)
+         and _is_zero_score_tool_result(tool_result)
+     ):
+         recomputed = 0.0
+--- /dev/null
++++ b/tests/test_invalid_final_configuration.py
+@@ -0,0 +1,128 @@
++"""Invalid model configurations score zero; evaluator failures remain failures."""
++import json
++import unittest
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++from expgym.task_tuning import InvalidConfigurationError, evaluate_hpobench_action
++from scripts.run_paper_sweep import _score_check, _score_result
++
++
++class UniformIntegerHyperparameter:
++    name = "count"
++    lower = 0
++    upper = 3
++
++
++class TestInvalidFinalConfiguration(unittest.TestCase):
++    def setUp(self):
++        self.parameters = [UniformIntegerHyperparameter(),
++                           SimpleNamespace(name="edge", choices=[0, 1, 2]),
++                           SimpleNamespace(name="op", choices=["conv", "pool"])]
++        self.benchmark = SimpleNamespace(objective_function=Mock(return_value={"function_value": 0.25, "cost": 12.5}))
++        self.task = SimpleNamespace(config_space=SimpleNamespace(get_hyperparameters=lambda: self.parameters),
++                                    fidelity={"epochs": 108}, benchmark=self.benchmark)
++        self.valid = {"count": 1, "edge": 1, "op": "conv"}
++        self.tools = {"evaluate_config": lambda payload: evaluate_hpobench_action(self.task, payload)}
++
++    def check_invalid(self, payload):
++        result = {"answer": payload, "answer_perf": None, "eval_records": [],
++                  "api_calls": 3, "evaluations": 2, "total_overhead": 17.0, "tool_records": []}
++        check = _score_result(result, self.tools, None)
++        self.assertTrue(check["ok"], check)
++        self.assertEqual(result["answer_perf"], 0.0)
++        self.assertEqual(result["answer_score_source"], "offline_final_answer")
++        self.assertEqual((result["api_calls"], result["evaluations"], result["total_overhead"]), (3, 2, 17.0))
++        self.assertEqual(result["tool_records"], [])
++        self.benchmark.objective_function.assert_not_called()
++
++    def test_invalid_json_missing_unknown_and_list_shape_score_zero(self):
++        for payload in ("not JSON", "{}", json.dumps(dict(self.valid, edge_20=1)),
++                        "[]", "[1, 1, \"conv\", 99]", "null", "42", "true"):
++            with self.subTest(payload=payload):
++                self.check_invalid(payload)
++
++    def test_invalid_types_ranges_and_nonfinite_numbers_score_zero(self):
++        for key, value in (("count", "1"), ("count", 1.5), ("count", True),
++                           ("count", 4), ("count", None), ("count", []),
++                           ("count", {}), ("count", float("nan")), ("count", float("inf")),
++                           ("count", 10 ** 400), ("edge", 1.5), ("edge", "1"),
++                           ("edge", True), ("op", 1), ("op", "unknown")):
++            with self.subTest(key=key, value=value):
++                self.check_invalid(json.dumps(dict(self.valid, **{key: value})))
++
++    def test_existing_validation_observations_and_zero_overhead_are_preserved(self):
++        output, overhead = evaluate_hpobench_action(self.task, "{}")
++        self.assertEqual(output, "Invalid config: missing count, edge, op. You must specify ALL parameters.")
++        self.assertEqual(overhead, 0.0)
++        output, overhead = evaluate_hpobench_action(self.task, json.dumps(dict(self.valid, count=9)))
++        self.assertEqual(output, "Invalid config: count out of range")
++        self.assertEqual(overhead, 0.0)
++        with self.assertRaisesRegex(InvalidConfigurationError, "Unknown hyperparameter"):
++            evaluate_hpobench_action(self.task, json.dumps(dict(self.valid, edge_20=1)))
++
++    def test_integral_floats_are_normalized_before_backend(self):
++        self.assertEqual(evaluate_hpobench_action(self.task, '{"count": 1.0, "edge": 1.0, "op": "conv"}'), (0.75, 12.5))
++        config = self.benchmark.objective_function.call_args[1]["configuration"]
++        self.assertIs(type(config["count"]), int)
++        self.assertIs(type(config["edge"]), int)
++
++    def test_fidelity_keys_keep_existing_ignored_override_behavior(self):
++        evaluate_hpobench_action(self.task, json.dumps(dict(self.valid, epochs=1)))
++        kwargs = self.benchmark.objective_function.call_args[1]
++        self.assertEqual(kwargs["configuration"], self.valid)
++        self.assertEqual(kwargs["fidelity"], {"epochs": 108})
++
++    def test_backend_exceptions_are_not_invalid_configurations(self):
++        for error in (ValueError("Unknown hyperparameter in backend"), FileNotFoundError("Missing data"),
++                      TypeError("backend bug"), RuntimeError("invalid table")):
++            with self.subTest(error=error):
++                self.benchmark.objective_function.side_effect = error
++                check = _score_result({"answer": json.dumps(self.valid), "answer_perf": None, "eval_records": []}, self.tools, None)
++                self.assertFalse(check["ok"])
++                self.assertNotIn("recomputed_perf", check)
++
++    def test_generic_error_messages_and_missing_numeric_scores_still_fail(self):
++        for tool_result in ((None, 1.0), ("Missing data", 1.0), ("Tool error: invalid table", 0.0),
++                            ("invalid backend", 0.0), ("out of range cache offset", 0.0)):
++            for reported in (None, 0.0):
++                with self.subTest(tool_result=tool_result, reported=reported):
++                    check = _score_result({"answer": "{}", "answer_perf": reported, "eval_records": []},
++                                          {"evaluate_config": lambda _payload: tool_result}, None)
++                    self.assertFalse(check["ok"])
++                    self.assertIsNone(check.get("recomputed_perf"))
++
++    def test_nonzero_reported_invalid_score_is_not_silently_replaced(self):
++        for payload in ("{}", json.dumps(dict(self.valid, edge_20=1))):
++            result = {"answer": payload, "answer_perf": 0.8, "eval_records": []}
++            check = _score_result(result, self.tools, None)
++            self.assertFalse(check["ok"])
++            self.assertEqual(check["recomputed_perf"], 0.0)
++            self.assertEqual(result["answer_perf"], 0.8)
++
++    def test_existing_evaluation_records_are_not_overridden(self):
++        result = {"answer": "{}", "answer_perf": None, "eval_records": [("old", "old", 0.8, 1.0)]}
++        self.assertFalse(_score_result(result, self.tools, None)["ok"])
++        self.assertIsNone(result["answer_perf"])
++
++    def test_numeric_zero_degenerate_score_preserves_simulated_cost(self):
++        self.benchmark.objective_function.return_value = {"function_value": 1.0, "cost": 12.5}
++        output, perf, cost = evaluate_hpobench_action(self.task, json.dumps(self.valid))
++        self.assertIn("invalid or degenerate", output)
++        self.assertEqual((perf, cost), (0.0, 12.5))
++
++    def test_real_configspace_integral_normalization(self):
++        import ConfigSpace as CS
++        from ConfigSpace.hyperparameters import UniformIntegerHyperparameter as IntegerHP, CategoricalHyperparameter
++        config_space = CS.ConfigurationSpace()
++        config_space.add_hyperparameters([IntegerHP("count", 0, 3), CategoricalHyperparameter("edge", [0, 1, 2])])
++        def objective(configuration, fidelity):
++            del fidelity
++            CS.Configuration(config_space, values=configuration)
++            return {"function_value": 0.25, "cost": 12.5}
++        task = SimpleNamespace(config_space=config_space, fidelity={}, benchmark=SimpleNamespace(objective_function=objective))
++        self.assertEqual(evaluate_hpobench_action(task, '{"count": 1.0, "edge": 1.0}'), (0.75, 12.5))
++
++
++if __name__ == "__main__":
++    unittest.main()

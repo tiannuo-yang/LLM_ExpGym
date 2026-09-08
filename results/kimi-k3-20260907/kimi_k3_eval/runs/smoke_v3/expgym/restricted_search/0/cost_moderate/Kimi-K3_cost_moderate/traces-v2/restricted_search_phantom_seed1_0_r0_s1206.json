@@ -1,0 +1,333 @@
+{
+  "schema": {
+    "name": "expgym.trace",
+    "version": "2.0.0"
+  },
+  "trace_id": "1dcedb19-48b0-4d1c-b439-ef5f807054c8",
+  "provenance": {
+    "created_at": "2026-09-07T10:25:36.543753+00:00",
+    "repository": {
+      "commit": "703719150e8d44712ace50d6439686423dcd1328",
+      "dirty": true,
+      "changed_files": [
+        "demo_experiment.py",
+        "expgym/llm_clients.py",
+        "expgym/react_loop.py",
+        "expgym/task_tuning.py",
+        "scripts/run_paper_sweep.py",
+        "scripts/run_poolact.py",
+        "tests/test_llm_clients.py",
+        "tests/test_react_loop.py",
+        "tests/test_run_paper_sweep.py",
+        "tests/test_run_poolact.py",
+        "tests/test_task_tuning_hpobench.py",
+        "tests/test_api_dump_provenance.py",
+        "tests/test_generation_options.py",
+        "tests/test_invalid_final_configuration.py",
+        "tests/test_json_answer_lookup.py"
+      ],
+      "tracked_diff_sha256": "f82ebe47641bf028f7598bd55c1d0c41e1b8cb282a02e7ebfbc89d6cf93d62d1",
+      "source_tree_sha256": "c4e622baff06e111b7baedcb05fdeb65b10a315582e76a2e112f6e73dfb0069e",
+      "source_file_count": 53
+    },
+    "environment": {
+      "python": "3.11.15",
+      "platform": "Linux-5.15.0-1088-azure-x86_64-with-glibc2.35",
+      "packages": {
+        "openai": null,
+        "numpy": "2.4.6",
+        "pyyaml": "6.0.3",
+        "huggingface-hub": "1.30.0",
+        "pyarrow": "21.0.0"
+      }
+    },
+    "runner": "scripts/run_paper_sweep.py"
+  },
+  "run": {
+    "resume_key": "7d81593e884487388e1ee10ad9d79ff2996a30b9f926e0e3ece21d758f10f18a",
+    "seed": 1206,
+    "backend": {
+      "name": "openai",
+      "base_url": "http://azure-uk-hpc-H200-instance-267:30141/v1/chat/completions",
+      "auth_configured": true,
+      "extra_header_names": []
+    },
+    "model": {
+      "id": "kimi-k3"
+    },
+    "generation": {
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "seed": 1206,
+      "chat_template_kwargs": {
+        "thinking": false
+      },
+      "top_k": null,
+      "provider": null,
+      "reasoning": null,
+      "max_tokens": 8192,
+      "nothink_prefix": false
+    },
+    "prompt_cache": {
+      "key": null,
+      "scope": "disabled"
+    },
+    "transport": {
+      "timeout_seconds": 600.0,
+      "max_retries": 5,
+      "retry_base_seconds": 1.0,
+      "retry_max_seconds": 30.0,
+      "retry_http_statuses": [
+        429,
+        500,
+        502,
+        503,
+        504
+      ]
+    },
+    "api_dump": {
+      "schema_version": "expgym.api_attempt.v1",
+      "client_id": "5e5e82e665dd46579114bc3d40c04be9",
+      "run_id": "kimi-k3/smoke-smoke_v3-f54db876/expgym__restricted_search__0__cost_moderate"
+    }
+  },
+  "task": {
+    "scenario": "restricted_search",
+    "rep": 0,
+    "item": {
+      "kind": "question",
+      "id": 0,
+      "source": "phantom_seed1"
+    },
+    "dataset": {
+      "name": "phantom-wiki-v1",
+      "revision": "9369f9c64655f4e8146afee75ae5d3e3a95d7df5"
+    },
+    "budget": {
+      "regime": "cost_moderate",
+      "mode": "time_aware",
+      "base_cost_seconds": 300.0,
+      "limit_seconds": 3000.0
+    },
+    "limits": {
+      "max_steps": 4,
+      "max_evaluations": 3,
+      "max_prompt_tokens": null,
+      "max_context_tokens": null
+    }
+  },
+  "messages": [
+    {
+      "id": "m0001",
+      "role": "system",
+      "content": "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>"
+    },
+    {
+      "id": "m0002",
+      "role": "user",
+      "content": "You are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 14 correct answers)\n\nQuestion: Who is the friend of the friend of the husband of Jeanette Byrd?"
+    },
+    {
+      "id": "m0003",
+      "role": "assistant",
+      "content": "Thought: I need to find the friend of the friend of the husband of Jeanette Byrd. Let me start by searching for Jeanette Byrd to find her husband.\n\nAction: search {\"query\": \"Jeanette Byrd\"}"
+    },
+    {
+      "id": "m0004",
+      "role": "user",
+      "content_ref": {
+        "kind": "tool_observation",
+        "tool_call_id": "tool0001"
+      }
+    },
+    {
+      "id": "m0005",
+      "role": "assistant",
+      "content": "Thought: Jeanette Byrd's husband is Rodolfo Byrd. Now I need to find Rodolfo Byrd's friends.\n\nAction: search {\"query\": \"Rodolfo Byrd\"}"
+    },
+    {
+      "id": "m0006",
+      "role": "user",
+      "content_ref": {
+        "kind": "tool_observation",
+        "tool_call_id": "tool0002"
+      }
+    },
+    {
+      "id": "m0007",
+      "role": "assistant",
+      "content": "Thought: Rodolfo Byrd's friends are Gerald Braden, Catalina Villalobos, Ester Pfeifer, Wm Murphy, Charmaine Pilkington. Now I need to find the friends of each of these friends. Let me search for each one.\n\nAction: search {\"query\": \"Gerald Braden\"}"
+    },
+    {
+      "id": "m0008",
+      "role": "user",
+      "content_ref": {
+        "kind": "tool_observation",
+        "tool_call_id": "tool0003"
+      }
+    },
+    {
+      "id": "m0009",
+      "role": "user",
+      "content": "System: Loop aborted (Maximum evaluations reached). Respond immediately with Answer: <your final choice> and no other text."
+    },
+    {
+      "id": "m0010",
+      "role": "assistant",
+      "content": "Answer: Ardath Stern, Lavern Page, Kenny Grady"
+    }
+  ],
+  "llm_calls": [
+    {
+      "id": "llm0001",
+      "input_message_ids": [
+        "m0001",
+        "m0002"
+      ],
+      "output_message_id": "m0003",
+      "forced": false,
+      "latency_seconds": 2.0907444581389427,
+      "request_attempts": 1,
+      "usage": {
+        "input_tokens": 400,
+        "output_tokens": 54,
+        "cache": {
+          "reported": false,
+          "read_tokens": null,
+          "write_tokens": null
+        }
+      }
+    },
+    {
+      "id": "llm0002",
+      "input_message_ids": [
+        "m0001",
+        "m0002",
+        "m0003",
+        "m0004"
+      ],
+      "output_message_id": "m0005",
+      "forced": false,
+      "latency_seconds": 1.6406171806156635,
+      "request_attempts": 1,
+      "usage": {
+        "input_tokens": 620,
+        "output_tokens": 48,
+        "cache": {
+          "reported": false,
+          "read_tokens": null,
+          "write_tokens": null
+        }
+      }
+    },
+    {
+      "id": "llm0003",
+      "input_message_ids": [
+        "m0001",
+        "m0002",
+        "m0003",
+        "m0004",
+        "m0005",
+        "m0006"
+      ],
+      "output_message_id": "m0007",
+      "forced": false,
+      "latency_seconds": 2.4281919598579407,
+      "request_attempts": 1,
+      "usage": {
+        "input_tokens": 844,
+        "output_tokens": 75,
+        "cache": {
+          "reported": false,
+          "read_tokens": null,
+          "write_tokens": null
+        }
+      }
+    },
+    {
+      "id": "llm0004",
+      "input_message_ids": [
+        "m0001",
+        "m0002",
+        "m0003",
+        "m0004",
+        "m0005",
+        "m0006",
+        "m0007",
+        "m0008",
+        "m0009"
+      ],
+      "output_message_id": "m0010",
+      "forced": true,
+      "latency_seconds": 0.8794989585876465,
+      "request_attempts": 1,
+      "usage": {
+        "input_tokens": 1139,
+        "output_tokens": 20,
+        "cache": {
+          "reported": false,
+          "read_tokens": null,
+          "write_tokens": null
+        }
+      }
+    }
+  ],
+  "tool_calls": [
+    {
+      "id": "tool0001",
+      "request_message_id": "m0003",
+      "result_message_id": "m0004",
+      "name": "search",
+      "arguments": {
+        "query": "Jeanette Byrd"
+      },
+      "performance": null,
+      "simulated_cost_seconds": 313.0601625610143,
+      "visible_to_model": true,
+      "observation": "Observation: Article: Jeanette Byrd\n\n# Jeanette Byrd\n\n## Family\nThe daughter of Jeanette Byrd is Irish Schwarz.\nThe husband of Jeanette Byrd is Rodolfo Byrd.\n\n## Friends\nThe friends of Jeanette Byrd are Terence Landeros, Ashton Croft, Vilma Newman, Bonnie Ketcham, Zana Jude.\n\n## Attributes\nThe date of birth of Jeanette Byrd is 0976-08-12.\nThe occupation of Jeanette Byrd is garment technologist.\nThe hobby of Jeanette Byrd is table tennis.\nThe gender of Jeanette Byrd is female.\n | cost=313s [time_left=2687s]"
+    },
+    {
+      "id": "tool0002",
+      "request_message_id": "m0005",
+      "result_message_id": "m0006",
+      "name": "search",
+      "arguments": {
+        "query": "Rodolfo Byrd"
+      },
+      "performance": null,
+      "simulated_cost_seconds": 283.4625322278589,
+      "visible_to_model": true,
+      "observation": "Observation: Article: Rodolfo Byrd\n\n# Rodolfo Byrd\n\n## Family\nThe daughter of Rodolfo Byrd is Irish Schwarz.\nThe wife of Rodolfo Byrd is Jeanette Byrd.\n\n## Friends\nThe friends of Rodolfo Byrd are Gerald Braden, Catalina Villalobos, Ester Pfeifer, Wm Murphy, Charmaine Pilkington.\n\n## Attributes\nThe date of birth of Rodolfo Byrd is 0977-05-16.\nThe occupation of Rodolfo Byrd is operations geologist.\nThe hobby of Rodolfo Byrd is shooting.\nThe gender of Rodolfo Byrd is male.\n | cost=283s [time_left=2403s]"
+    },
+    {
+      "id": "tool0003",
+      "request_message_id": "m0007",
+      "result_message_id": "m0008",
+      "name": "search",
+      "arguments": {
+        "query": "Gerald Braden"
+      },
+      "performance": null,
+      "simulated_cost_seconds": 280.34271410666406,
+      "visible_to_model": true,
+      "observation": "Observation: Article: Gerald Braden\n\n# Gerald Braden\n\n## Family\nThe sisters of Gerald Braden are Lavonne Luevano, Zona Braden.\nThe brothers of Gerald Braden are Cleveland Braden, Houston Braden.\nThe mother of Gerald Braden is Tari Braden.\nThe father of Gerald Braden is Sung Braden.\n\n## Friends\nThe friends of Gerald Braden are Ardath Stern, Lavern Page, Rodolfo Byrd, Kenny Grady.\n\n## Attributes\nThe date of birth of Gerald Braden is 0969-06-24.\nThe occupation of Gerald Braden is toxicologist.\nThe hobby of Gerald Braden is people-watching.\nThe gender of Gerald Braden is male.\n | cost=280s [time_left=2123s]"
+    }
+  ],
+  "outcome": {
+    "status": "terminated",
+    "termination_reason": "max_evaluations_reached",
+    "answer_source": "forced_model_answer",
+    "answer_message_id": "m0010",
+    "score": {
+      "value": 0.35294117647058826
+    },
+    "score_cost_basis": "total_simulated_cost",
+    "validation": {
+      "passed": true,
+      "method": "repository_score_recompute"
+    }
+  },
+  "timing": {
+    "wall_time_seconds": 7.286049842834473
+  }
+}

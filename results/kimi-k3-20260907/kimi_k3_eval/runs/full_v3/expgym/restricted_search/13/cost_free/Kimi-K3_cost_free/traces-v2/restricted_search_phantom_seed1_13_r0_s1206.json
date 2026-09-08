@@ -1,0 +1,208 @@
+{
+  "schema": {
+    "name": "expgym.trace",
+    "version": "2.0.0"
+  },
+  "trace_id": "b5f68761-80a6-48d4-9296-c136a0d78604",
+  "provenance": {
+    "created_at": "2026-09-07T11:07:37.420675+00:00",
+    "repository": {
+      "commit": "703719150e8d44712ace50d6439686423dcd1328",
+      "dirty": true,
+      "changed_files": [
+        "demo_experiment.py",
+        "expgym/llm_clients.py",
+        "expgym/react_loop.py",
+        "expgym/task_tuning.py",
+        "scripts/run_paper_sweep.py",
+        "scripts/run_poolact.py",
+        "tests/test_llm_clients.py",
+        "tests/test_react_loop.py",
+        "tests/test_run_paper_sweep.py",
+        "tests/test_run_poolact.py",
+        "tests/test_task_tuning_hpobench.py",
+        "tests/test_api_dump_provenance.py",
+        "tests/test_generation_options.py",
+        "tests/test_invalid_final_configuration.py",
+        "tests/test_json_answer_lookup.py"
+      ],
+      "tracked_diff_sha256": "f82ebe47641bf028f7598bd55c1d0c41e1b8cb282a02e7ebfbc89d6cf93d62d1",
+      "source_tree_sha256": "c4e622baff06e111b7baedcb05fdeb65b10a315582e76a2e112f6e73dfb0069e",
+      "source_file_count": 53
+    },
+    "environment": {
+      "python": "3.11.15",
+      "platform": "Linux-5.15.0-1088-azure-x86_64-with-glibc2.35",
+      "packages": {
+        "openai": null,
+        "numpy": "2.4.6",
+        "pyyaml": "6.0.3",
+        "huggingface-hub": "1.30.0",
+        "pyarrow": "21.0.0"
+      }
+    },
+    "runner": "scripts/run_paper_sweep.py"
+  },
+  "run": {
+    "resume_key": "b0f50c4100668aa453b8b2c7c594a61f74e6000a73413e997934a5269e7a3a67",
+    "seed": 1206,
+    "backend": {
+      "name": "openai",
+      "base_url": "http://azure-uk-hpc-H200-instance-267:30141/v1/chat/completions",
+      "auth_configured": true,
+      "extra_header_names": []
+    },
+    "model": {
+      "id": "kimi-k3"
+    },
+    "generation": {
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "seed": 1206,
+      "chat_template_kwargs": {
+        "thinking": false
+      },
+      "top_k": null,
+      "provider": null,
+      "reasoning": null,
+      "max_tokens": 8192,
+      "nothink_prefix": false
+    },
+    "prompt_cache": {
+      "key": null,
+      "scope": "disabled"
+    },
+    "transport": {
+      "timeout_seconds": 600.0,
+      "max_retries": 5,
+      "retry_base_seconds": 1.0,
+      "retry_max_seconds": 30.0,
+      "retry_http_statuses": [
+        429,
+        500,
+        502,
+        503,
+        504
+      ]
+    },
+    "api_dump": {
+      "schema_version": "expgym.api_attempt.v1",
+      "client_id": "b4c0254c690547beb61ca1f9b18adb8e",
+      "run_id": "kimi-k3/full-full_v3-ad4275b6/expgym__restricted_search__13__cost_free"
+    }
+  },
+  "task": {
+    "scenario": "restricted_search",
+    "rep": 0,
+    "item": {
+      "kind": "question",
+      "id": 13,
+      "source": "phantom_seed1"
+    },
+    "dataset": {
+      "name": "phantom-wiki-v1",
+      "revision": "9369f9c64655f4e8146afee75ae5d3e3a95d7df5"
+    },
+    "budget": {
+      "regime": "cost_free",
+      "mode": "no_budget",
+      "base_cost_seconds": 300.0,
+      "limit_seconds": null
+    },
+    "limits": {
+      "max_steps": 30,
+      "max_evaluations": 30,
+      "max_prompt_tokens": null,
+      "max_context_tokens": null
+    }
+  },
+  "messages": [
+    {
+      "id": "m0001",
+      "role": "system",
+      "content": "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>"
+    },
+    {
+      "id": "m0002",
+      "role": "user",
+      "content": "You are answering a question by searching a wiki of fictional characters.\n\nTool:\n- search: look up information in the wiki.\n  Input: {\"query\": \"Person Name\"} or {\"query\": \"keyword phrase\"}\n  If the query exactly matches an article title, that article is returned.\n  Otherwise, the most relevant article is returned based on keyword matching.\n\nStrategy:\n1. The wiki contains articles about fictional people, each with Family, Friends, and Attributes sections.\n2. Questions ask about relationship chains (e.g., 'Who is the friend of the parent of X?').\n3. Start from the person named (or described) in the question, then follow the chain step by step.\n4. Each search returns one full article. Re-searching a previously returned article is free.\n5. Your answer should list ALL matching names, separated by commas.\n\nAction format:\n  Action: search {\"query\": \"Person Name\"}\n  Answer: Name1, Name2, ...  (there may be 1 to 1 correct answers)\n\nQuestion: Who is the daughter-in-law of the mother of the person whose date of birth is 0954-02-11?"
+    },
+    {
+      "id": "m0003",
+      "role": "assistant",
+      "content": "Thought: I need to find the person whose date of birth is 0954-02-11. Let me search for that date of birth first.<|open|>tools<|sep|><|open|>call tool=\"search\" index=\"1\"<|sep|><|open|>argument key=\"query\" type=\"string\"<|sep|>0954-02-11<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>"
+    },
+    {
+      "id": "m0004",
+      "role": "user",
+      "content": "System: Loop aborted (Missing Action directive). Respond immediately with Answer: <your final choice> and no other text."
+    },
+    {
+      "id": "m0005",
+      "role": "assistant",
+      "content": "Answer: I don't have enough information to answer this question."
+    }
+  ],
+  "llm_calls": [
+    {
+      "id": "llm0001",
+      "input_message_ids": [
+        "m0001",
+        "m0002"
+      ],
+      "output_message_id": "m0003",
+      "forced": false,
+      "latency_seconds": 3.4005794934928417,
+      "request_attempts": 1,
+      "usage": {
+        "input_tokens": 409,
+        "output_tokens": 78,
+        "cache": {
+          "reported": false,
+          "read_tokens": null,
+          "write_tokens": null
+        }
+      }
+    },
+    {
+      "id": "llm0002",
+      "input_message_ids": [
+        "m0001",
+        "m0002",
+        "m0003",
+        "m0004"
+      ],
+      "output_message_id": "m0005",
+      "forced": true,
+      "latency_seconds": 1.1201099194586277,
+      "request_attempts": 1,
+      "usage": {
+        "input_tokens": 583,
+        "output_tokens": 19,
+        "cache": {
+          "reported": false,
+          "read_tokens": null,
+          "write_tokens": null
+        }
+      }
+    }
+  ],
+  "tool_calls": [],
+  "outcome": {
+    "status": "terminated",
+    "termination_reason": "missing_action",
+    "answer_source": "forced_model_answer",
+    "answer_message_id": "m0005",
+    "score": {
+      "value": 0.0
+    },
+    "score_cost_basis": "total_simulated_cost",
+    "validation": {
+      "passed": true,
+      "method": "repository_score_recompute"
+    }
+  },
+  "timing": {
+    "wall_time_seconds": 4.7132813930511475
+  }
+}

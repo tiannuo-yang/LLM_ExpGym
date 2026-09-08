@@ -1,0 +1,144 @@
+--- a/expgym/task_tuning.py
++++ b/expgym/task_tuning.py
+@@ -293,6 +293,35 @@
+ def _task_hints(task_name: str) -> Optional[str]:
+     """Return task-specific semantic hints to help LLMs understand the search space."""
+     if task_name.startswith("hpobench:nasbench101:"):
++        variant = task_name.rsplit(":", 1)[-1].upper()
++        if variant == "B":
++            return (
++                "Note: This is a neural architecture search task on a 7-node directed acyclic graph (DAG). "
++                "NASBench101-B uses nine categorical edge selectors, edge_0 through edge_8. "
++                "Each selector value is an edge ID from 0 to 20, not a binary adjacency entry. "
++                "For an edge from node u to node v (0 <= u < v <= 6), its ID is "
++                "20 - (u + v*(v-1)//2). "
++                "Repeated IDs select the same edge once, so AT MOST 9 distinct edges are enabled. "
++                "The op_node_0 through op_node_4 parameters choose operations for nodes 1 through 5. "
++                "Node 0 is the input and node 6 is the output. "
++                "A graph without a connected input-to-output path is invalid and scores 0. "
++                "Specify all nine selectors and all five op_node_* parameters in every evaluation call."
++            )
++        if variant == "C":
++            return (
++                "Note: This is a neural architecture search task on a 7-node directed acyclic graph (DAG). "
++                "NASBench101-C uses 21 real-valued edge priorities, edge_0 through edge_20, "
++                "each in [0, 1], and an integer num_edges in [0, 9]. "
++                "The edge priorities follow upper-triangular row order: "
++                "(0,1), (0,2), ..., (0,6), (1,2), ..., (5,6). "
++                "The num_edges highest-priority entries are enabled; the values are priorities, "
++                "not binary adjacency entries. Equal priorities follow the implementation's sorting order. "
++                "The op_node_0 through op_node_4 parameters choose operations for nodes 1 through 5. "
++                "Node 0 is the input and node 6 is the output. "
++                "A graph without a connected input-to-output path is invalid and scores 0. "
++                "Specify all 21 edge priorities, num_edges, and all five op_node_* parameters "
++                "in every evaluation call."
++            )
+         return (
+             "Note: This is a neural architecture search task on a 7-node directed acyclic graph (DAG). "
+             "The edge_* parameters form the upper-triangular adjacency matrix (0 or 1) of the DAG. "
+--- a/tests/test_task_tuning_hpobench.py
++++ b/tests/test_task_tuning_hpobench.py
+@@ -69,15 +69,43 @@
+         for variant in ["A", "B", "C"]:
+             self.assertIn(f"hpobench:nasbench101:{variant}", tasks)
+ 
+-    def test_nasbench101_hint_matches_paper_constraint(self) -> None:
++    def test_nasbench101_a_hint_remains_unchanged(self) -> None:
++        self.assertEqual(
++            _task_hints("hpobench:nasbench101:A"),
++            "Note: This is a neural architecture search task on a 7-node directed acyclic graph (DAG). "
++            "The edge_* parameters form the upper-triangular adjacency matrix (0 or 1) of the DAG. "
++            "The op_node_* parameters choose the operation for each intermediate node. "
++            "Node 0 is the input and node 6 is the output. "
++            "IMPORTANT CONSTRAINTS: "
++            "(1) The total number of edges set to 1 must be AT MOST 9. "
++            "Architectures with more than 9 edges are INVALID and will always score 0. "
++            "(2) There must be a connected path from the input node (0) to the output node (6). "
++            "Disconnected graphs are degenerate and score 0. "
++            "(3) Do NOT set all edges to 1 — that exceeds the 9-edge limit. "
++            "You must specify ALL parameters in every evaluation call (set unused edges to 0).",
++        )
++
++    def test_nasbench101_b_hint_describes_selector_encoding(self) -> None:
+         hint = _task_hints("hpobench:nasbench101:B")
+-        self.assertIsNotNone(hint)
+-        self.assertIn("7-node directed acyclic graph", hint)
+-        self.assertIn("upper-triangular adjacency matrix", hint)
+-        self.assertIn("AT MOST 9", hint)
+-        self.assertIn("will always score 0", hint)
+-        self.assertNotIn("NASBench101-B", hint)
+-        self.assertNotIn("selector", hint)
++        self.assertIn("nine categorical edge selectors, edge_0 through edge_8", hint)
++        self.assertIn("edge ID from 0 to 20", hint)
++        self.assertIn("20 - (u + v*(v-1)//2)", hint)
++        self.assertIn("Repeated IDs select the same edge once", hint)
++        self.assertIn("AT MOST 9 distinct edges", hint)
++        self.assertNotIn("set unused edges to 0", hint)
++        self.assertNotIn("Do NOT set all edges to 1", hint)
++        self.assertEqual(_task_hints("hpobench:nasbench101:b"), hint)
++
++    def test_nasbench101_c_hint_describes_top_priority_encoding(self) -> None:
++        hint = _task_hints("hpobench:nasbench101:C")
++        self.assertIn("21 real-valued edge priorities, edge_0 through edge_20", hint)
++        self.assertIn("each in [0, 1]", hint)
++        self.assertIn("integer num_edges in [0, 9]", hint)
++        self.assertIn("upper-triangular row order", hint)
++        self.assertIn("num_edges highest-priority entries are enabled", hint)
++        self.assertNotIn("set unused edges to 0", hint)
++        self.assertNotIn("Do NOT set all edges to 1", hint)
++        self.assertEqual(_task_hints("hpobench:nasbench101:c"), hint)
+ 
+     def test_hpobench_zero_perf_returns_numeric_score_with_message(self) -> None:
+         class _Hyperparameter:
+--- a/tests/test_compact_nasbench101.py
++++ b/tests/test_compact_nasbench101.py
+@@ -7,6 +7,7 @@
+     SCHEMA,
+     CompactNasBench101Benchmark,
+     configuration_hash,
++    _matrix_for_variant,
+ )
+ 
+ 
+@@ -42,6 +43,40 @@
+ 
+ 
+ class CompactNasBench101Test(unittest.TestCase):
++    def test_b_selector_ids_use_reversed_column_order(self) -> None:
++        # Independent endpoint examples from NASBench graph_util bit encoding.
++        for edge_id, endpoints in [(0, (5, 6)), (5, (0, 6)), (20, (0, 1))]:
++            with self.subTest(edge_id=edge_id):
++                config = {f"edge_{index}": edge_id for index in range(9)}
++                matrix = _matrix_for_variant(config, "B")
++                enabled = {(u, v) for u in range(7) for v in range(7) if matrix[u][v]}
++                self.assertEqual(enabled, {endpoints})
++
++    def test_b_duplicate_selectors_enable_each_edge_once(self) -> None:
++        # Six distinct IDs describe a chain; repeated selectors add no edges.
++        selectors = [20, 18, 15, 11, 6, 0, 20, 20, 20]
++        config = {f"edge_{index}": value for index, value in enumerate(selectors)}
++        matrix = _matrix_for_variant(config, "B")
++        enabled = {(u, v) for u in range(7) for v in range(7) if matrix[u][v]}
++        self.assertEqual(enabled, {(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6)})
++
++    def test_c_num_edges_selects_highest_priorities_in_row_order(self) -> None:
++        config = {f"edge_{index}": index / 100.0 for index in range(21)}
++        config.update(edge_0=0.9, edge_5=0.8, edge_6=0.7, num_edges=2)
++        matrix = _matrix_for_variant(config, "C")
++        enabled = {(u, v) for u in range(7) for v in range(7) if matrix[u][v]}
++        self.assertEqual(enabled, {(0, 1), (0, 6)})
++        config["num_edges"] = 3
++        matrix = _matrix_for_variant(config, "C")
++        enabled = {(u, v) for u in range(7) for v in range(7) if matrix[u][v]}
++        self.assertEqual(enabled, {(0, 1), (0, 6), (1, 2)})
++
++    def test_c_zero_num_edges_disables_every_edge(self) -> None:
++        config = {f"edge_{index}": index / 20.0 for index in range(21)}
++        config["num_edges"] = 0
++        matrix = _matrix_for_variant(config, "C")
++        self.assertEqual(sum(sum(row) for row in matrix), 0)
++
+     def test_hash_matches_official_tfrecord_row(self) -> None:
+         self.assertEqual(configuration_hash(OFFICIAL_ROW_CONFIG_A, "A"), OFFICIAL_ROW_HASH)
+ 
+

@@ -1,0 +1,235 @@
+diff --git a/demo_experiment.py b/demo_experiment.py
+index 3aa383c..da5932c 100755
+--- a/demo_experiment.py
++++ b/demo_experiment.py
+@@ -125,6 +125,7 @@ def build_llm(
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args),
+             **_transport_options(args),
+         )
+     if backend == "gemini":
+@@ -138,6 +139,7 @@ def build_llm(
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args),
+             **_transport_options(args),
+         )
+     if backend == "openrouter":
+@@ -153,14 +155,12 @@ def build_llm(
+             referer=args.openrouter_referer,
+             title=args.openrouter_title,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args),
+             **_transport_options(args),
+         )
+     if backend == "vllm":
+         from expgym.llm_clients import build_vllm_client
+ 
+-        chat_kwargs = None
+-        if args.vllm_disable_thinking:
+-            chat_kwargs = {"enable_thinking": False}
+         return build_vllm_client(
+             api_key=args.api_key,
+             model=args.model or "local-model",
+@@ -168,8 +168,8 @@ def build_llm(
+             temperature=getattr(args, "temperature", 0.0),
+             seed=args.seed,
+             base_url=args.base_url,
+-            chat_template_kwargs=chat_kwargs,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args),
+             **_transport_options(args),
+         )
+     if backend == "sub2api":
+@@ -183,11 +183,60 @@ def build_llm(
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args),
+             **_transport_options(args),
+         )
+     raise ValueError(f"Unknown backend: {backend}")
+ 
+ 
++def _generation_options(args: argparse.Namespace) -> Dict[str, object]:
++    """Preserve provider defaults unless generation controls are explicit."""
++    chat_kwargs = getattr(args, "chat_template_kwargs", None)
++    if getattr(args, "backend", None) == "vllm" and getattr(
++        args, "vllm_disable_thinking", False
++    ):
++        chat_kwargs = dict(chat_kwargs or {})
++        if chat_kwargs.get("enable_thinking") not in (None, False):
++            raise ValueError("--vllm-disable-thinking conflicts with chat_template_kwargs.enable_thinking")
++        chat_kwargs["enable_thinking"] = False
++    return {
++        "max_tokens": getattr(args, "max_tokens", None),
++        "chat_template_kwargs": chat_kwargs,
++    }
++
++
++def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
++    def positive_integer(value: str) -> int:
++        try:
++            parsed = int(value)
++        except ValueError as exc:
++            raise argparse.ArgumentTypeError("must be a positive integer") from exc
++        if parsed < 1:
++            raise argparse.ArgumentTypeError("must be a positive integer")
++        return parsed
++
++    def json_object(value: str) -> Dict[str, object]:
++        def reject_constant(constant: str) -> None:
++            raise ValueError("non-finite JSON constant: " + constant)
++
++        try:
++            parsed = json.loads(value, parse_constant=reject_constant)
++        except ValueError as exc:
++            raise argparse.ArgumentTypeError("must be a JSON object: " + str(exc)) from exc
++        if not isinstance(parsed, dict):
++            raise argparse.ArgumentTypeError("must be a JSON object")
++        return parsed
++
++    parser.add_argument(
++        "--max-tokens", type=positive_integer, default=None,
++        help="Per-request completion token cap; omitted by default (provider default).",
++    )
++    parser.add_argument(
++        "--chat-template-kwargs", type=json_object, default=None, metavar="JSON",
++        help="Optional JSON object passed to the provider chat template, e.g. thinking controls.",
++    )
++
++
+ def _transport_options(args: argparse.Namespace) -> Dict[str, object]:
+     """Resolve shared HTTP timeout/retry settings for every real backend."""
+     return {
+@@ -195,11 +244,13 @@ def _transport_options(args: argparse.Namespace) -> Dict[str, object]:
+         "max_retries": getattr(args, "max_retries", 10),
+         "retry_base_seconds": getattr(args, "retry_base_seconds", 3.0),
+         "retry_max_seconds": getattr(args, "retry_max_seconds", 120.0),
++        "dump_context": getattr(args, "_api_dump_context", None),
+     }
+ 
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description="Run the ExpGym demo experiment.")
++    _add_generation_arguments(parser)
+     parser.add_argument(
+         "--scenario",
+         choices=sorted(_SCENARIOS.keys()),
+diff --git a/scripts/run_paper_sweep.py b/scripts/run_paper_sweep.py
+index 5bfe855..6455109 100644
+--- a/scripts/run_paper_sweep.py
++++ b/scripts/run_paper_sweep.py
+@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
+ from demo_experiment import (  # noqa: E402
+     COST_REGIMES,
+     _SCENARIOS,
++    _add_generation_arguments,
+     _call_scenario,
+     _resolve_system_prompt,
+     _resolve_answer_evaluator,
+@@ -150,6 +151,8 @@ def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object
+         "job": asdict(job),
+         "generation": {
+             "temperature": temperature,
++            "max_tokens": getattr(args, "max_tokens", None),
++            "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+             "max_steps": args.max_steps,
+             "max_evaluations": args.max_evals,
+         },
+@@ -440,6 +443,13 @@ def _namespace_for_job(
+         else args.temperature_eval
+     )
+     ns.seed = job.seed
++    ns.max_tokens = getattr(args, "max_tokens", None)
++    ns.chat_template_kwargs = getattr(args, "chat_template_kwargs", None)
++    ns._api_dump_context = {
++        "runner": "expgym",
++        "job": asdict(job),
++        "trace_path": str(_trace_path(args.output_dir, job, getattr(args, "trace_format", "v1"))),
++    }
+     ns.base_url = args.base_url
+     ns.prompt_cache = _prompt_cache_config(args, job)
+     ns.prompt_cache_key = ns.prompt_cache["key"]
+@@ -480,6 +490,8 @@ def _resume_key(args: argparse.Namespace, job: Job) -> str:
+         ),
+         "max_steps": args.max_steps,
+         "max_evals": args.max_evals,
++        "max_tokens": getattr(args, "max_tokens", None),
++        "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+         "prompt_cache": _prompt_cache_config(args, job),
+         "transport": {
+             "timeout": getattr(args, "request_timeout", 600.0),
+@@ -842,6 +854,14 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
+     print("ExpGym sweep dry-run")
+     print(f"output_dir: {args.output_dir}")
+     print(f"jobs: {len(jobs)}")
++    print("generation: " + json.dumps({
++        "temperature_tuning": args.temperature_tuning,
++        "temperature_eval": args.temperature_eval,
++        "max_tokens": getattr(args, "max_tokens", None),
++        "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
++        "max_steps": args.max_steps,
++        "max_evals": args.max_evals,
++    }, sort_keys=True))
+     for scenario in SCENARIOS:
+         print(f"- {scenario}: {counts.get(scenario, 0)}")
+     print()
+@@ -854,6 +874,7 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description=__doc__)
++    _add_generation_arguments(parser)
+     parser.add_argument(
+         "--backend",
+         choices=["fake", "openai", "openrouter", "sub2api"],
+diff --git a/scripts/run_poolact.py b/scripts/run_poolact.py
+index fd21faf..722bcc8 100755
+--- a/scripts/run_poolact.py
++++ b/scripts/run_poolact.py
+@@ -19,6 +19,8 @@ if str(REPO_ROOT) not in sys.path:
+ 
+ from demo_experiment import (  # noqa: E402
+     _SCENARIOS,
++    _add_generation_arguments,
++    _generation_options,
+     _call_scenario,
+     _resolve_answer_evaluator,
+     _resolve_system_prompt,
+@@ -169,6 +171,17 @@ def _agent_namespace(
+     namespace.time_budget = None
+     namespace.beta = None
+     namespace.baseline = "time_aware"
++    namespace._api_dump_context = {
++        "runner": "poolact",
++        "scenario": args.scenario,
++        "tuning_task": args.tuning_task,
++        "question_index": args.question_index,
++        "cost_regime": args.cost_regime,
++        "strategy": strategy,
++        "agent_id": agent_id,
++        "seed": namespace.seed,
++        "output_dir": str(args.output_dir),
++    }
+     return namespace
+ 
+ 
+@@ -225,6 +238,7 @@ def _resolved_config(
+         "agents": args.agents,
+         "seed": args.seed,
+         "temperature": args.temperature,
++        **_generation_options(args),
+         "max_steps": args.max_steps,
+         "max_evals": args.max_evals,
+         "max_context_tokens": args.max_context_tokens,
+@@ -454,6 +468,7 @@ def _run_strategy(
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description=__doc__)
++    _add_generation_arguments(parser)
+     parser.add_argument(
+         "--backend",
+         choices=["fake", "openai", "gemini", "openrouter", "sub2api", "vllm"],

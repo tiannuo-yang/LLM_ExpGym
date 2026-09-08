@@ -1,0 +1,123 @@
+{
+  "schema_version": "expgym.api_attempt.v1",
+  "generation_id": "66b5c8f5528d4fd4bbeade6f85bcd78f",
+  "request_id": "16f459d0e0e24febbc2a26ac9a5d00c0",
+  "attempt": 1,
+  "max_attempts": 6,
+  "started_at_utc": "2026-09-07T09:25:51.359812+00:00",
+  "run_id": "kimi-k3/full/poolact__tuning__hpobench_paramnet_higgs_steps__cost_free",
+  "client_id": "acf54d08822b48eca3b3e9593668f847",
+  "context": {
+    "runner": "poolact",
+    "scenario": "tuning",
+    "tuning_task": "hpobench:paramnet:higgs:steps",
+    "question_index": 0,
+    "cost_regime": "cost_free",
+    "strategy": "poolact",
+    "agent_id": 0,
+    "seed": 1206,
+    "output_dir": "/lustrefs/users/chufan.shi/codex_space_tn/kimi_k3_eval/runs/full/poolact/tuning/hpobench_paramnet_higgs_steps/cost_free"
+  },
+  "pid": 1327773,
+  "thread_id": 23417146746432,
+  "thread_name": "ThreadPoolExecutor-2_0",
+  "state": "success",
+  "finished_at_utc": "2026-09-07T09:25:56.043997+00:00",
+  "wall_time_seconds": 4.684218015521765,
+  "endpoint": "http://azure-uk-hpc-H200-instance-267:30141/v1/chat/completions",
+  "request_payload": {
+    "model": "kimi-k3",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a tool-using assistant operating in a Thought/Action/Observation loop.\n\nOn EVERY turn you MUST output BOTH:\n  Thought: <your reasoning>\n  Action: <tool_name> <json_payload>\nThen STOP immediately and wait for the Observation from the system.\n\nRules:\n- Always include BOTH a Thought AND an Action. Never output only a Thought.\n- Only one Action per turn.\n- Do not write Observation yourself.\n- When confident in your final answer, reply with ONLY: Answer: <your answer>"
+      },
+      {
+        "role": "user",
+        "content": "Goal: tune the system for high performance.\nParameter ranges:\n- average_units_per_layer_log2: 4.0 to 8.0 (default=6.0)\n- batch_size_log2: 3.0 to 8.0 (default=5.5)\n- dropout_0: 0.0 to 0.5 (default=0.25)\n- dropout_1: 0.0 to 0.5 (default=0.25)\n- final_lr_fraction_log2: -4.0 to 0.0 (default=-2.0)\n- initial_lr_log10: -6.0 to -2.0 (default=-4.0)\n- num_layers: 1 to 5 (default=3)\n- shape_parameter_1: 0.0 to 1.0 (default=0.5)\nAction format: Action: evaluate_config {\"param\": value, ...}\nAnswer format: Answer: {\"param\": value, ...}"
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: Let me start by evaluating the default configuration to establish a baseline performance metric. Then I can systematically explore the parameter space to find a high-performance configuration.\n\nAction: evaluate_config {\"average_units_per_layer_log2\": 6.0, \"batch_size_log2\": 5.5, \"dropout_0\": 0.25, \"dropout_1\": 0.25, \"final_lr_fraction_log2\": -2.0, \"initial_lr_log10\": -4.0, \"num_layers\": 3, \"shape_parameter_1\": 0.5}"
+      },
+      {
+        "role": "user",
+        "content": "Observation: perf=0.651582\n\n[Parallel Exploration — Agent 0 of 4]\nYou are one of 4 agents solving this task in parallel.\nShared state below shows what other agents have explored and are exploring.\nUse this to plan your next action — prioritize paths not yet explored.\n\n== In Progress ==\n  evaluate {average_units_per_layer_log2=7.5, batch_size_log2=6.5, dropout_0=0.1, dropout_1=0.1, final_lr_fraction_log2=-3, initial_lr_log10=-3, num_layers=5, shape_parameter_1=0.7} [agent 1]\n  evaluate {average_units_per_layer_log2=4.5, batch_size_log2=4, dropout_0=0.4, dropout_1=0.4, final_lr_fraction_log2=-1, initial_lr_log10=-5, num_layers=2, shape_parameter_1=0.3} [agent 2]\n\n== Already Explored ==\n  {average_units_per_layer_log2:5.5,batch_size_log2:7,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.8} -> 0.711988 [agents 3]\n  {average_units_per_layer_log2:6.0,batch_size_log2:5.5,dropout_0:0.25,dropout_1:0.25,final_lr_fraction_log2:-2.0,initial_lr_log10:-4.0,num_layers:3,shape_parameter_1:0.5} -> 0.651582 [agents 0] (you)\n\n== Exploration Paths ==\n  No multi-step paths recorded yet.\n\n== Coverage Gap ==\n  2 unique configs evaluated, best: 0.711988"
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: The default config gives 0.651582. Agent 3 found a better config at 0.711988 with higher learning rate (-2.5), lower dropout, 4 layers, larger batch size (7), and shape_parameter_1=0.8. Key insights so far:\n- Higher initial_lr (-2.5 vs -4.0) seems better\n- Lower dropout seems better\n- More layers (4) with larger batch (7) helped\n- shape_parameter_1=0.8 helped\n\nAgents 1 and 2 are exploring extremes. Let me build on agent 3's success by trying a nearby config with slight variations - maybe push learning rate even higher or adjust other parameters. Let me try a config similar to agent 3's best but with some refinements: slightly lower dropout, maybe num_layers=4, and tweak the learning rate.\n\nLet me try: initial_lr_log10=-2.5 (same as best), keep most things similar to agent 3's config but vary a couple parameters to explore around that optimum. I'll try increasing average_units and see if that helps.\n\nAction: evaluate_config {\"average_units_per_layer_log2\": 6.0, \"batch_size_log2\": 7.0, \"dropout_0\": 0.05, \"dropout_1\": 0.1, \"final_lr_fraction_log2\": -2.5, \"initial_lr_log10\": -2.5, \"num_layers\": 4, \"shape_parameter_1\": 0.9}"
+      },
+      {
+        "role": "user",
+        "content": "Observation: perf=0.708930\n\n[Parallel Exploration — Agent 0 of 4]\nYou are one of 4 agents solving this task in parallel.\nShared state below shows what other agents have explored and are exploring.\nUse this to plan your next action — prioritize paths not yet explored.\n\n== In Progress ==\n  evaluate {average_units_per_layer_log2=7.5, batch_size_log2=6.5, dropout_0=0.1, dropout_1=0.1, final_lr_fraction_log2=-3, initial_lr_log10=-3, num_layers=5, shape_parameter_1=0.7} [agent 1]\n  evaluate {average_units_per_layer_log2=4.5, batch_size_log2=4, dropout_0=0.4, dropout_1=0.4, final_lr_fraction_log2=-1, initial_lr_log10=-5, num_layers=2, shape_parameter_1=0.3} [agent 2]\n\n== Already Explored ==\n  {average_units_per_layer_log2:5.5,batch_size_log2:7,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.8} -> 0.711988 [agents 3]\n  {average_units_per_layer_log2:6.0,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.1,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.9} -> 0.708930 [agents 0] (you)\n  {average_units_per_layer_log2:6.0,batch_size_log2:5.5,dropout_0:0.25,dropout_1:0.25,final_lr_fraction_log2:-2.0,initial_lr_log10:-4.0,num_layers:3,shape_parameter_1:0.5} -> 0.651582 [agents 0] (you)\n\n== Exploration Paths ==\n  E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":5.5,\"dropout_0\":0.25,\"drop --> E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n\n== Coverage Gap ==\n  3 unique configs evaluated, best: 0.711988"
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: My config at 0.708930 is close but slightly worse than agent 3's 0.711988. The differences: I used average_units=6.0 (vs 5.5), dropout_1=0.1 (vs 0.15), shape=0.9 (vs 0.8). Agent 3's config is still best. Let me explore a different direction - maybe try higher learning rate (-2.0) with the good base settings, since the jump from -4.0 to -2.5 gave big improvement. Let me test if even higher LR helps.\n\nAction: evaluate_config {\"average_units_per_layer_log2\": 5.5, \"batch_size_log2\": 7.0, \"dropout_0\": 0.05, \"dropout_1\": 0.15, \"final_lr_fraction_log2\": -2.5, \"initial_lr_log10\": -2.0, \"num_layers\": 4, \"shape_parameter_1\": 0.8}"
+      },
+      {
+        "role": "user",
+        "content": "Observation: perf=0.706730\n\n[Parallel Exploration — Agent 0 of 4]\nYou are one of 4 agents solving this task in parallel.\nShared state below shows what other agents have explored and are exploring.\nUse this to plan your next action — prioritize paths not yet explored.\n\n== In Progress ==\n  evaluate {average_units_per_layer_log2=7.5, batch_size_log2=6.5, dropout_0=0.1, dropout_1=0.1, final_lr_fraction_log2=-3, initial_lr_log10=-3, num_layers=5, shape_parameter_1=0.7} [agent 1]\n  evaluate {average_units_per_layer_log2=6.5, batch_size_log2=7.5, dropout_0=0.05, dropout_1=0.1, final_lr_fraction_log2=-3, initial_lr_log10=-2, num_layers=4, shape_parameter_1=0.8} [agent 2]\n\n== Already Explored ==\n  {average_units_per_layer_log2:5.5,batch_size_log2:7,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.8} -> 0.711988 [agents 3]\n  {average_units_per_layer_log2:6.0,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.1,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.9} -> 0.708930 [agents 0] (you)\n  {average_units_per_layer_log2:5.5,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.0,num_layers:4,shape_parameter_1:0.8} -> 0.706730 [agents 0] (you)\n  {average_units_per_layer_log2:6.0,batch_size_log2:5.5,dropout_0:0.25,dropout_1:0.25,final_lr_fraction_log2:-2.0,initial_lr_log10:-4.0,num_layers:3,shape_parameter_1:0.5} -> 0.651582 [agents 0] (you)\n  {average_units_per_layer_log2:4.5,batch_size_log2:4.0,dropout_0:0.4,dropout_1:0.4,final_lr_fraction_log2:-1.0,initial_lr_log10:-5.0,num_layers:2,shape_parameter_1:0.3} -> 0.557832 [agents 2]\n\n== Exploration Paths ==\n  E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":5.5,\"dropout_0\":0.25,\"drop --> E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n  E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop --> E:{\"average_units_per_layer_log2\":5.5,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n\n== Coverage Gap ==\n  5 unique configs evaluated, best: 0.711988"
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: Higher learning rate (-2.0) gave 0.706730, slightly worse than -2.5 (0.711988). So -2.5 seems near optimal for initial_lr. Agent 3's config remains best. Key findings so far:\n- initial_lr_log10: -2.5 > -2.0 > -4.0 (sweet spot around -2.5)\n- Low dropout is good (0.05/0.15)\n- batch_size_log2=7 is good\n- num_layers=4 is good\n- shape_parameter_1=0.8 > 0.9\n\nLet me try variations around the best config. Things not yet explored:\n- final_lr_fraction_log2: only -2.5 tried in good configs; try -3.0 or -3.5\n- num_layers=5 with good settings (agent 1 is trying 5 but with different params)\n- average_units slightly lower (5.0)\n\nLet me try final_lr_fraction_log2=-3.0 with the best base config, since a lower final LR might help fine-tuning.\n\nAction: evaluate_config {\"average_units_per_layer_log2\": 5.5, \"batch_size_log2\": 7.0, \"dropout_0\": 0.05, \"dropout_1\": 0.15, \"final_lr_fraction_log2\": -3.0, \"initial_lr_log10\": -2.5, \"num_layers\": 4, \"shape_parameter_1\": 0.8}"
+      },
+      {
+        "role": "user",
+        "content": "Observation: perf=0.712389\n\n[Parallel Exploration — Agent 0 of 4]\nYou are one of 4 agents solving this task in parallel.\nShared state below shows what other agents have explored and are exploring.\nUse this to plan your next action — prioritize paths not yet explored.\n\n== In Progress ==\n  evaluate {average_units_per_layer_log2=5.5, batch_size_log2=7, dropout_0=0.1, dropout_1=0.2, final_lr_fraction_log2=-2, initial_lr_log10=-2.5, num_layers=4, shape_parameter_1=1} [agent 2]\n\n== Already Explored ==\n  {average_units_per_layer_log2:5.5,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-3.0,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.8} -> 0.712389 [agents 0] (you)\n  {average_units_per_layer_log2:5.5,batch_size_log2:7,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.8} -> 0.711988 [agents 3]\n  {average_units_per_layer_log2:7.5,batch_size_log2:6.5,dropout_0:0.1,dropout_1:0.1,final_lr_fraction_log2:-3.0,initial_lr_log10:-3.0,num_layers:5,shape_parameter_1:0.7} -> 0.708939 [agents 1]\n  {average_units_per_layer_log2:6.0,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.1,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.9} -> 0.708930 [agents 0] (you)\n  {average_units_per_layer_log2:5.5,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.0,num_layers:4,shape_parameter_1:0.8} -> 0.706730 [agents 0] (you)\n  {average_units_per_layer_log2:6.5,batch_size_log2:7.5,dropout_0:0.05,dropout_1:0.1,final_lr_fraction_log2:-3.0,initial_lr_log10:-2.0,num_layers:4,shape_parameter_1:0.8} -> 0.705152 [agents 2]\n  {average_units_per_layer_log2:6.0,batch_size_log2:5.5,dropout_0:0.25,dropout_1:0.25,final_lr_fraction_log2:-2.0,initial_lr_log10:-4.0,num_layers:3,shape_parameter_1:0.5} -> 0.651582 [agents 0] (you)\n  {average_units_per_layer_log2:4.5,batch_size_log2:4.0,dropout_0:0.4,dropout_1:0.4,final_lr_fraction_log2:-1.0,initial_lr_log10:-5.0,num_layers:2,shape_parameter_1:0.3} -> 0.557832 [agents 2]\n\n== Exploration Paths ==\n  E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":5.5,\"dropout_0\":0.25,\"drop --> E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n  E:{\"average_units_per_layer_log2\":4.5,\"batch_size_log2\":4.0,\"dropout_0\":0.4,\"dropo --> E:{\"average_units_per_layer_log2\":6.5,\"batch_size_log2\":7.5,\"dropout_0\":0.05,\"drop [agents 2]\n  E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop --> E:{\"average_units_per_layer_log2\":5.5,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n  E:{\"average_units_per_layer_log2\":5.5,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop --> E:{\"average_units_per_layer_log2\":5.5,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n\n== Coverage Gap ==\n  8 unique configs evaluated, best: 0.712389"
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: My new config with final_lr_fraction_log2=-3.0 achieved 0.712389, now the best! The improvement came from lowering final_lr_fraction from -2.5 to -3.0. Let me continue refining around this optimum. \n\nKey parameters at best config:\n- average_units_per_layer_log2: 5.5\n- batch_size_log2: 7.0\n- dropout_0: 0.05, dropout_1: 0.15\n- final_lr_fraction_log2: -3.0\n- initial_lr_log10: -2.5\n- num_layers: 4\n- shape_parameter_1: 0.8\n\nDirections to explore:\n1. final_lr_fraction even lower: -3.5\n2. dropout_1 lower (0.1) since 0.05/0.1 combos did well\n3. Agent 2 is trying dropout 0.1/0.2 with shape=1.0 and final_lr=-2.0\n\nLet me try final_lr_fraction_log2=-3.5 to see if even lower final LR helps."
+      },
+      {
+        "role": "user",
+        "content": "System: Loop aborted (Missing Action directive). Respond immediately with Answer: <your final choice> and no other text.\n\n[Parallel Exploration — Agent 0 of 4]\nYou are one of 4 agents solving this task in parallel.\nShared state below shows what other agents have explored and are exploring.\nUse this to plan your next action — prioritize paths not yet explored.\n\n== In Progress ==\n  evaluate {average_units_per_layer_log2=5.5, batch_size_log2=7, dropout_0=0.1, dropout_1=0.2, final_lr_fraction_log2=-2, initial_lr_log10=-2.5, num_layers=4, shape_parameter_1=1} [agent 2]\n\n== Already Explored ==\n  {average_units_per_layer_log2:5.5,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-3.0,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.8} -> 0.712389 [agents 0] (you)\n  {average_units_per_layer_log2:5.5,batch_size_log2:7,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.8} -> 0.711988 [agents 3]\n  {average_units_per_layer_log2:7.5,batch_size_log2:6.5,dropout_0:0.1,dropout_1:0.1,final_lr_fraction_log2:-3.0,initial_lr_log10:-3.0,num_layers:5,shape_parameter_1:0.7} -> 0.708939 [agents 1]\n  {average_units_per_layer_log2:6.0,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.1,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.5,num_layers:4,shape_parameter_1:0.9} -> 0.708930 [agents 0] (you)\n  {average_units_per_layer_log2:5.5,batch_size_log2:7.0,dropout_0:0.05,dropout_1:0.15,final_lr_fraction_log2:-2.5,initial_lr_log10:-2.0,num_layers:4,shape_parameter_1:0.8} -> 0.706730 [agents 0] (you)\n  {average_units_per_layer_log2:6.5,batch_size_log2:7.5,dropout_0:0.05,dropout_1:0.1,final_lr_fraction_log2:-3.0,initial_lr_log10:-2.0,num_layers:4,shape_parameter_1:0.8} -> 0.705152 [agents 2]\n  {average_units_per_layer_log2:6.0,batch_size_log2:5.5,dropout_0:0.25,dropout_1:0.25,final_lr_fraction_log2:-2.0,initial_lr_log10:-4.0,num_layers:3,shape_parameter_1:0.5} -> 0.651582 [agents 0] (you)\n  {average_units_per_layer_log2:4.5,batch_size_log2:4.0,dropout_0:0.4,dropout_1:0.4,final_lr_fraction_log2:-1.0,initial_lr_log10:-5.0,num_layers:2,shape_parameter_1:0.3} -> 0.557832 [agents 2]\n\n== Exploration Paths ==\n  E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":5.5,\"dropout_0\":0.25,\"drop --> E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n  E:{\"average_units_per_layer_log2\":4.5,\"batch_size_log2\":4.0,\"dropout_0\":0.4,\"dropo --> E:{\"average_units_per_layer_log2\":6.5,\"batch_size_log2\":7.5,\"dropout_0\":0.05,\"drop [agents 2]\n  E:{\"average_units_per_layer_log2\":6.0,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop --> E:{\"average_units_per_layer_log2\":5.5,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n  E:{\"average_units_per_layer_log2\":5.5,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop --> E:{\"average_units_per_layer_log2\":5.5,\"batch_size_log2\":7.0,\"dropout_0\":0.05,\"drop [agents 0]\n\n== Coverage Gap ==\n  8 unique configs evaluated, best: 0.712389"
+      }
+    ],
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "seed": 1206,
+    "max_tokens": 8192,
+    "chat_template_kwargs": {
+      "thinking": false
+    }
+  },
+  "response_raw": "{\"id\":\"0c1876a56fac4596a5fae09b44bbb26e\",\"object\":\"chat.completion\",\"created\":1788773156,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Answer: {\\\"average_units_per_layer_log2\\\": 5.5, \\\"batch_size_log2\\\": 7.0, \\\"dropout_0\\\": 0.05, \\\"dropout_1\\\": 0.15, \\\"final_lr_fraction_log2\\\": -3.0, \\\"initial_lr_log10\\\": -2.5, \\\"num_layers\\\": 4, \\\"shape_parameter_1\\\": 0.8}\",\"reasoning_content\":null,\"tool_calls\":null},\"logprobs\":null,\"finish_reason\":\"stop\",\"matched_stop\":163586}],\"usage\":{\"prompt_tokens\":5767,\"total_tokens\":5863,\"completion_tokens\":96,\"prompt_tokens_details\":null,\"reasoning_tokens\":0},\"metadata\":{\"weight_version\":\"default\"}}",
+  "response_json": {
+    "id": "0c1876a56fac4596a5fae09b44bbb26e",
+    "object": "chat.completion",
+    "created": 1788773156,
+    "model": "kimi-k3",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Answer: {\"average_units_per_layer_log2\": 5.5, \"batch_size_log2\": 7.0, \"dropout_0\": 0.05, \"dropout_1\": 0.15, \"final_lr_fraction_log2\": -3.0, \"initial_lr_log10\": -2.5, \"num_layers\": 4, \"shape_parameter_1\": 0.8}",
+          "reasoning_content": null,
+          "tool_calls": null
+        },
+        "logprobs": null,
+        "finish_reason": "stop",
+        "matched_stop": 163586
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 5767,
+      "total_tokens": 5863,
+      "completion_tokens": 96,
+      "prompt_tokens_details": null,
+      "reasoning_tokens": 0
+    },
+    "metadata": {
+      "weight_version": "default"
+    }
+  },
+  "http_status": null,
+  "error": null,
+  "will_retry": false,
+  "retry_delay_seconds": null
+}

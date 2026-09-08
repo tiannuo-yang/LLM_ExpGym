@@ -1,0 +1,946 @@
+diff --git a/demo_experiment.py b/demo_experiment.py
+index 3aa383c..ee536d0 100755
+--- a/demo_experiment.py
++++ b/demo_experiment.py
+@@ -125,6 +125,7 @@ def build_llm(
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+     if backend == "gemini":
+@@ -138,6 +139,7 @@ def build_llm(
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+     if backend == "openrouter":
+@@ -153,14 +155,12 @@ def build_llm(
+             referer=args.openrouter_referer,
+             title=args.openrouter_title,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+     if backend == "vllm":
+         from expgym.llm_clients import build_vllm_client
+ 
+-        chat_kwargs = None
+-        if args.vllm_disable_thinking:
+-            chat_kwargs = {"enable_thinking": False}
+         return build_vllm_client(
+             api_key=args.api_key,
+             model=args.model or "local-model",
+@@ -168,8 +168,8 @@ def build_llm(
+             temperature=getattr(args, "temperature", 0.0),
+             seed=args.seed,
+             base_url=args.base_url,
+-            chat_template_kwargs=chat_kwargs,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+     if backend == "sub2api":
+@@ -183,11 +183,63 @@ def build_llm(
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+     raise ValueError(f"Unknown backend: {backend}")
+ 
+ 
++def _generation_options(
++    args: argparse.Namespace, backend: Optional[str] = None,
++) -> Dict[str, object]:
++    """Preserve provider defaults unless generation controls are explicit."""
++    chat_kwargs = getattr(args, "chat_template_kwargs", None)
++    if (backend or getattr(args, "backend", "vllm")) == "vllm" and getattr(
++        args, "vllm_disable_thinking", False
++    ):
++        chat_kwargs = dict(chat_kwargs or {})
++        if chat_kwargs.get("enable_thinking") not in (None, False):
++            raise ValueError("--vllm-disable-thinking conflicts with chat_template_kwargs.enable_thinking")
++        chat_kwargs["enable_thinking"] = False
++    return {
++        "max_tokens": getattr(args, "max_tokens", None),
++        "chat_template_kwargs": chat_kwargs,
++    }
++
++
++def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
++    def positive_integer(value: str) -> int:
++        try:
++            parsed = int(value)
++        except ValueError as exc:
++            raise argparse.ArgumentTypeError("must be a positive integer") from exc
++        if parsed < 1:
++            raise argparse.ArgumentTypeError("must be a positive integer")
++        return parsed
++
++    def json_object(value: str) -> Dict[str, object]:
++        def reject_constant(constant: str) -> None:
++            raise ValueError("non-finite JSON constant: " + constant)
++
++        try:
++            parsed = json.loads(value, parse_constant=reject_constant)
++            json.dumps(parsed, allow_nan=False)
++        except ValueError as exc:
++            raise argparse.ArgumentTypeError("must be a JSON object: " + str(exc)) from exc
++        if not isinstance(parsed, dict):
++            raise argparse.ArgumentTypeError("must be a JSON object")
++        return parsed
++
++    parser.add_argument(
++        "--max-tokens", type=positive_integer, default=None,
++        help="Per-request completion token cap; omitted by default (provider default).",
++    )
++    parser.add_argument(
++        "--chat-template-kwargs", type=json_object, default=None, metavar="JSON",
++        help="Optional JSON object passed to the provider chat template, e.g. thinking controls.",
++    )
++
++
+ def _transport_options(args: argparse.Namespace) -> Dict[str, object]:
+     """Resolve shared HTTP timeout/retry settings for every real backend."""
+     return {
+@@ -195,11 +247,13 @@ def _transport_options(args: argparse.Namespace) -> Dict[str, object]:
+         "max_retries": getattr(args, "max_retries", 10),
+         "retry_base_seconds": getattr(args, "retry_base_seconds", 3.0),
+         "retry_max_seconds": getattr(args, "retry_max_seconds", 120.0),
++        "dump_context": getattr(args, "_api_dump_context", None),
+     }
+ 
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description="Run the ExpGym demo experiment.")
++    _add_generation_arguments(parser)
+     parser.add_argument(
+         "--scenario",
+         choices=sorted(_SCENARIOS.keys()),
+diff --git a/expgym/llm_clients.py b/expgym/llm_clients.py
+index 4d1ec13..77138a1 100644
+--- a/expgym/llm_clients.py
++++ b/expgym/llm_clients.py
+@@ -11,11 +11,17 @@ import logging
+ import os
+ import socket
+ import ssl
++import tempfile
++import threading
++import time
+ import urllib.error
+ import urllib.parse
+ import urllib.request
++import uuid
+ from dataclasses import dataclass
++from datetime import datetime, timezone
+ from email.message import Message
++from pathlib import Path
+ from typing import Callable, Dict, List, Optional, Tuple, Union
+ 
+ from expgym.react_loop import LLMBackend, LLMOutput
+@@ -160,6 +166,7 @@ class OpenAICompatibleLLM(LLMBackend):
+         retry_base_seconds: float = 3.0,
+         retry_max_seconds: float = 120.0,
+         retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES,
++        dump_context: Optional[Dict[str, object]] = None,
+     ) -> None:
+         key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
+         if not key:
+@@ -168,6 +175,12 @@ class OpenAICompatibleLLM(LLMBackend):
+             raise ValueError("max_retries must be non-negative")
+         if retry_base_seconds < 0 or retry_max_seconds < 0:
+             raise ValueError("retry delays must be non-negative")
++        if max_tokens is not None and (
++            isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1
++        ):
++            raise ValueError("max_tokens must be a positive integer")
++        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
++            raise ValueError("chat_template_kwargs must be a JSON object")
+         self.config = OpenAIConfig(
+             api_key=key,
+             model=model,
+@@ -193,6 +206,116 @@ class OpenAICompatibleLLM(LLMBackend):
+             retry_http_statuses=tuple(retry_http_statuses),
+         )
+         self._transport = transport
++        dump_directory = os.getenv("EXPGYM_API_DUMP_DIR")
++        self._dump_directory = Path(dump_directory) if dump_directory else None
++        self._dump_run_id = os.getenv("EXPGYM_RUN_ID")
++        self._dump_context = dict(dump_context or {})
++        self._dump_client_id = uuid.uuid4().hex
++
++    @staticmethod
++    def _is_secret_field(name: str) -> bool:
++        normalized = name.lower().replace("-", "_")
++        return normalized in {
++            "authorization", "proxy_authorization", "api_key", "apikey", "x_api_key",
++            "access_token", "refresh_token", "password", "secret", "client_secret",
++        } or normalized.endswith(("_api_key", "_access_token", "_secret"))
++
++    def _redact_dump_value(self, value: object) -> object:
++        """Exclude credential fields and any echoed configured credentials."""
++        if isinstance(value, dict):
++            return {
++                key: "[REDACTED]" if self._is_secret_field(str(key)) else self._redact_dump_value(item)
++                for key, item in value.items()
++            }
++        if isinstance(value, (list, tuple)):
++            return [self._redact_dump_value(item) for item in value]
++        if isinstance(value, str):
++            secrets = [self.config.api_key]
++            secrets.extend(
++                header_value for name, header_value in self.config.extra_headers.items()
++                if self._is_secret_field(name)
++            )
++            for secret in sorted(set(secrets), key=len, reverse=True):
++                if secret:
++                    value = value.replace(secret, "[REDACTED]")
++            return value
++        return value
++
++    def _dump_attempt(
++        self,
++        metadata: Dict[str, object],
++        payload: Dict[str, object],
++        started: float,
++        *,
++        state: str,
++        raw: Optional[bytes] = None,
++        error: Optional[Exception] = None,
++        http_status: Optional[int] = None,
++        retry_delay: Optional[float] = None,
++    ) -> None:
++        """Atomically record each HTTP attempt, including failed and pending ones.
++
++        Dump failures propagate so an explicitly audited run cannot silently lose
++        requests. Transport headers are never serialized. Non-JSON response bytes
++        are decoded with backslash escapes so malformed responses remain inspectable.
++        """
++        if self._dump_directory is None:
++            return
++        parsed_url = urllib.parse.urlsplit(self.config.base_url)
++        endpoint = urllib.parse.urlunsplit((
++            parsed_url.scheme, parsed_url.netloc.rsplit("@", 1)[-1], parsed_url.path, "", "",
++        ))
++        response_text = raw.decode("utf-8", "backslashreplace") if raw is not None else None
++        response_json = None
++        if raw is not None:
++            try:
++                response_json = json.loads(raw.decode("utf-8"))
++            except (ValueError, UnicodeDecodeError):
++                pass
++        safe_response = self._redact_dump_value(response_json)
++        if safe_response != response_json:
++            # A provider may echo a credential in its error body. Keep a redacted
++            # equivalent instead of persisting that credential in the raw string.
++            response_text = json.dumps(safe_response, ensure_ascii=False)
++        record = {
++            "schema_version": "expgym.api_attempt.v1",
++            **metadata,
++            "run_id": self._dump_run_id,
++            "client_id": self._dump_client_id,
++            "context": self._dump_context,
++            "pid": os.getpid(),
++            "thread_id": threading.get_ident(),
++            "thread_name": threading.current_thread().name,
++            "state": state,
++            "finished_at_utc": None if state == "in_progress" else datetime.now(timezone.utc).isoformat(),
++            "wall_time_seconds": time.monotonic() - started,
++            "endpoint": endpoint,
++            "request_payload": payload,
++            "response_raw": response_text,
++            "response_json": safe_response,
++            "http_status": http_status,
++            "error": {"type": type(error).__name__, "message": str(error)} if error else None,
++            "will_retry": retry_delay is not None,
++            "retry_delay_seconds": retry_delay,
++        }
++        self._dump_directory.mkdir(parents=True, exist_ok=True)
++        destination = self._dump_directory / (str(metadata["request_id"]) + ".json")
++        handle = tempfile.NamedTemporaryFile(
++            mode="w", encoding="utf-8", dir=str(self._dump_directory),
++            prefix=".api-attempt-", suffix=".tmp", delete=False,
++        )
++        temporary = Path(handle.name)
++        try:
++            with handle:
++                json.dump(self._redact_dump_value(record), handle, ensure_ascii=False, indent=2)
++                handle.write("\n")
++                handle.flush()
++                os.fsync(handle.fileno())
++            os.replace(str(temporary), str(destination))
++        except BaseException:
++            if temporary.exists():
++                temporary.unlink()
++            raise
+ 
+     def _build_request(self, payload: Dict[str, object]) -> urllib.request.Request:
+         return urllib.request.Request(
+@@ -288,13 +411,30 @@ class OpenAICompatibleLLM(LLMBackend):
+             payload["chat_template_kwargs"] = self.config.chat_template_kwargs
+         if self.config.prompt_cache_key is not None:
+             payload["prompt_cache_key"] = self.config.prompt_cache_key
++        generation_id = uuid.uuid4().hex
+         for attempt in range(self.config.max_retries + 1):
+             request = self._build_request(payload)
++            started = time.monotonic()
++            metadata = {
++                "generation_id": generation_id,
++                "request_id": uuid.uuid4().hex,
++                "attempt": attempt + 1,
++                "max_attempts": self.config.max_retries + 1,
++                "started_at_utc": datetime.now(timezone.utc).isoformat(),
++            }
++            self._dump_attempt(metadata, payload, started, state="in_progress")
+             try:
+                 raw = self._transport(request, self.config.timeout)
+             except urllib.error.HTTPError as exc:
+                 code = exc.code
+-                body = exc.read().decode("utf-8", "ignore")
++                raw_error = exc.read()
++                body = raw_error.decode("utf-8", "ignore")
++                will_retry = code in self.config.retry_http_statuses and attempt < self.config.max_retries
++                wait = self._retry_delay(attempt, exc.headers) if will_retry else None
++                self._dump_attempt(
++                    metadata, payload, started, state="error", raw=raw_error,
++                    error=exc, http_status=code, retry_delay=wait,
++                )
+                 if (
+                     code in self.config.retry_http_statuses
+                     and attempt < self.config.max_retries
+@@ -312,6 +452,10 @@ class OpenAICompatibleLLM(LLMBackend):
+                     continue
+                 raise RuntimeError(f"API error: {body}") from exc
+             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
++                wait = self._retry_delay(attempt) if attempt < self.config.max_retries else None
++                self._dump_attempt(
++                    metadata, payload, started, state="error", error=exc, retry_delay=wait,
++                )
+                 if attempt < self.config.max_retries:
+                     wait = self._retry_delay(attempt)
+                     logger.warning(
+@@ -325,9 +469,17 @@ class OpenAICompatibleLLM(LLMBackend):
+                     _time.sleep(wait)
+                     continue
+                 raise RuntimeError(f"API connection failed: {exc}") from exc
++            except Exception as exc:
++                self._dump_attempt(metadata, payload, started, state="error", error=exc)
++                raise
+             try:
+                 data, text = self._decode_response(raw)
+             except ValueError as exc:
++                wait = self._retry_delay(attempt) if attempt < self.config.max_retries else None
++                self._dump_attempt(
++                    metadata, payload, started, state="malformed_response", raw=raw,
++                    error=exc, retry_delay=wait,
++                )
+                 if attempt < self.config.max_retries:
+                     wait = self._retry_delay(attempt)
+                     logger.warning(
+@@ -341,6 +493,7 @@ class OpenAICompatibleLLM(LLMBackend):
+                     _time.sleep(wait)
+                     continue
+                 raise RuntimeError(str(exc)) from exc
++            self._dump_attempt(metadata, payload, started, state="success", raw=raw)
+             break
+ 
+         usage = data.get("usage") or {}
+diff --git a/expgym/react_loop.py b/expgym/react_loop.py
+index 2d0fa17..d4b0f4c 100644
+--- a/expgym/react_loop.py
++++ b/expgym/react_loop.py
+@@ -837,7 +837,17 @@ class FakeLLM(LLMBackend):
+         self._final_answer = final_answer
+ 
+     def generate(self, messages) -> LLMOutput:
+-        if self._step < len(self._plan):
++        # A budget/horizon stop can occur before this stub exhausts its plan.
++        # Honor the same final-answer instruction as a real backend instead
++        # of returning another Action that cannot be scored as a configuration.
++        latest = messages[-1] if isinstance(messages, list) and messages else {}
++        forced_answer = (
++            isinstance(latest, dict)
++            and latest.get("role") == "user"
++            and "System: Loop aborted (" in latest.get("content", "")
++            and "Respond immediately with Answer:" in latest.get("content", "")
++        )
++        if not forced_answer and self._step < len(self._plan):
+             tool_name, payload = self._plan[self._step]
+             self._last_payload = payload
+             self._last_tool = tool_name
+@@ -850,6 +860,8 @@ class FakeLLM(LLMBackend):
+ 
+         self._step += 1
+         choice = self._final_answer or self._last_payload or "No viable configuration"
++        if forced_answer:
++            return LLMOutput(text=f"Answer: {choice}")
+         text = (
+             "Thought: I have enough signal from the evaluated configs.\n"
+             f"Answer: {choice}"
+diff --git a/expgym/task_tuning.py b/expgym/task_tuning.py
+index fcf174d..aa5f501 100644
+--- a/expgym/task_tuning.py
++++ b/expgym/task_tuning.py
+@@ -673,6 +673,8 @@ def build_fake_plan(
+         payloads = [format_config(cfg) for cfg in candidate_configs]
+         return [("evaluate_config", payload) for payload in payloads]
+     task = _load_hpobench(tuning_task)
++    import numpy as np
++
+     with _HPOBENCH_EVAL_LOCKS[task.name]:
+         if seed is not None:
+             task.config_space.seed(seed)
+@@ -680,7 +682,15 @@ def build_fake_plan(
+             dict(task.config_space.sample_configuration())
+             for _ in range(max(1, probes))
+         ]
+-    payloads = [json.dumps(cfg) for cfg in configs]
++    # ConfigSpace 1.x can return NumPy scalars for categorical choices.
++    # Preserve their numeric/boolean types in the JSON sent by the fake agent.
++    payloads = [
++        json.dumps({
++            name: value.item() if isinstance(value, np.generic) else value
++            for name, value in config.items()
++        })
++        for config in configs
++    ]
+     return [("evaluate_config", payload) for payload in payloads]
+ 
+ 
+diff --git a/scripts/run_paper_sweep.py b/scripts/run_paper_sweep.py
+index 5bfe855..6455109 100644
+--- a/scripts/run_paper_sweep.py
++++ b/scripts/run_paper_sweep.py
+@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
+ from demo_experiment import (  # noqa: E402
+     COST_REGIMES,
+     _SCENARIOS,
++    _add_generation_arguments,
+     _call_scenario,
+     _resolve_system_prompt,
+     _resolve_answer_evaluator,
+@@ -150,6 +151,8 @@ def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object
+         "job": asdict(job),
+         "generation": {
+             "temperature": temperature,
++            "max_tokens": getattr(args, "max_tokens", None),
++            "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+             "max_steps": args.max_steps,
+             "max_evaluations": args.max_evals,
+         },
+@@ -440,6 +443,13 @@ def _namespace_for_job(
+         else args.temperature_eval
+     )
+     ns.seed = job.seed
++    ns.max_tokens = getattr(args, "max_tokens", None)
++    ns.chat_template_kwargs = getattr(args, "chat_template_kwargs", None)
++    ns._api_dump_context = {
++        "runner": "expgym",
++        "job": asdict(job),
++        "trace_path": str(_trace_path(args.output_dir, job, getattr(args, "trace_format", "v1"))),
++    }
+     ns.base_url = args.base_url
+     ns.prompt_cache = _prompt_cache_config(args, job)
+     ns.prompt_cache_key = ns.prompt_cache["key"]
+@@ -480,6 +490,8 @@ def _resume_key(args: argparse.Namespace, job: Job) -> str:
+         ),
+         "max_steps": args.max_steps,
+         "max_evals": args.max_evals,
++        "max_tokens": getattr(args, "max_tokens", None),
++        "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+         "prompt_cache": _prompt_cache_config(args, job),
+         "transport": {
+             "timeout": getattr(args, "request_timeout", 600.0),
+@@ -842,6 +854,14 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
+     print("ExpGym sweep dry-run")
+     print(f"output_dir: {args.output_dir}")
+     print(f"jobs: {len(jobs)}")
++    print("generation: " + json.dumps({
++        "temperature_tuning": args.temperature_tuning,
++        "temperature_eval": args.temperature_eval,
++        "max_tokens": getattr(args, "max_tokens", None),
++        "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
++        "max_steps": args.max_steps,
++        "max_evals": args.max_evals,
++    }, sort_keys=True))
+     for scenario in SCENARIOS:
+         print(f"- {scenario}: {counts.get(scenario, 0)}")
+     print()
+@@ -854,6 +874,7 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description=__doc__)
++    _add_generation_arguments(parser)
+     parser.add_argument(
+         "--backend",
+         choices=["fake", "openai", "openrouter", "sub2api"],
+diff --git a/scripts/run_poolact.py b/scripts/run_poolact.py
+index fd21faf..722bcc8 100755
+--- a/scripts/run_poolact.py
++++ b/scripts/run_poolact.py
+@@ -19,6 +19,8 @@ if str(REPO_ROOT) not in sys.path:
+ 
+ from demo_experiment import (  # noqa: E402
+     _SCENARIOS,
++    _add_generation_arguments,
++    _generation_options,
+     _call_scenario,
+     _resolve_answer_evaluator,
+     _resolve_system_prompt,
+@@ -169,6 +171,17 @@ def _agent_namespace(
+     namespace.time_budget = None
+     namespace.beta = None
+     namespace.baseline = "time_aware"
++    namespace._api_dump_context = {
++        "runner": "poolact",
++        "scenario": args.scenario,
++        "tuning_task": args.tuning_task,
++        "question_index": args.question_index,
++        "cost_regime": args.cost_regime,
++        "strategy": strategy,
++        "agent_id": agent_id,
++        "seed": namespace.seed,
++        "output_dir": str(args.output_dir),
++    }
+     return namespace
+ 
+ 
+@@ -225,6 +238,7 @@ def _resolved_config(
+         "agents": args.agents,
+         "seed": args.seed,
+         "temperature": args.temperature,
++        **_generation_options(args),
+         "max_steps": args.max_steps,
+         "max_evals": args.max_evals,
+         "max_context_tokens": args.max_context_tokens,
+@@ -454,6 +468,7 @@ def _run_strategy(
+ 
+ def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description=__doc__)
++    _add_generation_arguments(parser)
+     parser.add_argument(
+         "--backend",
+         choices=["fake", "openai", "gemini", "openrouter", "sub2api", "vllm"],
+diff --git a/tests/test_llm_clients.py b/tests/test_llm_clients.py
+index 4441065..9d4a855 100644
+--- a/tests/test_llm_clients.py
++++ b/tests/test_llm_clients.py
+@@ -1,8 +1,13 @@
+ import json
++import os
++import tempfile
+ import unittest
+ import urllib.error
+ from email.message import Message
+ from io import BytesIO
++from pathlib import Path
++from concurrent.futures import ThreadPoolExecutor
++from unittest import mock
+ 
+ from expgym.llm_clients import (
+     DEFAULT_GEMINI_URL,
+@@ -177,6 +182,153 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
+             llm.generate("test")
+ 
+ 
++class APIAttemptDumpTest(unittest.TestCase):
++    def _records(self, directory):
++        return [json.loads(path.read_text(encoding="utf-8")) for path in Path(directory).glob("*.json")]
++
++    def test_dump_preserves_raw_reasoning_usage_and_pending_request(self):
++        response = {
++            "id": "chatcmpl-test",
++            "choices": [{"message": {"role": "assistant", "content": " Answer ", "reasoning_content": "reasoning 中文"}}],
++            "usage": {"prompt_tokens": 11, "completion_tokens": 19, "completion_tokens_details": {"reasoning_tokens": 16}},
++        }
++        raw = json.dumps(response, ensure_ascii=False).encode("utf-8")
++        with tempfile.TemporaryDirectory() as directory:
++            def transport(_request, _timeout):
++                pending = self._records(directory)
++                self.assertEqual(len(pending), 1)
++                self.assertEqual(pending[0]["state"], "in_progress")
++                return raw
++
++            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory, "EXPGYM_RUN_ID": "pilot-search-0"}):
++                llm = OpenAICompatibleLLM(
++                    api_key="credential-never-persist", transport=transport,
++                    max_tokens=8192, chat_template_kwargs={"thinking": True},
++                    dump_context={"strategy": "poolact", "agent_id": 2},
++                )
++                output = llm.generate("Prompt")
++            self.assertEqual(output.text, "Answer")
++            self.assertEqual(output.completion_tokens, 19)
++            records = self._records(directory)
++            self.assertEqual(len(records), 1)
++            record = records[0]
++            self.assertEqual(record["state"], "success")
++            self.assertEqual(record["response_json"], response)
++            self.assertEqual(record["response_raw"], raw.decode("utf-8"))
++            self.assertEqual(record["run_id"], "pilot-search-0")
++            self.assertEqual(record["context"]["agent_id"], 2)
++            self.assertEqual(record["request_payload"]["max_tokens"], 8192)
++            self.assertEqual(record["request_payload"]["chat_template_kwargs"], {"thinking": True})
++            self.assertEqual(record["pid"], os.getpid())
++            self.assertIsInstance(record["thread_id"], int)
++            self.assertGreaterEqual(record["wall_time_seconds"], 0)
++            self.assertTrue(record["started_at_utc"])
++            self.assertTrue(record["finished_at_utc"])
++            self.assertFalse(record["will_retry"])
++            self.assertIsNone(record["error"])
++            self.assertFalse(list(Path(directory).glob("*.tmp")))
++
++    def test_every_retry_keeps_response_and_generation_identity(self):
++        responses = [
++            urllib.error.HTTPError("http://fake", 503, "Unavailable", Message(), BytesIO(b'{"error":"down"}')),
++            urllib.error.URLError("connection lost"),
++            b'{"choices":[{"message":{"content":null,"reasoning_content":"truncated"}}]}',
++            b'{"choices":[{"message":{"content":"Recovered"}}]}',
++        ]
++        with tempfile.TemporaryDirectory() as directory:
++            def transport(_request, _timeout):
++                response = responses.pop(0)
++                if isinstance(response, Exception):
++                    raise response
++                return response
++
++            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
++                llm = OpenAICompatibleLLM(
++                    api_key="credential-never-persist", transport=transport,
++                    max_retries=3, retry_base_seconds=0,
++                )
++                output = llm.generate("Prompt")
++            records = sorted(self._records(directory), key=lambda record: record["attempt"])
++            self.assertEqual(output.text, "Recovered")
++            self.assertEqual(output.request_attempts, 4)
++            self.assertEqual(len(records), 4)
++            self.assertEqual(len({record["generation_id"] for record in records}), 1)
++            self.assertEqual(len({record["request_id"] for record in records}), 4)
++            self.assertEqual([record["attempt"] for record in records], [1, 2, 3, 4])
++            self.assertTrue(all(record["will_retry"] for record in records[:-1]))
++            self.assertEqual(records[0]["http_status"], 503)
++            self.assertEqual(records[0]["response_json"], {"error": "down"})
++            self.assertEqual(records[1]["error"]["type"], "URLError")
++            self.assertEqual(records[2]["state"], "malformed_response")
++            self.assertEqual(records[2]["response_json"]["choices"][0]["message"]["reasoning_content"], "truncated")
++            self.assertEqual(records[3]["state"], "success")
++
++    def test_terminal_invalid_response_is_dumped_before_raise(self):
++        with tempfile.TemporaryDirectory() as directory:
++            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
++                llm = OpenAICompatibleLLM(
++                    api_key="credential-never-persist", transport=lambda request, timeout: b'bad json \xff',
++                    max_retries=0,
++                )
++                with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
++                    llm.generate("Prompt")
++            record = self._records(directory)[0]
++            self.assertEqual(record["state"], "malformed_response")
++            self.assertEqual(record["response_raw"], 'bad json \\xff')
++            self.assertFalse(record["will_retry"])
++
++    def test_dump_redacts_credentials_and_never_serializes_headers_or_url_secrets(self):
++        api_key = "credential-never-persist"
++        header_key = "extra-header-credential"
++        response = {
++            "choices": [{"message": {"content": "safe " + api_key + " " + header_key}}],
++            "api_key": "echoed-provider-secret",
++            "details": {"access_token": "provider-token-secret"},
++        }
++        with tempfile.TemporaryDirectory() as directory:
++            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
++                llm = OpenAICompatibleLLM(
++                    api_key=api_key, extra_headers={"X-Api-Key": header_key},
++                    base_url="http://username:url-password@fake/v1/chat/completions?key=query-secret",
++                    transport=_CaptureTransport(response),
++                )
++                output = llm.generate("Prompt")
++            self.assertIn(api_key, output.text)  # Redaction only affects the audit dump.
++            paths = list(Path(directory).glob("*.json"))
++            saved = paths[0].read_text(encoding="utf-8")
++            for secret in (api_key, header_key, "echoed-provider-secret", "provider-token-secret", "url-password", "query-secret"):
++                self.assertNotIn(secret, saved)
++            self.assertNotIn("Authorization", saved)
++            self.assertNotIn("X-Api-Key", saved)
++            self.assertEqual(json.loads(saved)["endpoint"], "http://fake/v1/chat/completions")
++
++    def test_concurrent_clients_produce_unique_complete_files(self):
++        transport = _CaptureTransport({"choices": [{"message": {"content": "Answer"}}]})
++        with tempfile.TemporaryDirectory() as directory:
++            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
++                clients = [OpenAICompatibleLLM(api_key="credential-never-persist", transport=transport) for _ in range(2)]
++                with ThreadPoolExecutor(max_workers=4) as executor:
++                    outputs = list(executor.map(lambda index: clients[index % 2].generate("Prompt"), range(8)))
++            records = self._records(directory)
++            self.assertEqual(len(outputs), 8)
++            self.assertEqual(len(records), 8)
++            self.assertEqual(len({record["request_id"] for record in records}), 8)
++            self.assertEqual(len({record["client_id"] for record in records}), 2)
++            self.assertTrue(all(record["state"] == "success" for record in records))
++            self.assertFalse(list(Path(directory).glob("*.tmp")))
++
++    def test_requested_dump_failure_prevents_undocumented_api_call(self):
++        with tempfile.TemporaryDirectory() as directory:
++            invalid_directory = Path(directory) / "a-file"
++            invalid_directory.touch()
++            transport = mock.Mock()
++            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": str(invalid_directory)}):
++                llm = OpenAICompatibleLLM(api_key="credential-never-persist", transport=transport)
++                with self.assertRaises(OSError):
++                    llm.generate("Prompt")
++            transport.assert_not_called()
++
++
+ class GeminiHelperTest(unittest.TestCase):
+     def test_build_gemini_client_uses_default_url(self) -> None:
+         transport = _CaptureTransport({"choices": [{"message": {"content": "Gem"}}]})
+diff --git a/tests/test_react_loop.py b/tests/test_react_loop.py
+index b30f5e9..dcd824d 100644
+--- a/tests/test_react_loop.py
++++ b/tests/test_react_loop.py
+@@ -6,6 +6,26 @@ from expgym.tools_experiment import CONFIGS, run_config
+ 
+ 
+ class RunReactLoopTest(unittest.TestCase):
++    def test_fake_llm_answers_when_first_evaluation_exceeds_budget(self) -> None:
++        from scripts.run_paper_sweep import _score_result
++
++        tools = {"evaluate_config": lambda _: (0.75, 100.0)}
++        llm = FakeLLM(
++            plan=[("evaluate_config", '{"x": 1}'), ("evaluate_config", '{"x": 2}')],
++            final_answer='{"x": 2}',
++        )
++        result = run_react_loop(llm=llm, tools=tools, time_budget=10.0, max_steps=4)
++        self.assertEqual(result["evaluations"], 1)
++        self.assertEqual(result["api_calls"], 2)
++        self.assertEqual(result["eval_records"], [])
++        self.assertEqual(result["answer"], '{"x": 2}')
++        self.assertIsNone(result["answer_perf"])
++        # The withheld observation stays hidden; only offline validation may
++        # assign the submitted configuration's outcome score.
++        self.assertTrue(_score_result(result, tools, None)["ok"])
++        self.assertEqual(result["answer_score_source"], "offline_final_answer")
++        self.assertEqual(result["answer_perf"], 0.75)
++
+     def test_fake_llm_produces_answer_and_observations(self) -> None:
+         config_ids = list(CONFIGS.keys())[:3]
+         llm = FakeLLM(config_ids=config_ids, probes=2)
+diff --git a/tests/test_run_paper_sweep.py b/tests/test_run_paper_sweep.py
+index 0ccde2c..9f29a31 100644
+--- a/tests/test_run_paper_sweep.py
++++ b/tests/test_run_paper_sweep.py
+@@ -28,6 +28,8 @@ def _args(**overrides):
+         seed=1206,
+         max_steps=10,
+         max_evals=30,
++        max_tokens=None,
++        chat_template_kwargs=None,
+         request_timeout=600.0,
+         max_retries=10,
+         retry_base_seconds=3.0,
+@@ -234,6 +236,76 @@ class PaperSweepMatrixTest(unittest.TestCase):
+         self.assertEqual(namespace.prompt_cache_key, namespace.prompt_cache["key"])
+         self.assertEqual(namespace.prompt_cache["scope"], "job")
+ 
++    def test_namespace_for_job_preserves_generation_options(self):
++        for options in (
++            {"max_tokens": None, "chat_template_kwargs": None},
++            {
++                "max_tokens": 4096,
++                "chat_template_kwargs": {"enable_thinking": False},
++            },
++        ):
++            with self.subTest(options=options):
++                args = _args(**options)
++                job = run_paper_sweep._build_jobs(args)[0]
++                namespace = run_paper_sweep._namespace_for_job(args, job, None)
++                self.assertEqual(namespace.max_tokens, options["max_tokens"])
++                self.assertEqual(
++                    namespace.chat_template_kwargs,
++                    options["chat_template_kwargs"],
++                )
++
++    def test_generation_options_change_derived_prompt_cache_key(self):
++        args = _args(prompt_cache_key="kimi-k3")
++        job = run_paper_sweep._build_jobs(args)[0]
++        baseline = run_paper_sweep._prompt_cache_config(args, job)["key"]
++        for options in (
++            {"max_tokens": 4096},
++            {"chat_template_kwargs": {"enable_thinking": False}},
++        ):
++            with self.subTest(options=options):
++                changed = _args(prompt_cache_key="kimi-k3", **options)
++                self.assertNotEqual(
++                    baseline,
++                    run_paper_sweep._prompt_cache_config(changed, job)["key"],
++                )
++
++    @mock.patch.object(run_paper_sweep, "source_tree_sha256", return_value="fixed-source")
++    def test_generation_options_change_resume_key_without_prompt_cache(self, _source):
++        args = _args(prompt_cache_scope="disabled")
++        job = run_paper_sweep._build_jobs(args)[0]
++        baseline = run_paper_sweep._resume_key(args, job)
++        for options in (
++            {"max_tokens": 4096},
++            {"chat_template_kwargs": {"enable_thinking": False}},
++        ):
++            with self.subTest(options=options):
++                changed = _args(prompt_cache_scope="disabled", **options)
++                self.assertNotEqual(
++                    baseline, run_paper_sweep._resume_key(changed, job)
++                )
++
++    @mock.patch.object(run_paper_sweep, "source_tree_sha256", return_value="fixed-source")
++    def test_generation_fingerprints_ignore_json_object_key_order(self, _source):
++        first = _args(
++            prompt_cache_key="kimi-k3",
++            max_tokens=4096,
++            chat_template_kwargs={"enable_thinking": False, "nested": {"a": 1, "b": 2}},
++        )
++        second = _args(
++            prompt_cache_key="kimi-k3",
++            max_tokens=4096,
++            chat_template_kwargs={"nested": {"b": 2, "a": 1}, "enable_thinking": False},
++        )
++        job = run_paper_sweep._build_jobs(first)[0]
++        self.assertEqual(
++            run_paper_sweep._prompt_cache_config(first, job),
++            run_paper_sweep._prompt_cache_config(second, job),
++        )
++        self.assertEqual(
++            run_paper_sweep._resume_key(first, job),
++            run_paper_sweep._resume_key(second, job),
++        )
++
+     def test_one_model_paper_slice_has_one_unique_key_per_job(self):
+         args = _args(
+             prompt_cache_key="paper-v1",
+diff --git a/tests/test_run_poolact.py b/tests/test_run_poolact.py
+index d9c4c66..667695d 100644
+--- a/tests/test_run_poolact.py
++++ b/tests/test_run_poolact.py
+@@ -5,6 +5,7 @@ import subprocess
+ import sys
+ import tempfile
+ import unittest
++from unittest import mock
+ 
+ from scripts import run_poolact
+ 
+@@ -13,6 +14,36 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
+ 
+ 
+ class PoolActCliTest(unittest.TestCase):
++    def test_resolved_config_records_generation_options(self):
++        for options, expected in (
++            ([], {"max_tokens": None, "chat_template_kwargs": None}),
++            (
++                ["--max-tokens", "4096", "--chat-template-kwargs", '{"enable_thinking":false}'],
++                {"max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": False}},
++            ),
++        ):
++            with self.subTest(options=options), mock.patch.dict(os.environ, {}, clear=True):
++                with mock.patch.object(sys, "argv", ["run_poolact.py", *options]):
++                    args = run_poolact.parse_args()
++                config = run_poolact._resolved_config(args, time_budget=300.0)
++                self.assertEqual(config["max_tokens"], expected["max_tokens"])
++                self.assertEqual(
++                    config["chat_template_kwargs"], expected["chat_template_kwargs"]
++                )
++
++    def test_generation_options_change_resolved_resume_config(self):
++        with mock.patch.dict(os.environ, {}, clear=True):
++            with mock.patch.object(sys, "argv", ["run_poolact.py"]):
++                args = run_poolact.parse_args()
++        baseline = run_poolact._resolved_config(args, time_budget=300.0)
++        for name, value in (
++            ("max_tokens", 4096),
++            ("chat_template_kwargs", {"enable_thinking": False}),
++        ):
++            with self.subTest(option=name), mock.patch.object(args, name, value):
++                changed = run_poolact._resolved_config(args, time_budget=300.0)
++                self.assertNotEqual(baseline, changed)
++
+     def test_question_selector_matches_eval_model_syntax(self):
+         self.assertEqual(run_poolact._parse_indices("0"), [0])
+         self.assertEqual(run_poolact._parse_indices("0,2,7"), [0, 2, 7])
+diff --git a/tests/test_task_tuning_hpobench.py b/tests/test_task_tuning_hpobench.py
+index 2024e62..567bccf 100644
+--- a/tests/test_task_tuning_hpobench.py
++++ b/tests/test_task_tuning_hpobench.py
+@@ -1,6 +1,9 @@
+ import os
+ import unittest
+ import json
++import threading
++from types import SimpleNamespace
++from unittest.mock import patch
+ 
+ from expgym.task_tuning import (
+     build_fake_plan,
+@@ -22,6 +25,29 @@ def _has_hpobench_deps() -> bool:
+ 
+ 
+ class TestHPOBenchTasks(unittest.TestCase):
++    def test_fake_plan_serializes_numpy_choices_as_json_primitives(self) -> None:
++        import numpy as np
++
++        values = {
++            "edge": np.int64(1),
++            "rate": np.float32(0.25),
++            "enabled": np.bool_(True),
++            "operation": np.str_("conv1x1-bn-relu"),
++        }
++        config_space = SimpleNamespace(sample_configuration=lambda: dict(values))
++        task = SimpleNamespace(name="numpy-choices", config_space=config_space)
++        with patch("expgym.task_tuning._load_hpobench", return_value=task), patch.dict(
++            "expgym.task_tuning._HPOBENCH_EVAL_LOCKS",
++            {task.name: threading.Lock()},
++        ):
++            plan = build_fake_plan(1, tuning_task="hpobench:nasbench101:A")
++        self.assertEqual(plan[0][0], "evaluate_config")
++        parsed = json.loads(plan[0][1])
++        self.assertEqual(parsed, {"edge": 1, "rate": 0.25, "enabled": True, "operation": "conv1x1-bn-relu"})
++        self.assertIs(type(parsed["edge"]), int)
++        self.assertIs(type(parsed["rate"]), float)
++        self.assertIs(type(parsed["enabled"]), bool)
++
+     def test_hpobench_evaluate_returns_numeric_perf(self) -> None:
+         class _DummyBenchmark:
+             def objective_function(self, configuration, fidelity):
+@@ -104,15 +130,22 @@ class TestHPOBenchTasks(unittest.TestCase):
+         "HPOBench deps not installed or tests disabled.",
+     )
+     def test_fake_plan_matches_hpobench_space(self) -> None:
+-        task_name = "hpobench:nasbench201:cifar10-valid"
+-        plan = build_fake_plan(2, tuning_task=task_name)
+-        self.assertEqual(len(plan), 2)
+-        task = _load_hpobench(task_name)
+         import ConfigSpace as CS
+-        for _, payload in plan:
+-            values = json.loads(payload)
+-            config = CS.Configuration(task.config_space, values=values)
+-            self.assertIsNotNone(config)
++
++        for task_name in [
++            "hpobench:nasbench101:A",
++            "hpobench:nasbench101:B",
++            "hpobench:nasbench101:C",
++            "hpobench:nasbench201:cifar10-valid",
++        ]:
++            with self.subTest(task=task_name):
++                plan = build_fake_plan(2, tuning_task=task_name, seed=1206)
++                self.assertEqual(len(plan), 2)
++                task = _load_hpobench(task_name)
++                for _, payload in plan:
++                    values = json.loads(payload)
++                    config = CS.Configuration(task.config_space, values=values)
++                    self.assertIsNotNone(config)
+ 
+     @unittest.skipUnless(
+         os.environ.get("EXPGYM_ENABLE_HPOBENCH_TESTS") == "1" and _has_hpobench_deps(),
