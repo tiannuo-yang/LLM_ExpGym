@@ -1,5 +1,7 @@
 import argparse
+import copy
 from dataclasses import replace
+import json
 import os
 import re
 import unittest
@@ -7,6 +9,9 @@ from pathlib import Path
 from unittest import mock
 
 from scripts import run_paper_sweep
+from expgym.react_loop import LLMOutput
+from expgym.task_tuning import PARAMETER_RANGES
+from expgym.trace_v2 import materialize_llm_input
 
 
 def _args(**overrides):
@@ -28,6 +33,12 @@ def _args(**overrides):
         seed=1206,
         max_steps=10,
         max_evals=30,
+        max_tokens=None,
+        chat_template_kwargs=None,
+        reasoning_effort=None,
+        tool_protocol="auto",
+        max_protocol_retries=1,
+        tuning_final_policy="legacy",
         request_timeout=600.0,
         max_retries=10,
         retry_base_seconds=3.0,
@@ -234,6 +245,90 @@ class PaperSweepMatrixTest(unittest.TestCase):
         self.assertEqual(namespace.prompt_cache_key, namespace.prompt_cache["key"])
         self.assertEqual(namespace.prompt_cache["scope"], "job")
 
+    def test_namespace_for_job_preserves_generation_options(self):
+        for options in (
+            {"max_tokens": None, "chat_template_kwargs": None},
+            {
+                "max_tokens": 4096,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "reasoning_effort": "high",
+                "tool_protocol": "native",
+                "max_protocol_retries": 2,
+                "tuning_final_policy": "legacy",
+            },
+        ):
+            with self.subTest(options=options):
+                args = _args(**options)
+                job = run_paper_sweep._build_jobs(args)[0]
+                namespace = run_paper_sweep._namespace_for_job(args, job, None)
+                self.assertEqual(namespace.max_tokens, options["max_tokens"])
+                self.assertEqual(
+                    namespace.chat_template_kwargs,
+                    options["chat_template_kwargs"],
+                )
+                for name in ("reasoning_effort", "tool_protocol", "max_protocol_retries", "tuning_final_policy"):
+                    self.assertEqual(getattr(namespace, name), getattr(args, name))
+
+    def test_generation_options_change_derived_prompt_cache_key(self):
+        args = _args(prompt_cache_key="kimi-k3")
+        job = run_paper_sweep._build_jobs(args)[0]
+        baseline = run_paper_sweep._prompt_cache_config(args, job)["key"]
+        for options in (
+            {"max_tokens": 4096},
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            {"reasoning_effort": "high"},
+            {"tool_protocol": "text"},
+            {"max_protocol_retries": 0},
+            {"tuning_final_policy": "submitted"},
+        ):
+            with self.subTest(options=options):
+                changed = _args(prompt_cache_key="kimi-k3", **options)
+                self.assertNotEqual(
+                    baseline,
+                    run_paper_sweep._prompt_cache_config(changed, job)["key"],
+                )
+
+    @mock.patch.object(run_paper_sweep, "source_tree_sha256", return_value="fixed-source")
+    def test_generation_options_change_resume_key_without_prompt_cache(self, _source):
+        args = _args(prompt_cache_scope="disabled")
+        job = run_paper_sweep._build_jobs(args)[0]
+        baseline = run_paper_sweep._resume_key(args, job)
+        for options in (
+            {"max_tokens": 4096},
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            {"reasoning_effort": "high"},
+            {"tool_protocol": "text"},
+            {"max_protocol_retries": 0},
+            {"tuning_final_policy": "submitted"},
+        ):
+            with self.subTest(options=options):
+                changed = _args(prompt_cache_scope="disabled", **options)
+                self.assertNotEqual(
+                    baseline, run_paper_sweep._resume_key(changed, job)
+                )
+
+    @mock.patch.object(run_paper_sweep, "source_tree_sha256", return_value="fixed-source")
+    def test_generation_fingerprints_ignore_json_object_key_order(self, _source):
+        first = _args(
+            prompt_cache_key="kimi-k3",
+            max_tokens=4096,
+            chat_template_kwargs={"enable_thinking": False, "nested": {"a": 1, "b": 2}},
+        )
+        second = _args(
+            prompt_cache_key="kimi-k3",
+            max_tokens=4096,
+            chat_template_kwargs={"nested": {"b": 2, "a": 1}, "enable_thinking": False},
+        )
+        job = run_paper_sweep._build_jobs(first)[0]
+        self.assertEqual(
+            run_paper_sweep._prompt_cache_config(first, job),
+            run_paper_sweep._prompt_cache_config(second, job),
+        )
+        self.assertEqual(
+            run_paper_sweep._resume_key(first, job),
+            run_paper_sweep._resume_key(second, job),
+        )
+
     def test_one_model_paper_slice_has_one_unique_key_per_job(self):
         args = _args(
             prompt_cache_key="paper-v1",
@@ -342,20 +437,82 @@ class PaperSweepMatrixTest(unittest.TestCase):
         self.assertFalse(check["ok"])
         self.assertIsNone(result["answer_perf"])
 
+    def test_submitted_policy_scores_unobserved_final_with_prior_evaluations(self):
+        for records in ([], [{"payload": '{"x":0}', "perf": 0.9}]):
+            with self.subTest(records=records):
+                result = {
+                    "answer": '{"x":1}', "answer_perf": None,
+                    "eval_records": records, "tuning_final_policy": "submitted",
+                }
+                check = run_paper_sweep._score_result(
+                    result, {"evaluate_config": lambda payload: (0.2, 100.0)}, None,
+                )
+                self.assertTrue(check["ok"])
+                self.assertEqual(result["answer"], '{"x":1}')
+                self.assertEqual(result["answer_perf"], 0.2)
+                self.assertEqual(result["answer_score_source"], "offline_final_answer")
+                self.assertEqual(result["eval_records"], records)
+
+    def test_legacy_policy_does_not_fill_unobserved_final_after_prior_evaluation(self):
+        result = {
+            "answer": '{"x":1}', "answer_perf": None,
+            "eval_records": [{"payload": '{"x":0}', "perf": 0.9}],
+            "tuning_final_policy": "legacy",
+        }
+        check = run_paper_sweep._score_result(
+            result, {"evaluate_config": lambda payload: (0.2, 100.0)}, None,
+        )
+        self.assertFalse(check["ok"])
+        self.assertIsNone(result["answer_perf"])
+
+    def test_submitted_policy_keeps_infrastructure_failures_as_failures(self):
+        def failed_tool(payload):
+            raise RuntimeError("dataset backend unavailable")
+
+        result = {
+            "answer": '{"x":1}', "answer_perf": None,
+            "eval_records": [], "tuning_final_policy": "submitted",
+        }
+        check = run_paper_sweep._score_result(result, {"evaluate_config": failed_tool}, None)
+        self.assertFalse(check["ok"])
+        self.assertIn("dataset backend unavailable", check["reason"])
+        self.assertIsNone(result["answer_perf"])
+
+    def test_submitted_policy_scores_invalid_final_configuration_zero(self):
+        def invalid_tool(payload):
+            raise run_paper_sweep.InvalidConfigurationError("unknown parameter")
+
+        result = {
+            "answer": '{"unknown":1}', "answer_perf": None,
+            "eval_records": [{"payload": "{}", "perf": 0.9}],
+            "tuning_final_policy": "submitted",
+        }
+        check = run_paper_sweep._score_result(result, {"evaluate_config": invalid_tool}, None)
+        self.assertTrue(check["ok"])
+        self.assertEqual(result["answer_perf"], 0.0)
+        self.assertEqual(check["invalid_configuration"], "unknown parameter")
+
     def test_score_check_accepts_invalid_config_as_zero(self):
         result = {"answer": "{}", "answer_perf": 0.0}
         check = run_paper_sweep._score_check(
             result,
             {
-                "evaluate_config": lambda _payload: (
-                    "perf=0.000000 (invalid or degenerate configuration)",
-                    0.0,
-                )
+                "evaluate_config": mock.Mock(side_effect=run_paper_sweep.InvalidConfigurationError("invalid model configuration")),
             },
             None,
         )
         self.assertTrue(check["ok"])
         self.assertEqual(check["recomputed_perf"], 0.0)
+
+    def test_score_check_does_not_guess_zero_from_error_text(self):
+        for text in ("Invalid JSON payload: broken backend", "Invalid config: backend bug", "perf=0.000000 (invalid or degenerate configuration)"):
+            with self.subTest(text=text):
+                check = run_paper_sweep._score_check(
+                    {"answer": "{}", "answer_perf": 0.0},
+                    {"evaluate_config": lambda payload: (text, 0.0)}, None,
+                )
+                self.assertFalse(check["ok"])
+                self.assertIsNone(check["recomputed_perf"])
 
     def test_score_check_does_not_mask_evaluator_type_error(self):
         def broken_evaluator(_answer, _records):
@@ -367,6 +524,87 @@ class PaperSweepMatrixTest(unittest.TestCase):
                 {},
                 broken_evaluator,
             )
+
+    def test_v1_resume_rejects_malformed_shapes_and_recomputes_score(self):
+        args = _args(trace_format="v1")
+        job = run_paper_sweep._build_jobs(args)[0]
+        identity = run_paper_sweep._job_evaluation_identity(args, job)
+        result = {
+            "job": run_paper_sweep.asdict(job), "evaluation_identity": identity,
+            "_resume_key": run_paper_sweep._resume_key(args, job, evaluation=identity),
+            "answer": "{}", "answer_perf": 0.9, "score_check": {"ok": True},
+            "tuning_final_policy": "legacy",
+        }
+        for document in ([], None, 42, "bad root", {**result, "score_check": 1}):
+            with self.subTest(document=document), mock.patch.object(Path, "read_text", return_value=json.dumps(document)):
+                self.assertFalse(run_paper_sweep._resume_trace_is_valid(Path("fixture"), args, job))
+        for actual, accepted in ((0.9, True), (0.1, False)):
+            with self.subTest(actual=actual), mock.patch.object(Path, "read_text", return_value=json.dumps(result)), \
+                 mock.patch.object(run_paper_sweep, "_resolve_tools", return_value={"evaluate": lambda payload: (actual, 1.0)}), \
+                 mock.patch.object(run_paper_sweep, "_resolve_answer_evaluator", return_value=None):
+                self.assertEqual(run_paper_sweep._resume_trace_is_valid(Path("fixture"), args, job), accepted)
+
+    def test_native_submitted_v2_roundtrip_and_independent_resume_recheck(self):
+        args = _args(backend="fake", models="fake", cost_regimes="cost_free", tool_protocol="native", tuning_final_policy="submitted")
+        job = run_paper_sweep._build_jobs(args)[0]
+        ns = run_paper_sweep._namespace_for_job(args, job, None)
+        tools = run_paper_sweep._resolve_tools(run_paper_sweep._SCENARIOS["tuning"], ns)
+        first = {parameter.name: parameter.low for parameter in PARAMETER_RANGES}
+        final = {**first, PARAMETER_RANGES[0].name: PARAMETER_RANGES[0].low + 1}
+        call = {"id": "fixture_call", "type": "function", "function": {
+            "name": next(iter(tools)), "arguments": json.dumps(first),
+        }}
+        native_message = {"role": "assistant", "content": None,
+                          "reasoning_content": "Retain this complete history.", "tool_calls": [call]}
+
+        class Replay:
+            supports_native_tools = True
+
+            def __init__(self):
+                self.requests = []
+                self.outputs = iter([
+                    LLMOutput("", tool_calls=[call], assistant_message=native_message, finish_reason="tool_calls"),
+                    LLMOutput("Answer: " + json.dumps(final)),
+                ])
+
+            def generate(self, messages, **kwargs):
+                self.requests.append(copy.deepcopy(messages))
+                return next(self.outputs)
+
+        replay = Replay()
+        with mock.patch.object(run_paper_sweep, "build_llm", return_value=replay):
+            result = run_paper_sweep._run_job(args, job, None)
+        self.assertTrue(result["score_check"]["ok"])
+        self.assertEqual(json.loads(result["answer"]), final)
+        self.assertEqual(result["answer_score_source"], "offline_final_answer")
+        result["wall_time_seconds"] = 0.1
+        trace = run_paper_sweep.build_trace_v2(result, repo_root=run_paper_sweep.REPO_ROOT)
+        self.assertEqual(trace["outcome"]["score_cost_basis"], "offline_final_answer")
+        self.assertEqual(trace["outcome"]["answer_score_source"], "offline_final_answer")
+        self.assertEqual(trace["run"]["evaluation_identity"], result["evaluation_identity"])
+        for index, saved_call in enumerate(trace["llm_calls"]):
+            self.assertEqual(materialize_llm_input(trace, saved_call["id"]), replay.requests[index])
+        original_read = Path.read_text
+        def read_fixture(path, *positional, **kwargs):
+            return json.dumps(trace) if path == Path("fixture") else original_read(path, *positional, **kwargs)
+
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=read_fixture):
+            self.assertTrue(run_paper_sweep._resume_trace_is_valid(Path("fixture"), args, job))
+        changed = copy.deepcopy(trace)
+        changed["outcome"]["score"]["value"] += 0.1
+        trace = changed
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=read_fixture):
+            self.assertFalse(run_paper_sweep._resume_trace_is_valid(Path("fixture"), args, job))
+
+    def test_score_recompute_rejects_nonfinite_scores_and_invalid_tool_costs(self):
+        for tool_result in ((float("inf"), 1.0), (float("nan"), 1.0), (True, 1.0), (0.9, -1.0), (0.9, float("nan"))):
+            with self.subTest(tool_result=tool_result):
+                check = run_paper_sweep._score_check(
+                    {"answer": "{}", "answer_perf": tool_result[0]},
+                    {"evaluate": lambda payload: tool_result}, None,
+                )
+                self.assertFalse(check["ok"])
+        self.assertFalse(run_paper_sweep._float_close(float("inf"), float("inf")))
 
 
 if __name__ == "__main__":

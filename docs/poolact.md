@@ -12,7 +12,8 @@ objects:
    decision's pending claim are one serialized critical section.
 
 The serialized result identifies this contract as
-`paper-graph-lock-v2` (`expgym.poolact.POOLACT_PROTOCOL_VERSION`).
+`paper-graph-lock-v3` (`expgym.poolact.POOLACT_PROTOCOL_VERSION`). This is the
+coordination protocol version, separate from the trace-v2 schema version.
 
 After the claim is recorded, the lock is released and the tool executes in
 parallel with other agents' tools.
@@ -124,8 +125,16 @@ result = run_react_loop(
 )
 ```
 
-Create one runtime per agent from the same coordinator. Do not share a runtime
-or `AgentClock` between agents.
+Create one fresh runtime per agent invocation from the same coordinator. Do not
+share a runtime or `AgentClock` between agents or independent repeated pools.
+
+For a budgeted/scaled run, pass the same `time_budget` and `overhead_scale` to
+`bind_tools` and `run_react_loop`. The runtime needs these values before a tool
+result is published. Official shared components carry explicit execution
+contracts; budget, scale, or clock mismatches are rejected before any LLM or
+tool call. Repository runners supply both consistently. Ordinary unbound clocks
+and plain custom tools retain their existing behavior; the legacy clockless
+shared mode is explicitly unbounded, not a finite-budget shortcut.
 
 ## Concurrency semantics
 
@@ -138,6 +147,10 @@ Only completed observations are cache hits. A hit returns the original tool
 result with its simulated overhead changed to zero. Virtual completion times
 ensure an agent cannot observe a result from the future of the simulated
 parallel timeline.
+
+Graph views are built from completion events visible at the receiving agent's
+simulated time. Feedback withheld at the strict budget boundary is not published
+through graph/cache or reintroduced into a forced-final prompt.
 
 The ReAct loop, not the wrapper, advances each agent's virtual clock. Wrappers
 only calculate the future completion timestamp used by the shared cache and
@@ -166,6 +179,12 @@ score, every agent trace, and the separate per-agent files.
 With `--questions`, the same tree appears under `<output>/item_N/` for each
 selected item, and `<output>/summary.json` contains the per-item results and
 cross-item mean scores.
+
+`--repeats R` runs independent N-agent pools, with separate caches, graphs and
+seeds; it does not turn one pool into N×R agents. Configuration/source and selected
+data/evaluator-dependency identities bind resume, which independently re-scores
+individual outputs. See [portable-study.md](portable-study.md) for native tool
+protocols, final-answer policies, descriptive statistics and remaining limits.
 
 ## Compatibility
 

@@ -1,6 +1,6 @@
 ---
 name: expgym-runner
-description: Run, reproduce, validate, debug, or adapt the ExpGym and PoolAct research codebase. Use when an agent must set up datasets, choose the paper-exact versus repository-full experiment matrix, run fake or paid real-model tests (especially local Sub2API/Codex), operate HPOBench through Docker, resume sweeps, validate traces/results, estimate run scope, diagnose backend/data/platform failures, or add models, backends, tasks, scenarios, and PoolAct-compatible behavior.
+description: Run, reproduce, validate, debug, or adapt the ExpGym and PoolAct research codebase. Use for dataset setup, paper versus custom experiment matrices, fake and real-model evaluation (including OpenAI-compatible self-serving), HPOBench runtimes, verified resume, trace integrity, resource estimates, and portable model/task/PoolAct adaptations.
 ---
 
 # ExpGym Runner
@@ -30,12 +30,16 @@ Never call `run_full.sh` “paper exact” without comparing it to the current p
 
 ## Execute the validation ladder
 
-1. Run the no-cost preflight:
+1. Run the no-model-call preflight. Use setup only for an initial environment; do not reinstall or upgrade a frozen runtime during an active study. For a continuation, set `EXPGYM_VENV` to the recorded environment, verify its interpreter/dependency identity against the run manifest, and stop if it is missing or incompatible. `check.sh` otherwise auto-installs a missing default environment:
 
    ```bash
-   bash scripts/setup.sh --with-data
-   bash scripts/check.sh
-   .venv/bin/python scripts/download_data.py --check
+   # Initial setup only, not a frozen continuation:
+   # bash scripts/setup.sh --with-data
+   # export EXPGYM_VENV="$PWD/.venv"
+   : "${EXPGYM_VENV:?Set the verified experiment environment first}"
+   test -x "$EXPGYM_VENV/bin/python" &&
+     EXPGYM_VENV="$EXPGYM_VENV" bash scripts/check.sh &&
+     "$EXPGYM_VENV/bin/python" scripts/download_data.py --check
    ```
 
 2. Resolve the intended command with `--dry-run`. Report models, scenarios, item ranges, regimes, repetitions, strategies, agents, maximum steps/evaluations, and the resulting job or agent-trace count before a large external run.
@@ -60,8 +64,8 @@ For PoolAct, require for every selected item and strategy:
 - `result.json` and all expected per-agent JSON files;
 - every `agent_results[].score_check.ok == true`;
 - finite aggregate performance;
-- `shared_state.pending_claims == 0` when shared state exists;
-- a current configuration and implementation hash;
+- zero integer pending claims in the actual shared-state schema (`shared_state.graph.pending_claims` for current PoolAct); cached-only state need not contain a graph;
+- current configuration, implementation, selected-data and evaluator-dependency identities;
 - a valid item/batch `summary.json`.
 
 A score of zero can be a valid but wrong model answer. Distinguish **runner/integrity success** from **semantic task performance**. Search F1 of zero, a valid NASBench configuration scoring poorly, or a budget stop is not automatically a software failure.
@@ -70,9 +74,12 @@ A score of zero can be a valid but wrong model answer. Distinguish **runner/inte
 
 - Load credentials from environment files without printing them. Never echo, serialize, commit, or paste API keys.
 - For local Sub2API, require `SUB2API_API_KEY` and `SUB2API_BASE_URL`; `SUB2API_MODEL` is optional. Use the model ID requested by the user and preflight it explicitly.
-- Treat HTTP 200 with null/empty assistant content as a transient malformed response. The existing OpenAI-compatible client retries bounded malformed responses, 429, 500, 502, 503, 504, connection failures, and timeouts.
+- Empty/null `content` can be a valid native tool response. Preserve complete `assistant_message`, `tool_calls`, `reasoning_content`, finish reason, and paired tool-result IDs. Never flatten native calls into guessed text actions.
+- A delivered reasoning-only/empty response, invalid model arguments, or `finish_reason=length` is not a transport retry. Record the decision once; any protocol repair consumes the normal agent-step horizon. Retry only the client's configured transient HTTP/transport failures, and retain every attempt's usage/dump, including unknown usage. An ambiguous malformed HTTP-200 envelope fails explicitly rather than being resampled for a better answer.
+- For native models, inspect the effective rendered prompt and complete a real multi-turn tool smoke. Normal decisions send actual schemas with `tool_choice=auto`; forced final uses `none` while retaining schemas/history. A nominally healthy endpoint or fake text plan does not verify this path.
+- Inspect the actual task's complete system and user messages, including task-builder instructions and PoolAct additions. A native system prompt can still conflict with text Action examples in the task context. Test changed production entrypoints with a native-capable mock transport; fake `auto` resolves to text and cannot cover that integration. Change only source-owned protocol instructions, preserving dataset text and explicit text-mode behavior.
 - Do not estimate subscription or token consumption from visible trace length alone. Provider-side reasoning tokens and retried attempts may dominate. Measure a representative real pilot from Sub2API usage, then extrapolate from observed calls and charged usage with a safety margin.
-- A model can be account- or plan-gated even when the endpoint works for another model. Report the provider error verbatim but never include secrets.
+- A model can be account- or plan-gated even when the endpoint works for another model. Report the provider error after secret redaction.
 - When Sub2API runs inside Docker, use the repository wrapper; it rewrites localhost to `host.docker.internal`.
 
 ## Preserve ExpGym and PoolAct semantics when adapting
@@ -92,11 +99,15 @@ When adding or changing a scenario/task:
 
 When changing PoolAct:
 
-- Preserve one runtime and simulated clock per agent.
-- Cache only completed observations at zero simulated cost; in-flight work is not a completed cache hit.
+- Preserve one runtime and simulated clock per agent. Bind the same `time_budget` and `overhead_scale` to the coordinator runtime and the ReAct loop.
+- Cache only completed observations at zero simulated cost; in-flight work is not a completed cache hit. Graph/cache views must respect the viewer's simulated time and strict feedback budget; withheld scores must not reappear through shared state or forced-final prompts.
 - Keep the exploration graph and serialized LLM decision/pending-claim step while allowing environment tools to execute concurrently.
 - Close pending claims on success and exception, and force final-answer locking when the protocol requires it.
-- Treat protocol-v2 outputs as current-corrected behavior, not byte-for-byte historical CARC output.
+- Record `POOLACT_PROTOCOL_VERSION` from the code (currently `paper-graph-lock-v3`); do not conflate this with trace schema v2 or byte-for-byte historical CARC output.
+
+Preserve the default `legacy` tuning final policy and historical Audit scoring/voting unless the user deliberately requests a separately identified endpoint change. `submitted` is an explicit study option, not an unlabelled compatibility fix. For study design and data/dependency limits, read `docs/portable-study.md`.
+
+For self-serving, record actual hardware, checkpoint/runtime identity, generation settings and measured seed behavior. A request seed is not proof it controls sampling; exact output repeatability is not required to conduct an explicitly stochastic study. Do not alter a model's computation merely to satisfy a seed flag. Confirm the actual HTTP payload: runner CLI and server defaults can differ.
 
 After any adaptation, run the complete no-cost check and an authorized real smoke through every changed path.
 

@@ -5,8 +5,10 @@ while summaries such as token totals and printable steps are derived by readers.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -163,13 +165,24 @@ def _task_metadata(job: Dict[str, object], repo_root: Path) -> Dict[str, object]
     return task
 
 
-def _message_key(message: Dict[str, str]) -> Tuple[str, str]:
-    return str(message.get("role", "")), str(message.get("content", ""))
+def _message_key(message: Dict[str, Any]) -> str:
+    """Intern the complete wire object, not just its visible text."""
+    if not isinstance(message, dict):
+        raise ValueError("Wire message must be an object")
+    return json.dumps(message, sort_keys=True, ensure_ascii=False, allow_nan=False)
+
+
+def _message_record(message: Dict[str, Any], message_id: str) -> Dict[str, Any]:
+    if not isinstance(message, dict):
+        raise ValueError("Wire message must be an object")
+    if {"id", "request_only", "content_ref"} & set(message):
+        raise ValueError("Wire message conflicts with normalized trace metadata")
+    return dict(copy.deepcopy(message), id=message_id)
 
 
 def _map_input_messages(
-    input_messages: Iterable[Dict[str, str]],
-    history: List[Dict[str, str]],
+    input_messages: Iterable[Dict[str, Any]],
+    history: List[Dict[str, Any]],
     message_records: List[Dict[str, object]],
 ) -> List[str]:
     """Map a request snapshot to history IDs, interning trimmed request-only messages."""
@@ -187,14 +200,9 @@ def _map_input_messages(
             search_from = match + 1
             continue
         message_id = f"x{sum(str(record['id']).startswith('x') for record in message_records) + 1:04d}"
-        message_records.append(
-            {
-                "id": message_id,
-                "role": key[0],
-                "content": key[1],
-                "request_only": True,
-            }
-        )
+        record = _message_record(message, message_id)
+        record["request_only"] = True
+        message_records.append(record)
         refs.append(message_id)
     return refs
 
@@ -220,12 +228,24 @@ def _termination_code(reason: Optional[str], aborted: bool) -> str:
 
 def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, object]:
     """Normalize an internal loop result into the public v2 artifact."""
+    if not isinstance(result, dict):
+        raise ValueError("Trace v2 result must be an object")
     capture = result.get("_trace_v2_capture")
     runtime = result.get("_trace_v2_runtime")
     if not isinstance(capture, dict) or not isinstance(runtime, dict):
         raise ValueError("Trace v2 capture/runtime metadata is missing")
+    if not isinstance(result.get("messages"), list) or not isinstance(result.get("job"), dict):
+        raise ValueError("Trace v2 history/job must be an array/object")
+    if not isinstance(result.get("score_check"), dict) or type(result.get("aborted")) is not bool:
+        raise ValueError("Trace v2 score_check/aborted must be an object/boolean")
+    if result.get("answer_metrics") is not None and not isinstance(result["answer_metrics"], dict):
+        raise ValueError("Trace v2 answer_metrics must be an object or null")
+    for field in ("llm_calls", "tool_calls"):
+        if not isinstance(capture.get(field), list) or not all(isinstance(item, dict) for item in capture[field]):
+            raise ValueError("Trace v2 capture " + field + " must be an array of objects")
+    capture, runtime = copy.deepcopy(capture), copy.deepcopy(runtime)
 
-    history: List[Dict[str, str]] = list(result["messages"])
+    history: List[Dict[str, Any]] = copy.deepcopy(result["messages"])
     captured_tools: List[Dict[str, object]] = list(capture.get("tool_calls") or [])
     tool_by_message: Dict[int, str] = {}
     for index, tool in enumerate(captured_tools, start=1):
@@ -235,29 +255,30 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
 
     messages: List[Dict[str, object]] = []
     for index, message in enumerate(history):
-        record: Dict[str, object] = {
-            "id": f"m{index + 1:04d}",
-            "role": message["role"],
-        }
+        record = _message_record(message, f"m{index + 1:04d}")
         tool_id = tool_by_message.get(index)
-        if tool_id is not None:
+        # Graph injection may have augmented the stored observation. A content
+        # reference is lossless only when the actual wire text is identical.
+        if (tool_id is not None and "observation" in captured_tools[int(tool_id[4:]) - 1]
+                and message.get("content") == captured_tools[int(tool_id[4:]) - 1]["observation"]):
+            record.pop("content")
             record["content_ref"] = {
                 "kind": "tool_observation",
                 "tool_call_id": tool_id,
             }
-        else:
-            record["content"] = message["content"]
         messages.append(record)
 
     llm_calls: List[Dict[str, object]] = []
     for index, captured in enumerate(capture.get("llm_calls") or [], start=1):
+        if not isinstance(captured.get("input_messages"), list):
+            raise ValueError("Trace v2 captured input_messages must be an array")
         call: Dict[str, object] = {
             "id": f"llm{index:04d}",
             "input_message_ids": _map_input_messages(
                 captured.get("input_messages") or [], history, messages
             ),
             "output_message_id": None,
-            "forced": bool(captured.get("forced")),
+            "forced": captured.get("forced"),
             "latency_seconds": captured.get("latency_seconds"),
             "request_attempts": captured.get("request_attempts", 1),
             "usage": captured.get("usage") or {},
@@ -267,6 +288,9 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
             call["output_message_id"] = f"m{output_index + 1:04d}"
         if "raw_output" in captured:
             call["raw_output"] = captured["raw_output"]
+        for optional in ("output_message", "finish_reason", "attempt_usage"):
+            if optional in captured:
+                call[optional] = copy.deepcopy(captured[optional])
         llm_calls.append(call)
 
     tool_calls: List[Dict[str, object]] = []
@@ -285,9 +309,10 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
             "simulated_cost_seconds": captured["simulated_cost_seconds"],
             "visible_to_model": captured["visible_to_model"],
         }
-        for optional in ("observation", "withheld_result", "structured_result"):
+        for optional in ("observation", "withheld_result", "structured_result", "response_kind",
+                         "raw_arguments", "canonical_argument", "included_in_eval_records", "tool_result"):
             if optional in captured:
-                tool[optional] = captured[optional]
+                tool[optional] = copy.deepcopy(captured[optional])
         tool_calls.append(tool)
 
     output_message_ids = [
@@ -299,36 +324,50 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
     score: Dict[str, object]
     if isinstance(result.get("answer_metrics"), dict):
         score = {
-            "metrics": result["answer_metrics"],
+            "metrics": copy.deepcopy(result["answer_metrics"]),
             "primary_metric": "label_acc",
         }
     else:
         score = {"value": result.get("answer_perf")}
 
-    answer_source = capture.get("answer_source")
+    answer_source = result.get("answer_source", capture.get("answer_source"))
+    score_source = result.get("answer_score_source")
+    if score_source == "offline_final_answer":
+        score_cost_basis = "offline_final_answer"
+    elif score_source == "answer_evaluator":
+        score_cost_basis = "total_simulated_cost"
+    else:
+        score_cost_basis = ("total_simulated_cost"
+                            if result.get("answer_metrics") is not None or not result.get("eval_records")
+                            else "matching_tool_call")
     outcome: Dict[str, object] = {
         "status": "terminated" if result.get("aborted") else "completed",
         "termination_reason": _termination_code(
             capture.get("termination_reason"), bool(result.get("aborted"))
         ),
         "answer_source": answer_source,
+        # Store the evaluated final answer explicitly: native final answers must
+        # not be reconstructed later by reparsing assistant prose.
+        "answer": copy.deepcopy(result.get("answer")),
+        "answer_overhead": result.get("answer_overhead"),
         "answer_message_id": answer_message_id,
         "score": score,
-        "score_cost_basis": (
-            "total_simulated_cost"
-            if result.get("answer_metrics") is not None or not result.get("eval_records")
-            else "matching_tool_call"
-        ),
+        "score_cost_basis": score_cost_basis,
         "validation": {
-            "passed": bool((result.get("score_check") or {}).get("ok")),
+            "passed": result["score_check"].get("ok"),
             "method": "repository_score_recompute",
         },
     }
+    if score_source is not None:
+        outcome["answer_score_source"] = score_source
+    for optional in ("tool_protocol", "tuning_final_policy", "protocol_failures", "protocol_retries", "agent_steps", "http_request_attempts"):
+        if optional in result:
+            outcome[optional] = copy.deepcopy(result[optional])
     if answer_source == "best_evaluated_fallback":
         outcome["answer_override"] = result.get("answer")
 
     cost = result.get("cost_regime_resolved") or {}
-    task = _task_metadata(result["job"], repo_root)
+    task = _task_metadata(copy.deepcopy(result["job"]), repo_root)
     task["budget"] = {
         "regime": result["job"].get("cost_regime"),
         "mode": cost.get("mode"),
@@ -354,8 +393,92 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
         "outcome": outcome,
         "timing": {"wall_time_seconds": result.get("wall_time_seconds")},
     }
+    for source, target in (("total_overhead", "total_simulated_cost_seconds"),
+                           ("llm_time", "llm_latency_seconds"), ("eval_time", "tool_simulated_cost_seconds")):
+        if source in result:
+            trace["timing"][target] = result[source]
     validate_trace_v2(trace)
     return trace
+
+
+def _schema_errors(value: Any, rule: Dict[str, Any], schema: Dict[str, Any], path: str) -> List[str]:
+    """Evaluate the small, explicit JSON Schema vocabulary used by our schema.
+
+    Avoid a new dependency in the Python 3.7 HPO runtime. Unsupported keywords
+    fail closed, so extending the schema cannot silently weaken validation.
+    This is not intended as a general JSON Schema implementation.
+    """
+    supported = {"$schema", "$id", "$defs", "$ref", "title", "description", "type", "const",
+                 "enum", "required", "properties", "additionalProperties", "items", "oneOf",
+                 "anyOf", "allOf", "not", "minimum", "maximum", "minLength"}
+    unknown = set(rule) - supported
+    if unknown:
+        raise ValueError("Unsupported trace schema keywords: " + str(sorted(unknown)))
+    errors: List[str] = []
+    if "$ref" in rule:
+        ref = rule["$ref"]
+        if not ref.startswith("#/$defs/") or ref[8:] not in schema["$defs"]:
+            raise ValueError("Unsupported trace schema reference: " + ref)
+        errors.extend(_schema_errors(value, schema["$defs"][ref[8:]], schema, path))
+    types = rule.get("type")
+    checks = {"object": isinstance(value, dict), "array": isinstance(value, list),
+              "string": isinstance(value, str), "null": value is None, "boolean": type(value) is bool,
+              "integer": isinstance(value, int) and not isinstance(value, bool),
+              "number": ((isinstance(value, int) and not isinstance(value, bool))
+                         or (isinstance(value, float) and math.isfinite(value)))}
+    if types is not None and not any(checks[name] for name in ([types] if isinstance(types, str) else types)):
+        return errors + [f"{path} must have type {types}"]
+    if "const" in rule and (type(value) is not type(rule["const"]) or value != rule["const"]):
+        errors.append(f"{path} must equal {rule['const']!r}")
+    if "enum" in rule and not any(type(value) is type(option) and value == option for option in rule["enum"]):
+        errors.append(f"{path} is outside the supported enum")
+    for branch in rule.get("allOf", []):
+        errors.extend(_schema_errors(value, branch, schema, path))
+    for keyword in ("oneOf", "anyOf"):
+        if keyword in rule:
+            matches = sum(not _schema_errors(value, branch, schema, path) for branch in rule[keyword])
+            if (keyword == "oneOf" and matches != 1) or (keyword == "anyOf" and matches == 0):
+                errors.append(f"{path} does not satisfy {keyword}")
+    if "not" in rule and not _schema_errors(value, rule["not"], schema, path):
+        errors.append(f"{path} contains a forbidden field combination")
+    if isinstance(value, dict):
+        for field in rule.get("required", []):
+            if field not in value:
+                errors.append(f"{path} missing required field {field}")
+        properties = rule.get("properties", {})
+        for field, item in value.items():
+            if field in properties:
+                errors.extend(_schema_errors(item, properties[field], schema, f"{path}.{field}"))
+            elif rule.get("additionalProperties") is False:
+                errors.append(f"{path} has unexpected field {field}")
+            elif isinstance(rule.get("additionalProperties"), dict):
+                errors.extend(_schema_errors(item, rule["additionalProperties"], schema, f"{path}.{field}"))
+    if isinstance(value, list) and "items" in rule:
+        for index, item in enumerate(value):
+            errors.extend(_schema_errors(item, rule["items"], schema, f"{path}[{index}]"))
+    if isinstance(value, str) and len(value) < rule.get("minLength", 0):
+        errors.append(f"{path} must be nonempty")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in rule and value < rule["minimum"]:
+            errors.append(f"{path} is below its minimum")
+        if "maximum" in rule and value > rule["maximum"]:
+            errors.append(f"{path} exceeds its maximum")
+    return errors
+
+
+def _strict_json_errors(value: Any, path: str = "trace") -> List[str]:
+    if value is None or isinstance(value, (str, bool, int)):
+        return []
+    if isinstance(value, float):
+        return [] if math.isfinite(value) else [f"{path} is not finite"]
+    if isinstance(value, list):
+        return [error for index, item in enumerate(value)
+                for error in _strict_json_errors(item, f"{path}[{index}]")]
+    if isinstance(value, dict):
+        return [error for key, item in value.items()
+                for error in ([f"{path} has a non-string object key"] if not isinstance(key, str)
+                              else _strict_json_errors(item, f"{path}.{key}"))]
+    return [f"{path} is not a strict JSON value"]
 
 
 def _id_map(records: Iterable[Dict[str, object]], label: str, errors: List[str]) -> Dict[str, Dict[str, object]]:
@@ -372,38 +495,30 @@ def _id_map(records: Iterable[Dict[str, object]], label: str, errors: List[str])
 
 
 def validate_trace_v2(trace: Dict[str, object]) -> None:
-    """Validate v2 shape and all cross-record references."""
-    errors: List[str] = []
-    required = {
-        "schema", "trace_id", "provenance", "run", "task", "messages",
-        "llm_calls", "tool_calls", "outcome", "timing",
-    }
-    legacy = {"steps", "tool_records", "eval_records", "answer", "score_check"}
-    missing = required - set(trace)
-    if missing:
-        errors.append(f"missing root fields: {sorted(missing)}")
-    present_legacy = legacy & set(trace)
-    if present_legacy:
-        errors.append(f"legacy duplicated fields are forbidden: {sorted(present_legacy)}")
-    schema = trace.get("schema") or {}
-    if not isinstance(schema, dict) or schema.get("name") != TRACE_SCHEMA_NAME or schema.get("version") != TRACE_SCHEMA_VERSION:
-        errors.append("unsupported schema name/version")
-
-    messages = trace.get("messages") if isinstance(trace.get("messages"), list) else []
-    llm_calls = trace.get("llm_calls") if isinstance(trace.get("llm_calls"), list) else []
-    tool_calls = trace.get("tool_calls") if isinstance(trace.get("tool_calls"), list) else []
+    """Validate strict artifact shape and references; this does not rescore it."""
+    schema_path = Path(__file__).resolve().parents[1] / "schemas" / "trace-v2.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    try:
+        errors = _strict_json_errors(trace)
+        errors.extend(_schema_errors(trace, schema, schema, "trace"))
+    except (RecursionError, OverflowError) as exc:
+        raise ValueError("Invalid ExpGym trace v2: non-JSON recursion/numeric representation") from exc
+    # No cross-reference code may dereference unvalidated containers or IDs.
+    if errors:
+        raise ValueError("Invalid ExpGym trace v2:\n- " + "\n- ".join(errors))
+    messages, llm_calls, tool_calls = trace["messages"], trace["llm_calls"], trace["tool_calls"]
     message_map = _id_map(messages, "message", errors)
     llm_map = _id_map(llm_calls, "llm call", errors)
     tool_map = _id_map(tool_calls, "tool call", errors)
 
     for message_id, message in message_map.items():
-        has_content = "content" in message
-        has_ref = "content_ref" in message
-        if has_content == has_ref:
-            errors.append(f"{message_id} must contain exactly one of content/content_ref")
         ref = message.get("content_ref")
-        if isinstance(ref, dict) and ref.get("tool_call_id") not in tool_map:
-            errors.append(f"{message_id} references unknown tool call")
+        if ref is not None:
+            tool = tool_map.get(ref["tool_call_id"])
+            if tool is None:
+                errors.append(f"{message_id} references unknown tool call")
+            elif "observation" not in tool or tool.get("result_message_id") != message_id:
+                errors.append(f"{message_id} content_ref does not identify its recorded observation")
     for call_id, call in llm_map.items():
         for message_id in call.get("input_message_ids") or []:
             if message_id not in message_map:
@@ -411,53 +526,135 @@ def validate_trace_v2(trace: Dict[str, object]) -> None:
         output_id = call.get("output_message_id")
         if output_id is not None and output_id not in message_map:
             errors.append(f"{call_id} references unknown output message {output_id}")
+        elif output_id is not None and message_map[output_id]["role"] != "assistant":
+            errors.append(f"{call_id} output message must be assistant")
+        if "output_message" in call and call["output_message"]["role"] != "assistant":
+            errors.append(f"{call_id} provider output_message must be assistant")
         cache = ((call.get("usage") or {}).get("cache") or {})
         if not cache.get("reported") and (
             cache.get("read_tokens") is not None or cache.get("write_tokens") is not None
         ):
             errors.append(f"{call_id} has cache tokens but reported=false")
+        if "attempt_usage" in call:
+            attempts = call["attempt_usage"]
+            # [] explicitly means this backend supplied no per-attempt data
+            # (e.g. FakeLLM), not zero HTTP attempts or zero token usage.
+            if attempts and (len(attempts) != call["request_attempts"] or [item["attempt"] for item in attempts] != list(range(1, call["request_attempts"] + 1))):
+                errors.append(f"{call_id} attempt_usage does not cover every request attempt in order")
     for tool_id, tool in tool_map.items():
         if tool.get("request_message_id") not in message_map:
             errors.append(f"{tool_id} references unknown request message")
+        elif message_map[tool["request_message_id"]]["role"] != "assistant":
+            errors.append(f"{tool_id} request message must be assistant")
         result_id = tool.get("result_message_id")
         if result_id is not None and result_id not in message_map:
             errors.append(f"{tool_id} references unknown result message")
-        if bool(tool.get("visible_to_model")) != (result_id is not None):
+        elif result_id is not None and message_map[result_id]["role"] not in ("user", "tool"):
+            errors.append(f"{tool_id} result message must be user or tool")
+        if tool["visible_to_model"] and result_id is None:
             errors.append(f"{tool_id} visibility/result reference mismatch")
-    outcome = trace.get("outcome") or {}
-    if isinstance(outcome, dict):
-        answer_id = outcome.get("answer_message_id")
-        if answer_id is not None and answer_id not in message_map:
-            errors.append("outcome references unknown answer message")
-        if not ((outcome.get("validation") or {}).get("passed")):
-            errors.append("score validation did not pass")
-    try:
-        json.dumps(trace, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        errors.append(f"not strict JSON: {exc}")
+        if not tool["visible_to_model"] and result_id is not None:
+            if tool.get("response_kind") != "withheld_notice" or "observation" not in tool:
+                errors.append(f"{tool_id} invisible result message requires an explicit withheld_notice")
+            elif tool["observation"] not in (
+                "Observation: [over-budget — result withheld. This evaluation reached or exceeded the time budget.]",
+                "Observation: [over-budget — result withheld. This evaluation exceeded the time budget.]",
+            ):
+                errors.append(f"{tool_id} withheld_notice must contain only the fixed withheld observation")
+            elif not errors and result_id in message_map and materialize_message(trace, result_id).get("content") != tool["observation"]:
+                errors.append(f"{tool_id} withheld notice differs from recorded observation")
+        if tool.get("included_in_eval_records") is True and (not tool["visible_to_model"] or tool["performance"] is None):
+            errors.append(f"{tool_id} cannot include an unobserved/non-numeric evaluation")
+    outcome = trace["outcome"]
+    answer_id = outcome["answer_message_id"]
+    if answer_id is not None and answer_id not in message_map:
+        errors.append("outcome references unknown answer message")
+    elif answer_id is not None and message_map[answer_id]["role"] != "assistant":
+        errors.append("outcome answer message must be assistant")
+    if outcome.get("answer_score_source") == "offline_final_answer" and outcome.get("score_cost_basis") == "matching_tool_call":
+        errors.append("offline final answer must not claim matching_tool_call score cost basis")
+    score = outcome["score"]
+    if "metrics" in score and (score["primary_metric"] not in score["metrics"] or score["metrics"][score["primary_metric"]] is None):
+        errors.append("outcome primary_metric must identify a numeric score")
     if errors:
         raise ValueError("Invalid ExpGym trace v2:\n- " + "\n- ".join(errors))
 
 
-def materialize_message(trace: Dict[str, object], message_id: str) -> Dict[str, str]:
-    """Resolve a normalized message into the exact role/content sent on the wire."""
+def materialize_message(trace: Dict[str, object], message_id: str) -> Dict[str, Any]:
+    """Resolve a message without coercing nulls or dropping native wire fields."""
     messages = {record["id"]: record for record in trace["messages"]}
     tools = {record["id"]: record for record in trace["tool_calls"]}
     record = messages[message_id]
-    if "content" in record:
-        content = record["content"]
-    else:
+    result = {key: copy.deepcopy(value) for key, value in record.items()
+              if key not in {"id", "content_ref", "request_only"}}
+    if "content_ref" in record:
         tool_id = record["content_ref"]["tool_call_id"]
-        content = tools[tool_id]["observation"]
-    return {"role": str(record["role"]), "content": str(content)}
+        result["content"] = copy.deepcopy(tools[tool_id]["observation"])
+    return result
 
 
-def materialize_llm_input(trace: Dict[str, object], call_id: str) -> List[Dict[str, str]]:
+def materialize_llm_input(trace: Dict[str, object], call_id: str) -> List[Dict[str, Any]]:
     calls = {record["id"]: record for record in trace["llm_calls"]}
     return [
         materialize_message(trace, message_id)
         for message_id in calls[call_id]["input_message_ids"]
     ]
+
+
+def result_for_score_check(trace: Dict[str, object]) -> Dict[str, Any]:
+    """Restore evaluator inputs, failing closed when old traces lost evidence.
+
+    Reading an old v2 artifact remains supported. Restoring a score check is
+    stricter: formatted observation prose cannot reconstruct a raw tool result.
+    This function never invokes a model/tool or trusts validation.passed as a
+    substitute for the caller's independent repository score recomputation.
+    """
+    validate_trace_v2(trace)
+    outcome, score = trace["outcome"], trace["outcome"]["score"]
+    if "total_simulated_cost_seconds" not in trace["timing"]:
+        raise ValueError("Cannot restore exact cost without timing.total_simulated_cost_seconds")
+    if "answer" in outcome:
+        answer = copy.deepcopy(outcome["answer"])
+    elif "answer_override" in outcome:
+        answer = copy.deepcopy(outcome["answer_override"])
+    else:
+        protocol = (trace["run"].get("protocol") or {}).get("tool_protocol")
+        native_messages = any(message.get("role") == "tool" or message.get("tool_calls") for message in trace["messages"])
+        if outcome.get("tool_protocol") == "native" or protocol == "native" or native_messages:
+            raise ValueError("Cannot restore native final answer without outcome.answer")
+        message_id = outcome["answer_message_id"]
+        content = materialize_message(trace, message_id).get("content") if message_id else None
+        if not isinstance(content, str):
+            raise ValueError("Cannot restore historical final answer")
+        from expgym.react_loop import _extract_answer
+        answer = _extract_answer(content) or content.strip()
+    tool_records, eval_records = [], []
+    for tool in trace["tool_calls"]:
+        if "raw_arguments" not in tool or "tool_result" not in tool:
+            raise ValueError("Cannot restore exact historical tool_records; raw_arguments/tool_result missing")
+        argument, output = tool["raw_arguments"], copy.deepcopy(tool["tool_result"])
+        tool_records.append((tool["name"], argument, output))
+        if "included_in_eval_records" not in tool:
+            raise ValueError("Cannot restore evaluation visibility without included_in_eval_records")
+        if tool["included_in_eval_records"]:
+            if "canonical_argument" not in tool:
+                raise ValueError("Cannot restore evaluation without canonical_argument")
+            eval_records.append((argument, tool["canonical_argument"], tool["performance"], tool["simulated_cost_seconds"]))
+    metrics = copy.deepcopy(score.get("metrics"))
+    result = {
+        "answer": answer,
+        "answer_perf": metrics[score["primary_metric"]] if metrics is not None else score.get("value"),
+        "answer_metrics": metrics, "answer_overhead": outcome.get("answer_overhead"),
+        "tool_records": tool_records, "eval_records": eval_records,
+        "total_overhead": trace["timing"]["total_simulated_cost_seconds"],
+        "evaluations": len(trace["tool_calls"]), "api_calls": len(trace["llm_calls"]),
+        "aborted": outcome["status"] == "terminated", "termination_reason": outcome["termination_reason"],
+        "answer_source": outcome["answer_source"], "answer_score_source": outcome.get("answer_score_source"),
+        "messages": [materialize_message(trace, message["id"]) for message in trace["messages"] if not message.get("request_only")],
+    }
+    if "tuning_final_policy" in outcome:
+        result["tuning_final_policy"] = outcome["tuning_final_policy"]
+    return result
 
 
 def load_trace_v2(path: Path) -> Dict[str, object]:

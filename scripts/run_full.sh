@@ -16,6 +16,14 @@ BACKEND="${EXPGYM_BACKEND:-}"
 MODEL="${EXPGYM_MODEL:-}"
 OUTPUT_DIR=""
 AGENTS=4
+POOL_REPEATS=1
+MAX_STEPS=30
+MAX_EVALS=30
+TOOL_PROTOCOL="auto"
+MAX_PROTOCOL_RETRIES=1
+TUNING_FINAL_POLICY="legacy"
+GENERATION_ARGS=()
+SAMPLING_ARGS=()
 STRATEGIES="naive,cached,poolact"
 DRY_RUN=0
 NO_BUILD=0
@@ -34,6 +42,18 @@ Options:
   --model MODEL        One model ID (defaults from the selected backend)
   --output-dir DIR     Repo-relative output root (default: runs/full_<model>)
   --agents N           PoolAct agents (default: 4)
+  --repeats N          Independent N-agent PoolAct repeats (default: 1)
+  --max-steps N        Agent decisions, including protocol repairs (default: 30)
+  --max-evals N        Maximum environment evaluations (default: 30)
+  --tool-protocol NAME auto (default) | native | text
+  --max-protocol-retries N  Malformed-decision repairs within step limit (default: 1)
+  --tuning-final-policy NAME  legacy (default) | submitted (explicit new endpoint policy)
+  --max-tokens N       Optional per-request completion-token limit
+  --top-p P            Nucleus probability in (0, 1] (legacy default: 1.0)
+  --top-k K            Optional -1 (disable) or positive integer; omitted by default
+  --reasoning-effort NAME   Optional provider reasoning effort
+  --chat-template-kwargs JSON  Optional provider template controls
+  --base-url URL       OpenAI-compatible endpoint override
   --strategies LIST    PoolAct strategies (default: naive,cached,poolact)
   --no-build           Reuse the existing HPOBench Docker image
   --dry-run            Print/validate the complete plan; no data/API/Docker calls
@@ -44,7 +64,7 @@ The full ExpGym slice for one model is 303 traces:
   all repeated across cost_free, cost_moderate, and cost_tight.
 
 PoolAct runs the same 9 + 35 + 13 items under all three strategies/regimes;
-the N agents are the repeated parallel samples.
+each --repeats value starts an independent N-agent pool (never a larger pool).
 EOF
 }
 
@@ -55,6 +75,19 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="${2:?--model requires a value}"; shift 2 ;;
     --output-dir) OUTPUT_DIR="${2:?--output-dir requires a value}"; shift 2 ;;
     --agents) AGENTS="${2:?--agents requires a value}"; shift 2 ;;
+    --repeats) POOL_REPEATS="${2:?--repeats requires a value}"; shift 2 ;;
+    --max-steps) MAX_STEPS="${2:?--max-steps requires a value}"; shift 2 ;;
+    --max-evals) MAX_EVALS="${2:?--max-evals requires a value}"; shift 2 ;;
+    --tool-protocol) TOOL_PROTOCOL="${2:?--tool-protocol requires a value}"; shift 2 ;;
+    --max-protocol-retries) MAX_PROTOCOL_RETRIES="${2:?--max-protocol-retries requires a value}"; shift 2 ;;
+    --tuning-final-policy) TUNING_FINAL_POLICY="${2:?--tuning-final-policy requires a value}"; shift 2 ;;
+    --top-p|--top-k)
+      SAMPLING_ARGS+=("$1" "${2:?option requires a value}")
+      GENERATION_ARGS+=("$1" "$2"); shift 2 ;;
+    --top-p=*|--top-k=*)
+      SAMPLING_ARGS+=("$1"); GENERATION_ARGS+=("$1"); shift ;;
+    --max-tokens|--reasoning-effort|--chat-template-kwargs|--base-url)
+      GENERATION_ARGS+=("$1" "${2:?option requires a value}"); shift 2 ;;
     --strategies) STRATEGIES="${2:?--strategies requires a value}"; shift 2 ;;
     --no-build) NO_BUILD=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -73,10 +106,29 @@ case "$BACKEND" in
   *) echo "--backend must be sub2api, openrouter, openai, or fake" >&2; exit 2 ;;
 esac
 
-if [[ ! "$AGENTS" =~ ^[1-9][0-9]*$ ]]; then
-  echo "--agents must be a positive integer" >&2
+for value in "$AGENTS" "$POOL_REPEATS" "$MAX_STEPS" "$MAX_EVALS"; do
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "--agents, --repeats, --max-steps and --max-evals must be positive integers" >&2
+    exit 2
+  fi
+done
+if [[ ! "$MAX_PROTOCOL_RETRIES" =~ ^[0-9]+$ ]]; then
+  echo "--max-protocol-retries must be non-negative" >&2
   exit 2
 fi
+case "$TOOL_PROTOCOL" in
+  auto|native|text) ;;
+  *) echo "--tool-protocol must be auto, native, or text" >&2; exit 2 ;;
+esac
+case "$TUNING_FINAL_POLICY" in
+  submitted|legacy) ;;
+  *) echo "--tuning-final-policy must be submitted or legacy" >&2; exit 2 ;;
+esac
+GENERATION_ARGS+=(
+  --max-steps "$MAX_STEPS" --max-evals "$MAX_EVALS"
+  --tool-protocol "$TOOL_PROTOCOL" --max-protocol-retries "$MAX_PROTOCOL_RETRIES"
+  --tuning-final-policy "$TUNING_FINAL_POLICY"
+)
 
 if [[ -z "$BACKEND" ]]; then
   if [[ -n "${SUB2API_API_KEY:-}" && -n "${SUB2API_BASE_URL:-}" ]]; then
@@ -109,6 +161,13 @@ if [[ ! -x "$VENV_DIR/bin/python" ]]; then
 fi
 PY="$VENV_DIR/bin/python"
 
+# Validate supplied sampling controls before dataset installation or Docker/API work.
+if [[ ${#SAMPLING_ARGS[@]} -gt 0 ]]; then
+  "$PY" -c \
+    'import argparse; from demo_experiment import _add_generation_arguments; p = argparse.ArgumentParser(); _add_generation_arguments(p); p.parse_args()' \
+    "${SAMPLING_ARGS[@]}"
+fi
+
 HPO_TASKS=(
   hpobench:paramnet:adult:steps
   hpobench:paramnet:higgs:steps
@@ -130,6 +189,7 @@ fi
 run_expgym() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     "$PY" scripts/run_paper_sweep.py \
+      "${GENERATION_ARGS[@]}" \
       --backend "$BACKEND" --models "$MODEL" \
       --scenarios tuning,restricted_search,evidence_audit \
       --tuning-tasks all-hpobench --search-indices 0:35 --audit-indices 0:13 \
@@ -140,6 +200,7 @@ run_expgym() {
   fi
 
   "$PY" scripts/run_paper_sweep.py \
+    "${GENERATION_ARGS[@]}" \
     --backend "$BACKEND" --models "$MODEL" \
     --scenarios restricted_search,evidence_audit \
     --search-indices 0:35 --audit-indices 0:13 \
@@ -152,6 +213,7 @@ run_expgym() {
     docker_args+=(--no-build)
   fi
   bash scripts/run_hpobench_docker.sh "${docker_args[@]}" \
+    "${GENERATION_ARGS[@]}" \
     --backend "$BACKEND" --models "$MODEL" \
     --scenarios tuning --tuning-tasks all-hpobench \
     --cost-regimes cost_free,cost_moderate,cost_tight \
@@ -162,14 +224,15 @@ run_expgym() {
 run_poolact() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
     printf 'PoolAct full plan: 3 regimes x (9 HPO tasks + 35 Search + 13 Audit), '
-    printf 'strategies=%s, agents=%s\n' "$STRATEGIES" "$AGENTS"
+    printf 'strategies=%s, agents=%s, independent_repeats=%s\n' "$STRATEGIES" "$AGENTS" "$POOL_REPEATS"
   fi
 
   docker_built=0
   for regime in "${REGIMES[@]}"; do
     common=(
+      "${GENERATION_ARGS[@]}"
       --backend "$BACKEND" --model "$MODEL" --cost-regime "$regime"
-      --strategies "$STRATEGIES" --agents "$AGENTS" --resume
+      --strategies "$STRATEGIES" --agents "$AGENTS" --repeats "$POOL_REPEATS" --resume
     )
     if [[ "$DRY_RUN" -eq 1 ]]; then
       common+=(--dry-run)
@@ -195,9 +258,10 @@ run_poolact() {
         docker_args+=(--no-build)
       fi
       bash scripts/run_hpobench_docker.sh "${docker_args[@]}" \
+        "${GENERATION_ARGS[@]}" \
         --backend "$BACKEND" --model "$MODEL" --scenario tuning \
         --tuning-task "$task" --cost-regime "$regime" \
-        --strategies "$STRATEGIES" --agents "$AGENTS" \
+        --strategies "$STRATEGIES" --agents "$AGENTS" --repeats "$POOL_REPEATS" \
         --output-dir "$OUTPUT_DIR/poolact/$regime/$safe_task" --resume
       docker_built=1
     done

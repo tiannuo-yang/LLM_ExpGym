@@ -8,6 +8,7 @@ import re
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from expgym.react_loop import build_system_prompt as build_react_system_prompt
+from expgym.errors import ToolInputError
 
 # ---------------------------------------------------------------------------
 # Data paths
@@ -62,9 +63,12 @@ def _tokenize(text: str) -> List[str]:
 
 
 def _parse_payload(payload: str) -> Dict[str, object]:
-    data = json.loads(payload)
+    try:
+        data = json.loads(payload)
+    except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+        raise ToolInputError("Payload must be valid JSON.") from exc
     if not isinstance(data, dict):
-        raise ValueError("Payload must be a JSON object.")
+        raise ToolInputError("Payload must be a JSON object.")
     return data
 
 
@@ -300,7 +304,25 @@ def build_tools(
     seed = _resolve_seed(data_source)
     corpus = _load_corpus(seed)
     tools = PhantomSearchTools(corpus)
-    return {"search": tools.search}
+
+    def search(payload: str) -> Tuple[str, float]:
+        return tools.search(payload)
+
+    search.__expgym_tool_schema__ = {
+        "name": "search",
+        "description": (
+            "Search the fictional-character wiki by person name or keyword phrase. "
+            "Return one complete article and its simulated cost; previously returned articles are free."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "minLength": 1,
+                                      "description": "A person name or keyword phrase to search for."}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }
+    return {"search": search}
 
 
 def build_context(
@@ -308,7 +330,10 @@ def build_context(
     *,
     row_index: int = 0,
     data_source: Optional[str] = None,
+    tool_protocol: str = "text",
 ) -> str:
+    if tool_protocol not in ("text", "native"):
+        raise ValueError("build_context tool_protocol must be resolved text or native")
     seed = _resolve_seed(data_source)
     qa_rows = _load_qa(seed)
     if row_index < 0 or row_index >= len(qa_rows):
@@ -335,8 +360,9 @@ def build_context(
         "4. Each search returns one full article. Re-searching a previously returned article is free.",
         "5. Your answer should list ALL matching names, separated by commas.",
         "",
-        "Action format:",
-        '  Action: search {"query": "Person Name"}',
+        "Action format:" if tool_protocol == "text" else "Native tool invocation:",
+        ('  Action: search {"query": "Person Name"}' if tool_protocol == "text" else
+         '  Call the search function with arguments {"query": "Person Name"} using a native tool call.'),
         f"  Answer: Name1, Name2, ...  (there may be 1 to {n_gold} correct answers)",
         "",
         f"Question: {question}",

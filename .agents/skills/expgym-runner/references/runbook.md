@@ -4,13 +4,21 @@ Run all commands from the `LLM_ExpGym` repository root. Inspect each script's `-
 
 ## Setup and no-cost validation
 
+For initial setup only, run `bash scripts/setup.sh --with-data`. For an existing
+study, locate and verify the recorded interpreter/dependency identity first;
+set `EXPGYM_VENV` to that environment, not an assumed default `.venv`:
+
 ```bash
-bash scripts/setup.sh --with-data
-bash scripts/check.sh
-.venv/bin/python scripts/download_data.py --check
+: "${EXPGYM_VENV:?Set the verified experiment environment first}"
+test -x "$EXPGYM_VENV/bin/python" &&
+  EXPGYM_VENV="$EXPGYM_VENV" bash scripts/check.sh &&
+  "$EXPGYM_VENV/bin/python" scripts/download_data.py --check
 ```
 
-`scripts/check.sh` compiles Python, syntax-checks shell, runs the unit/integration suite, then executes fake ExpGym and all three fake PoolAct strategies. HPO native skips are expected when legacy dependencies are absent. A passing fake check does not prove real provider compatibility.
+Do not bypass this existence/identity guard for a frozen continuation:
+`check.sh` automatically invokes setup if its selected Python is missing.
+
+Use setup for an initial environment only; continue a frozen study without reinstalling its dependencies. `scripts/check.sh` compiles Python, syntax-checks shell, runs the unit/integration suite, then executes fake ExpGym and all three fake PoolAct strategies. HPO native skips are expected when legacy dependencies are absent; required ParamNet paths still need separate pinned-runtime validation. A passing fake check does not prove real provider compatibility.
 
 Dataset setup can transiently use roughly 3.2 GiB and retains roughly 215 MiB of HPO data. Downloads are checksum-verified and atomically installed.
 
@@ -180,27 +188,47 @@ for path in paths:
         for a in agents
     ), path
     perf = result.get("aggregate", {}).get("answer_perf")
-    assert isinstance(perf, (int, float)) and math.isfinite(perf), path
+    assert isinstance(perf, (int, float)) and not isinstance(perf, bool) and math.isfinite(perf), path
     state = result.get("shared_state")
+    if path.parent.name == "poolact":
+        assert isinstance(state, dict), path
     if state is not None:
-        assert state.get("pending_claims", 0) == 0, path
+        assert isinstance(state, dict), path
+        graph = state.get("graph")
+        if graph is not None:
+            assert isinstance(graph, dict), path
+            assert type(graph.get("pending_claims")) is int and graph["pending_claims"] == 0, path
+        if path.parent.name == "poolact":
+            assert graph is not None, path
 print(f"validated {len(paths)} PoolAct strategy results")
 PY
 ```
 
-Also require the expected per-agent files, `summary.json`, configuration/source hashes, and the planned count. Run the identical command again with `--resume`; compatible complete results should skip. If changed source, configuration, schema, or scores cause reruns, that is intentional.
+This is only a structural spot-check, not independent re-scoring. Also require the expected per-agent files, `summary.json`, configuration/source/data/dependency hashes, and the planned count. Run the identical command with `--resume` and a no-model-call guard when auditing a supposedly complete run: compatible results should skip after re-scoring, without changing trace or dump bytes. Changed source/configuration/data/schema/scores intentionally invalidate resume; do not silently spend more model calls during an integrity-only audit. Historical readable traces that lack exact scoring inputs cannot be promoted to re-score-verified results.
+
+## Native tools and self-serving acceptance
+
+Inspect the intended model's real template/parser, not only an HTTP health response. A small multi-turn native smoke should obtain information through a tool and demonstrate that the next request preserves the provider's assistant/tool history. Send real schemas for normal `auto` decisions; forced final uses `none` with schemas retained. `--tool-protocol auto` selects native for compatible real clients, while the repository fake backend resolves to text.
+
+Check the complete request from each changed task/runner path, not just its system prompt or a synthetic nonce context. Task-owned Action examples in user messages must agree with the resolved protocol; questions, document segments, and other data may legitimately contain those same words and must not be globally stripped. Distinguish artifact integrity, prompt compatibility, observed native path coverage, and task score in the smoke report. A normal early answer can leave a path unobserved; retain it without automatically resampling for coverage.
+
+The official demo, sweep, and PoolAct runners share protocol-aware task-context construction. Direct library callers should call `resolve_tool_protocol(llm, requested)` from `expgym.tool_protocol`, pass that resolved value to the selected task's `build_context(..., tool_protocol=protocol)`, and use it for `run_react_loop(..., tool_protocol=protocol)`. Builders default to historical text output; the loop does not rewrite arbitrary caller-supplied context, and custom hooks without a protocol argument remain caller-owned.
+
+Use `EXPGYM_API_DUMP_DIR` and a distinct run ID/output directory. Count every transport attempt, record whether token usage is known, and retain delivered malformed decisions and length stops. Do not require nonempty visible `content` for a successful API delivery: a tool-only response is legitimate.
+
+Capture actual device inventory, environment/package and checkpoint identities, effective generation settings, and seed-control observations. Keep model semantics unchanged when selecting attention backends. Seed values without effective sampling control are run labels, not proven repeatability; a separately registered stochastic study remains possible. Never substitute a desired performance trend for implementation acceptance.
 
 ## Common failures
 
 | Symptom | Interpretation and action |
 |---|---|
 | Fake checks pass, real calls fail | Backend/model/auth/response compatibility remains untested. Run exact-model real smoke. |
-| HTTP 200 but assistant content is null/empty | Transient malformed success; rely on bounded retry and inspect attempts. Do not write an empty trace as success. |
+| HTTP 200 but assistant content is null/empty | Inspect native tool calls, reasoning and finish reason. Tool-only delivery can be valid. A delivered empty/length/model-protocol failure is retained, not freely HTTP-resampled; ambiguous malformed envelopes fail explicitly. |
 | 429/5xx/timeout | Retry is expected within configured bounds; reduce concurrency only if the provider is saturated. |
 | `upstream_400_codex_plan_gated_model` | Subscription lacks that exact model. Test an available model or change account; endpoint health is not enough. |
 | Search score is zero | Inspect trace and `score_check`; the model may simply be wrong. |
 | NASBench-101 score is zero | The proposed DAG/config may be invalid. Confirm evaluator integrity before diagnosing infrastructure. |
-| ParamNet import/version failure | Use the pinned Docker wrapper, not the host Python environment. |
+| ParamNet import/version failure | Use the pinned legacy runtime (Docker wrapper when available, or an independently validated equivalent); do not substitute incompatible host dependencies. |
 | Docker cannot reach local Sub2API | Use the wrapper and `host.docker.internal`; confirm daemon and local service are running. |
 | Resume reruns an existing path | Source/config/schema/score fingerprint changed or output is incomplete; inspect manifest rather than forcing a skip. |
 | Short visible trace consumes surprising quota | Count hidden reasoning/completion tokens and retried attempts from provider usage; pilot-measure instead of estimating from printed text. |
@@ -215,5 +243,7 @@ Before a large run:
 3. Read charged usage/call counts from Sub2API or provider records, including retries and hidden reasoning tokens.
 4. Use median and high-percentile charged usage, not only the shortest trace.
 5. Multiply by the exact matrix and add a retry/variance margin. Keep separate estimates for ExpGym, PoolAct main table, and repository PoolAct superset.
+
+For self-serving, additionally measure loading/compilation, tokens and wall time by task/regime/strategy, effective concurrency and allocated GPU-hours. Simulated feedback seconds are not GPU wall time. Do not extrapolate from earlier runs that ended prematurely because of protocol bugs. Independent outer pools are repetitions; agents inside one coordinated pool and Audit hypothesis orders are not independent task samples.
 
 Subscription units are provider policy, not an intrinsic trace property. Do not convert traces to subscriptions without observed account-specific depletion data.

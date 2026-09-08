@@ -1,8 +1,14 @@
 import json
+import os
+import tempfile
 import unittest
 import urllib.error
+from dataclasses import asdict
 from email.message import Message
 from io import BytesIO
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 from expgym.llm_clients import (
     DEFAULT_GEMINI_URL,
@@ -84,6 +90,47 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
         body = json.loads(transport.request.data.decode("utf-8"))
         self.assertNotIn("prompt_cache_key", body)
 
+    def test_reasoning_effort_is_optional_top_level_and_recorded_in_config(self) -> None:
+        for effort in (None, "none", "low", "high", "provider-specific-effort"):
+            with self.subTest(effort=effort):
+                transport = _CaptureTransport({"choices": [{"message": {"content": "Ok"}}]})
+                llm = OpenAICompatibleLLM(
+                    api_key="k", transport=transport, reasoning_effort=effort,
+                    chat_template_kwargs={"some_template_flag": True},
+                )
+                llm.generate("Hi")
+                body = json.loads(transport.request.data.decode("utf-8"))
+                self.assertEqual(asdict(llm.config)["reasoning_effort"], effort)
+                if effort is None:
+                    self.assertNotIn("reasoning_effort", body)
+                else:
+                    self.assertEqual(body["reasoning_effort"], effort)
+                self.assertEqual(body["chat_template_kwargs"], {"some_template_flag": True})
+
+    def test_invalid_reasoning_effort_is_rejected_before_transport(self) -> None:
+        for effort in ("", "  ", 1, False, {"effort": "high"}):
+            with self.subTest(effort=effort):
+                with self.assertRaisesRegex(ValueError, "reasoning_effort"):
+                    OpenAICompatibleLLM(api_key="k", reasoning_effort=effort)
+
+    def test_conflicting_explicit_reasoning_controls_are_rejected(self) -> None:
+        for effort, enabled in (("high", False), ("low", False), ("none", True)):
+            with self.subTest(effort=effort, enabled=enabled):
+                with self.assertRaisesRegex(ValueError, "conflicts with explicit reasoning.enabled"):
+                    OpenAICompatibleLLM(
+                        api_key="k", reasoning_effort=effort, reasoning={"enabled": enabled},
+                    )
+
+    def test_explicit_disabled_reasoning_controls_are_compatible(self) -> None:
+        transport = _CaptureTransport({"choices": [{"message": {"content": "Ok"}}]})
+        llm = OpenAICompatibleLLM(
+            api_key="k", transport=transport, reasoning_effort="none", reasoning={"enabled": False},
+        )
+        llm.generate("Hi")
+        payload = json.loads(transport.request.data.decode("utf-8"))
+        self.assertEqual(payload["reasoning_effort"], "none")
+        self.assertEqual(payload["reasoning"], {"enabled": False})
+
     def test_missing_api_key_raises(self) -> None:
         with self.assertRaises(ValueError):
             OpenAICompatibleLLM(api_key="")
@@ -144,7 +191,7 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
         )
         self.assertEqual(llm._retry_delay(0, headers), 7)
 
-    def test_retries_empty_success_response(self) -> None:
+    def test_empty_delivered_response_is_not_resampled(self) -> None:
         transport = _SequenceTransport(
             [
                 {"choices": [{"message": {"content": None}}]},
@@ -160,21 +207,176 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
 
         output = llm.generate("test")
 
-        self.assertEqual(output.text, "Recovered")
-        self.assertEqual(output.request_attempts, 2)
-        self.assertEqual(transport.calls, 2)
+        self.assertEqual(output.text, "")
+        self.assertEqual(output.request_attempts, 1)
+        self.assertEqual(transport.calls, 1)
+        self.assertIsNone(output.assistant_message["content"])
 
-    def test_empty_response_fails_after_retry_limit(self) -> None:
+    def test_missing_message_fails_without_resampling(self) -> None:
         transport = _CaptureTransport(
-            {"choices": [{"message": {"content": None}}]}
+            {"choices": [{}]}
         )
         llm = OpenAICompatibleLLM(
             api_key="k",
             transport=transport,
-            max_retries=0,
+            max_retries=3,
         )
         with self.assertRaisesRegex(RuntimeError, "missing message content"):
             llm.generate("test")
+
+
+class APIAttemptDumpTest(unittest.TestCase):
+    def _records(self, directory):
+        return [json.loads(path.read_text(encoding="utf-8")) for path in Path(directory).glob("*.json")]
+
+    def test_dump_preserves_raw_reasoning_usage_and_pending_request(self):
+        response = {
+            "id": "chatcmpl-test",
+            "choices": [{"message": {"role": "assistant", "content": " Answer ", "reasoning_content": "reasoning 中文"}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 19, "completion_tokens_details": {"reasoning_tokens": 16}},
+        }
+        raw = json.dumps(response, ensure_ascii=False).encode("utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            def transport(_request, _timeout):
+                pending = self._records(directory)
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["state"], "in_progress")
+                return raw
+
+            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory, "EXPGYM_RUN_ID": "pilot-search-0"}):
+                llm = OpenAICompatibleLLM(
+                    api_key="credential-never-persist", transport=transport,
+                    max_tokens=8192, chat_template_kwargs={"thinking": True},
+                    reasoning_effort="high",
+                    dump_context={"strategy": "poolact", "agent_id": 2},
+                )
+                output = llm.generate("Prompt")
+            self.assertEqual(output.text, "Answer")
+            self.assertEqual(output.completion_tokens, 19)
+            records = self._records(directory)
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertEqual(record["state"], "success")
+            self.assertEqual(record["response_json"], response)
+            self.assertEqual(record["response_raw"], raw.decode("utf-8"))
+            self.assertEqual(record["run_id"], "pilot-search-0")
+            self.assertEqual(record["context"]["agent_id"], 2)
+            self.assertEqual(record["request_payload"]["max_tokens"], 8192)
+            self.assertEqual(record["request_payload"]["chat_template_kwargs"], {"thinking": True})
+            self.assertEqual(record["request_payload"]["reasoning_effort"], "high")
+            self.assertEqual(record["pid"], os.getpid())
+            self.assertIsInstance(record["thread_id"], int)
+            self.assertGreaterEqual(record["wall_time_seconds"], 0)
+            self.assertTrue(record["started_at_utc"])
+            self.assertTrue(record["finished_at_utc"])
+            self.assertFalse(record["will_retry"])
+            self.assertIsNone(record["error"])
+            self.assertFalse(list(Path(directory).glob("*.tmp")))
+
+    def test_every_retry_keeps_response_and_generation_identity(self):
+        responses = [
+            urllib.error.HTTPError("http://fake", 503, "Unavailable", Message(), BytesIO(b'{"error":"down"}')),
+            urllib.error.URLError("connection lost"),
+            b'{"choices":[{"message":{"content":null,"reasoning_content":"truncated"}}]}',
+            b'{"choices":[{"message":{"content":"Recovered"}}]}',
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            def transport(_request, _timeout):
+                response = responses.pop(0)
+                if isinstance(response, Exception):
+                    raise response
+                return response
+
+            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
+                llm = OpenAICompatibleLLM(
+                    api_key="credential-never-persist", transport=transport,
+                    max_retries=3, retry_base_seconds=0,
+                )
+                output = llm.generate("Prompt")
+            records = sorted(self._records(directory), key=lambda record: record["attempt"])
+            # HTTP/connection failures retry, but the delivered reasoning-only
+            # completion must consume a loop decision instead of being replaced.
+            self.assertEqual(output.text, "")
+            self.assertEqual(output.request_attempts, 3)
+            self.assertEqual(len(records), 3)
+            self.assertEqual(len({record["generation_id"] for record in records}), 1)
+            self.assertEqual(len({record["request_id"] for record in records}), 3)
+            self.assertEqual([record["attempt"] for record in records], [1, 2, 3])
+            self.assertTrue(all(record["will_retry"] for record in records[:-1]))
+            self.assertEqual(records[0]["http_status"], 503)
+            self.assertEqual(records[0]["response_json"], {"error": "down"})
+            self.assertEqual(records[1]["error"]["type"], "URLError")
+            self.assertEqual(records[2]["state"], "success")
+            self.assertEqual(records[2]["response_json"]["choices"][0]["message"]["reasoning_content"], "truncated")
+            self.assertFalse(records[2]["will_retry"])
+            self.assertEqual(len(responses), 1)
+            self.assertEqual(len(output.attempt_usage), 3)
+            self.assertTrue(all(record["usage"] is None for record in output.attempt_usage))
+
+    def test_terminal_invalid_response_is_dumped_before_raise(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
+                llm = OpenAICompatibleLLM(
+                    api_key="credential-never-persist", transport=lambda request, timeout: b'bad json \xff',
+                    max_retries=0,
+                )
+                with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                    llm.generate("Prompt")
+            record = self._records(directory)[0]
+            self.assertEqual(record["state"], "malformed_response")
+            self.assertEqual(record["response_raw"], 'bad json \\xff')
+            self.assertFalse(record["will_retry"])
+
+    def test_dump_redacts_credentials_and_never_serializes_headers_or_url_secrets(self):
+        api_key = "credential-never-persist"
+        header_key = "extra-header-credential"
+        response = {
+            "choices": [{"message": {"content": "safe " + api_key + " " + header_key}}],
+            "api_key": "echoed-provider-secret",
+            "details": {"access_token": "provider-token-secret"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
+                llm = OpenAICompatibleLLM(
+                    api_key=api_key, extra_headers={"X-Api-Key": header_key},
+                    base_url="http://username:url-password@fake/v1/chat/completions?key=query-secret",
+                    transport=_CaptureTransport(response),
+                )
+                output = llm.generate("Prompt")
+            self.assertIn(api_key, output.text)  # Redaction only affects the audit dump.
+            paths = list(Path(directory).glob("*.json"))
+            saved = paths[0].read_text(encoding="utf-8")
+            for secret in (api_key, header_key, "echoed-provider-secret", "provider-token-secret", "url-password", "query-secret"):
+                self.assertNotIn(secret, saved)
+            self.assertNotIn("Authorization", saved)
+            self.assertNotIn("X-Api-Key", saved)
+            self.assertEqual(json.loads(saved)["endpoint"], "http://fake/v1/chat/completions")
+
+    def test_concurrent_clients_produce_unique_complete_files(self):
+        transport = _CaptureTransport({"choices": [{"message": {"content": "Answer"}}]})
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
+                clients = [OpenAICompatibleLLM(api_key="credential-never-persist", transport=transport) for _ in range(2)]
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    outputs = list(executor.map(lambda index: clients[index % 2].generate("Prompt"), range(8)))
+            records = self._records(directory)
+            self.assertEqual(len(outputs), 8)
+            self.assertEqual(len(records), 8)
+            self.assertEqual(len({record["request_id"] for record in records}), 8)
+            self.assertEqual(len({record["client_id"] for record in records}), 2)
+            self.assertTrue(all(record["state"] == "success" for record in records))
+            self.assertFalse(list(Path(directory).glob("*.tmp")))
+
+    def test_requested_dump_failure_prevents_undocumented_api_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            invalid_directory = Path(directory) / "a-file"
+            invalid_directory.touch()
+            transport = mock.Mock()
+            with mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": str(invalid_directory)}):
+                llm = OpenAICompatibleLLM(api_key="credential-never-persist", transport=transport)
+                with self.assertRaises(OSError):
+                    llm.generate("Prompt")
+            transport.assert_not_called()
 
 
 class GeminiHelperTest(unittest.TestCase):
@@ -191,6 +393,27 @@ class GeminiHelperTest(unittest.TestCase):
 
 
 class OpenRouterHelperTest(unittest.TestCase):
+    def test_explicit_reasoning_effort_does_not_inherit_disable_reasoning_default(self) -> None:
+        transport = _CaptureTransport({"choices": [{"message": {"content": "OpenRouter"}}]})
+        llm = build_openrouter_client(
+            api_key="orkey", reasoning_effort="high", transport=transport,
+        )
+        llm.generate("Hi")
+        payload = json.loads(transport.request.data.decode("utf-8"))
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertNotIn("reasoning", payload)
+
+    def test_reasoning_effort_does_not_overwrite_explicit_provider_reasoning(self) -> None:
+        transport = _CaptureTransport({"choices": [{"message": {"content": "OpenRouter"}}]})
+        llm = build_openrouter_client(
+            api_key="orkey", reasoning_effort="high", reasoning={"enabled": True},
+            transport=transport,
+        )
+        llm.generate("Hi")
+        payload = json.loads(transport.request.data.decode("utf-8"))
+        self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertEqual(payload["reasoning"], {"enabled": True})
+
     def test_build_openrouter_client_sets_headers(self) -> None:
         payload = {
             "choices": [{"message": {"content": "OpenRouter"}}],

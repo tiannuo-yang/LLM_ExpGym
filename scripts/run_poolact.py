@@ -19,7 +19,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from demo_experiment import (  # noqa: E402
     _SCENARIOS,
+    _add_generation_arguments,
+    _generation_options,
+    _loop_options,
     _call_scenario,
+    _resolve_context,
     _resolve_answer_evaluator,
     _resolve_system_prompt,
     _resolve_tools,
@@ -39,7 +43,8 @@ from expgym.poolact import (  # noqa: E402
     run_agents_parallel,
 )
 from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
-from scripts.run_paper_sweep import _score_result  # noqa: E402
+from scripts.run_paper_sweep import _score_check, _score_result  # noqa: E402
+from expgym.evaluation_identity import bind_evaluation_identity, evaluation_identity  # noqa: E402
 from expgym.trace_v2 import source_tree_sha256  # noqa: E402
 
 
@@ -55,7 +60,7 @@ def _split_strategies(value: str) -> List[str]:
         )
     if not strategies:
         raise argparse.ArgumentTypeError("at least one strategy is required")
-    return strategies
+    return list(dict.fromkeys(strategies))
 
 
 def _parse_indices(value: str) -> List[int]:
@@ -154,8 +159,11 @@ def _agent_namespace(
     namespace = argparse.Namespace(**vars(args))
     namespace.seed = args.seed + agent_id
     namespace.api_key = api_key
+    cache_namespace = args.prompt_cache_key
+    if cache_namespace and getattr(args, "repeats", 1) > 1:
+        cache_namespace = f"{cache_namespace}:repeat={getattr(args, 'repeat_index', 0)}"
     namespace.prompt_cache_key = _agent_cache_key(
-        args.prompt_cache_key,
+        cache_namespace,
         strategy,
         agent_id,
     )
@@ -169,6 +177,19 @@ def _agent_namespace(
     namespace.time_budget = None
     namespace.beta = None
     namespace.baseline = "time_aware"
+    namespace._api_dump_context = {
+        "runner": "poolact",
+        "scenario": args.scenario,
+        "tuning_task": args.tuning_task,
+        "question_index": args.question_index,
+        "cost_regime": args.cost_regime,
+        "strategy": strategy,
+        "agent_id": agent_id,
+        "seed": namespace.seed,
+        "repeat_index": getattr(args, "repeat_index", 0),
+        "repeats": getattr(args, "repeats", 1),
+        "output_dir": str(args.output_dir),
+    }
     return namespace
 
 
@@ -224,7 +245,14 @@ def _resolved_config(
         "strategies": args.strategies,
         "agents": args.agents,
         "seed": args.seed,
+        "base_seed": getattr(args, "base_seed", args.seed),
+        "repeat_index": getattr(args, "repeat_index", 0),
+        "repeats": getattr(args, "repeats", 1),
+        "agent_seeds": [args.seed + agent_id for agent_id in range(args.agents)],
+        "seed_semantics": "requested_per_agent_seed; provider determinism requires separate verification",
         "temperature": args.temperature,
+        **_generation_options(args),
+        **_loop_options(args),
         "max_steps": args.max_steps,
         "max_evals": args.max_evals,
         "max_context_tokens": args.max_context_tokens,
@@ -236,7 +264,20 @@ def _resolved_config(
         "max_retries": args.max_retries,
         "retry_base_seconds": args.retry_base_seconds,
         "retry_max_seconds": args.retry_max_seconds,
+        "evaluation_identity": getattr(args, "_evaluation_identity", None),
     }
+
+
+def _repeat_namespace(args: argparse.Namespace, repeat_index: int) -> argparse.Namespace:
+    """Create one independent pool repetition without changing the pool size."""
+    namespace = argparse.Namespace(**vars(args))
+    namespace.base_seed = args.seed
+    namespace.repeat_index = repeat_index
+    namespace.seed = args.seed + repeat_index * args.agents
+    if args.repeats > 1:
+        namespace.output_dir = args.output_dir / f"repeat_{repeat_index}"
+    return namespace
+
 
 def _batch_strategy_metrics(
     items: Dict[str, Dict[str, Dict[str, Any]]],
@@ -268,6 +309,19 @@ def _is_finite_number(value: Any) -> bool:
     )
 
 
+def _shared_state_is_complete(state: Any) -> bool:
+    if state is None:
+        return True
+    if not isinstance(state, dict):
+        return False
+    graph = state.get("graph", {})
+    return (
+        isinstance(graph, dict)
+        and graph.get("pending_claims", 0) == 0
+        and state.get("pending_claims", 0) == 0
+    )
+
+
 def _load_resumable_result(
     result_path: Path,
     *,
@@ -277,15 +331,22 @@ def _load_resumable_result(
     implementation: Dict[str, str],
     agents: int,
     answer_evaluator: Optional[Callable[..., Any]],
+    score_tools: Optional[Dict[str, Callable[..., Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Load a verified PoolAct completion marker, or return ``None``."""
     try:
         existing = json.loads(result_path.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            return None
         if existing.get("config") != config:
+            return None
+        if not isinstance(config.get("evaluation_identity"), dict):
             return None
         if existing.get("implementation_sha256") != implementation:
             return None
         if existing.get("strategy") != strategy or existing.get("agents") != agents:
+            return None
+        if not _shared_state_is_complete(existing.get("shared_state")):
             return None
         embedded_agents = existing.get("agent_results")
         if not isinstance(embedded_agents, list) or len(embedded_agents) != agents:
@@ -297,15 +358,20 @@ def _load_resumable_result(
             return None
         for agent_id in range(agents):
             agent = by_id[agent_id]
-            if (agent.get("score_check") or {}).get("ok") is not True:
+            score_check = agent.get("score_check")
+            if not isinstance(score_check, dict) or score_check.get("ok") is not True:
+                return None
+            if "tuning_final_policy" in config and agent.get("tuning_final_policy") != config["tuning_final_policy"]:
                 return None
             agent_path = (
                 item_output_dir / strategy / "agents" / f"agent_{agent_id}.json"
             )
             if json.loads(agent_path.read_text(encoding="utf-8")) != agent:
                 return None
-        aggregate = existing.get("aggregate") or {}
-        if not _is_finite_number(aggregate.get("answer_perf")):
+            if _score_check(agent, score_tools or {}, answer_evaluator).get("ok") is not True:
+                return None
+        aggregate = existing.get("aggregate")
+        if not isinstance(aggregate, dict) or not _is_finite_number(aggregate.get("answer_perf")):
             return None
         recomputed_aggregate = aggregate_results(
             str(config["scenario"]),
@@ -331,8 +397,9 @@ def _run_strategy(
     coordinator = (
         PoolActCoordinator(args.agents) if strategy == "poolact" else None
     )
+    runtimes: Dict[int, Any] = {}
 
-    def run_agent(agent_id: int) -> Dict[str, Any]:
+    def execute_agent(agent_id: int) -> Dict[str, Any]:
         namespace = _agent_namespace(args, strategy, agent_id, api_key)
         tools = _resolve_tools(scenario, namespace)
         direct_tools = tools
@@ -347,9 +414,11 @@ def _run_strategy(
                 cache,
                 clock=clock,
                 overhead_scale=1.0,
+                time_budget=time_budget,
             )
         elif strategy == "poolact":
-            runtime = coordinator.bind_tools(tools, agent_id)
+            runtime = coordinator.bind_tools(tools, agent_id, time_budget=time_budget)
+            runtimes[agent_id] = runtime
             tools = runtime.tools
             clock = runtime.clock
             augmenter = runtime.observation_augmenter
@@ -363,11 +432,6 @@ def _run_strategy(
             include_overhead,
             namespace,
         ) or build_system_prompt()
-        context = _call_scenario(
-            scenario["build_context"],
-            include_overhead,
-            namespace,
-        )
         instruction_notes = _call_scenario(
             scenario["build_instruction_notes"],
             include_overhead,
@@ -388,6 +452,7 @@ def _run_strategy(
             namespace,
             system_prompt=system_prompt,
         )
+        context = _resolve_context(scenario, include_overhead, namespace, llm)
         answer_evaluator = _resolve_answer_evaluator(scenario, namespace)
         started = time.perf_counter()
         result = run_react_loop(
@@ -408,10 +473,15 @@ def _run_strategy(
             pre_tool_hook=pre_tool_hook,
             llm_lock=reasoning_lock,
             capture_trace_v2=False,
+            **_loop_options(namespace),
         )
         result["wall_time_seconds"] = time.perf_counter() - started
+        dump_metadata = getattr(llm, "dump_metadata", None)
+        if dump_metadata is not None:
+            result["api_dump"] = dict(dump_metadata)
         result["agent_id"] = agent_id
         result["seed"] = namespace.seed
+        result["repeat_index"] = getattr(args, "repeat_index", 0)
         result["strategy"] = strategy
         result["score_check"] = _score_result(
             result,
@@ -421,6 +491,16 @@ def _run_strategy(
         if coordinator is not None and result.get("answer"):
             coordinator.graph.record_end(agent_id, str(result["answer"]))
         return result
+
+    def run_agent(agent_id: int) -> Dict[str, Any]:
+        try:
+            return execute_agent(agent_id)
+        finally:
+            runtime = runtimes.get(agent_id)
+            if runtime is not None:
+                coordinator.graph.complete_agent_claims(
+                    agent_id, completion_time=runtime.clock.now,
+                )
 
     agent_results = run_agents_parallel(args.agents, run_agent)
     failed_agents = [
@@ -443,6 +523,8 @@ def _run_strategy(
         state = {"cache": cache.stats()}
     if coordinator is not None:
         state = coordinator.stats()
+    if not _shared_state_is_complete(state):
+        raise RuntimeError("shared state contains unfinished pending claims")
     return {
         "strategy": strategy,
         "agents": args.agents,
@@ -454,6 +536,7 @@ def _run_strategy(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    _add_generation_arguments(parser)
     parser.add_argument(
         "--backend",
         choices=["fake", "openai", "gemini", "openrouter", "sub2api", "vllm"],
@@ -496,9 +579,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--strategies", type=_split_strategies, default=["poolact"])
     parser.add_argument("--agents", type=int, default=2)
+    parser.add_argument(
+        "--repeats", type=int, default=1,
+        help="Independent N-agent pools, with seeds base_seed + repeat_index * N + agent_id.",
+    )
     parser.add_argument("--seed", type=int, default=1206)
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--max-steps", type=int, default=30)
     parser.add_argument("--max-evals", type=int, default=30)
     parser.add_argument("--max-context-tokens", type=int, default=None)
     parser.add_argument("--request-timeout", type=float, default=600.0)
@@ -524,6 +611,8 @@ def main() -> int:
         )
     if args.agents < 1:
         raise SystemExit("--agents must be at least 1")
+    if args.repeats < 1:
+        raise SystemExit("--repeats must be at least 1")
     if args.max_steps < 1:
         raise SystemExit("--max-steps must be at least 1")
     if args.max_evals < 1:
@@ -559,14 +648,23 @@ def main() -> int:
     mode = baselines[0]
     if args.dry_run:
         configs = []
-        for question_index in question_indices:
-            item_args = argparse.Namespace(**vars(args))
-            item_args.question_index = question_index
-            item_args.questions = None
-            configs.append(_resolved_config(item_args, time_budget))
-        preview: object = configs[0] if args.questions is None else {
+        for repeat_index in range(args.repeats):
+            for question_index in question_indices:
+                item_args = _repeat_namespace(args, repeat_index)
+                item_args.question_index = question_index
+                item_args.questions = None
+                config = _resolved_config(item_args, time_budget)
+                config["output_dir"] = str(
+                    item_args.output_dir / f"item_{question_index}"
+                    if args.questions is not None else item_args.output_dir
+                )
+                configs.append(config)
+        preview: object = configs[0] if args.questions is None and args.repeats == 1 else {
             "batch": True,
             "question_indices": question_indices,
+            "repeats": args.repeats,
+            "item_strategy_runs": len(configs) * len(args.strategies),
+            "agent_traces": len(configs) * len(args.strategies) * args.agents,
             "items": configs,
         }
         print(json.dumps(preview, indent=2, sort_keys=True))
@@ -574,22 +672,66 @@ def main() -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     implementation = _implementation_manifest()
+    repetitions: Dict[str, Dict[str, Any]] = {}
+    observations: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for repeat_index in range(args.repeats):
+        repeat_args = _repeat_namespace(args, repeat_index)
+        summary = _run_items(
+            repeat_args, question_indices, api_key, time_budget, mode, implementation,
+        )
+        repetitions[str(repeat_index)] = summary
+        if args.questions is None:
+            observations[f"repeat_{repeat_index}/item_{question_indices[0]}"] = summary["strategies"]
+        else:
+            observations.update({
+                f"repeat_{repeat_index}/item_{item}": strategies
+                for item, strategies in summary["items"].items()
+            })
+    if args.repeats > 1:
+        _atomic_json(args.output_dir / "summary.json", {
+            "config": {
+                **_resolved_config(args, time_budget),
+                "question_indices": question_indices,
+            },
+            "implementation_sha256": implementation,
+            "repeats": repetitions,
+            "strategy_metrics": _batch_strategy_metrics(observations, args.strategies),
+            "aggregation_unit": "item_by_independent_pool_repeat; agents are never pooled across repeats",
+            "item_strategy_runs": len(observations) * len(args.strategies),
+            "agent_traces": len(observations) * len(args.strategies) * args.agents,
+        })
+    return 0
+
+
+def _run_items(
+    args: argparse.Namespace,
+    question_indices: List[int],
+    api_key: Optional[str],
+    time_budget: Optional[float],
+    mode: str,
+    implementation: Dict[str, str],
+) -> Dict[str, Any]:
+    """Run the original single-repeat item batch; every call owns fresh pools."""
     batch_items: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for question_index in question_indices:
         item_args = argparse.Namespace(**vars(args))
         item_args.question_index = question_index
         item_args.questions = None
+        item_args._evaluation_identity = evaluation_identity(item_args, REPO_ROOT)
+        bind_evaluation_identity(item_args._evaluation_identity)
         config = _resolved_config(item_args, time_budget)
         resume_answer_evaluator = (
             _resolve_answer_evaluator(_SCENARIOS[args.scenario], item_args)
             if args.resume
             else None
         )
+        resume_tools = _resolve_tools(_SCENARIOS[args.scenario], item_args) if args.resume else None
         item_output_dir = (
             args.output_dir / f"item_{question_index}"
             if args.questions is not None
             else args.output_dir
         )
+        item_args.output_dir = item_output_dir
         completed: Dict[str, Any] = {}
         for strategy in args.strategies:
             result_path = item_output_dir / strategy / "result.json"
@@ -602,6 +744,7 @@ def main() -> int:
                     implementation=implementation,
                     agents=args.agents,
                     answer_evaluator=resume_answer_evaluator,
+                    score_tools=resume_tools,
                 )
                 if existing is not None:
                     completed[strategy] = existing
@@ -622,6 +765,8 @@ def main() -> int:
                 time_budget,
                 mode,
             )
+            if evaluation_identity(item_args, REPO_ROOT) != item_args._evaluation_identity:
+                raise RuntimeError("Evaluation inputs/dependencies changed during the pool; refusing to publish a score")
             result["config"] = config
             result["implementation_sha256"] = implementation
             # The strategy-level result is the completion marker.  Write all
@@ -662,19 +807,15 @@ def main() -> int:
         )
         batch_config.pop("question_index")
         batch_config["question_indices"] = question_indices
-        _atomic_json(
-            args.output_dir / "summary.json",
-            {
-                "config": batch_config,
-                "implementation_sha256": implementation,
-                "items": batch_items,
-                "strategy_metrics": _batch_strategy_metrics(
-                    batch_items,
-                    args.strategies,
-                ),
-            },
-        )
-    return 0
+        batch_summary = {
+            "config": batch_config,
+            "implementation_sha256": implementation,
+            "items": batch_items,
+            "strategy_metrics": _batch_strategy_metrics(batch_items, args.strategies),
+        }
+        _atomic_json(args.output_dir / "summary.json", batch_summary)
+        return batch_summary
+    return item_summary
 
 
 if __name__ == "__main__":

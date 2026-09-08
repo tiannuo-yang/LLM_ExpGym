@@ -8,17 +8,23 @@ from __future__ import annotations
 import copy
 from contextlib import nullcontext
 import logging
+import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import inspect
 import json
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+from expgym.errors import ToolInputError
+from expgym.execution_contract import validate_execution_contracts
+from expgym.tool_protocol import native_system_prompt, native_tool_schemas, resolve_tool_protocol, structured_final_answer
 
 logger = logging.getLogger("expgym")
 
 ToolReturn = Union[Tuple[float, float], Tuple[str, float], Tuple[object, float, float]]
 ToolFn = Callable[[str], ToolReturn]
 
-Message = Dict[str, str]  # {"role": ..., "content": ...}
+Message = Dict[str, Any]
 
 
 @dataclass
@@ -29,6 +35,10 @@ class LLMOutput:
     cached_prompt_tokens: Optional[int] = None
     cache_write_prompt_tokens: Optional[int] = None
     request_attempts: int = 1
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    assistant_message: Optional[Dict[str, Any]] = None
+    finish_reason: Optional[str] = None
+    attempt_usage: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class LLMBackend:
@@ -61,12 +71,12 @@ class LoopResult:
 
 
 def _estimate_tokens(messages: List[Message]) -> int:
-    """Conservative token estimate: ~3 chars per token.
+    """Approximate serialized-message tokens, including calls and reasoning.
 
-    Qwen/CJK-capable models tokenize at ~3 chars/token for English text
-    with JSON/config content.  Using 3 instead of 4 to be safe.
+    This character heuristic is not an exact tokenizer guarantee. Null content
+    is valid for tool-only responses.
     """
-    return sum(len(m.get("content", "")) for m in messages) // 3
+    return sum(len(json.dumps(m, ensure_ascii=False, allow_nan=False)) for m in messages) // 3
 
 
 def _trim_messages(
@@ -76,67 +86,45 @@ def _trim_messages(
     protected_tail: int = 4,
     truncated_obs_chars: int = 600,
 ) -> List[Message]:
-    """Trim older observation messages to stay within context budget.
+    """Trim observations/whole decision groups without breaking tool pairing.
 
-    Strategy:
-      1. Always preserve system prompt (index 0) + initial context (index 1).
-      2. Always preserve the most recent *protected_tail* messages.
-      3. First pass: truncate long observation messages in the middle.
-      4. Second pass: if still over, drop middle messages entirely.
+    Initial instructions and task are immutable. If protected content alone
+    cannot fit, return it intact; the caller must not send an over-limit request.
     """
     if _estimate_tokens(messages) <= max_tokens:
         return messages
+    result = copy.deepcopy(messages)
+    start = 0
+    while start < len(result) and result[start].get("role") in ("system", "developer"):
+        start += 1
+    if start < len(result) and result[start].get("role") == "user":
+        start += 1
+    prefix = result[:start]
+    groups: List[List[Message]] = []
+    for message in result[start:]:
+        if message.get("role") == "assistant" or not groups:
+            groups.append([])
+        groups[-1].append(message)
+    for group in groups:
+        for message in group:
+            content = message.get("content")
+            observation = (
+                message.get("role") == "tool" or
+                (message.get("role") == "user" and isinstance(content, str)
+                 and content.startswith("Observation:"))
+            )
+            if observation and isinstance(content, str) and len(content) > truncated_obs_chars:
+                message["content"] = content[:truncated_obs_chars] + "\n[... truncated ...]"
 
-    result = [copy.copy(m) for m in messages]
+    def flatten() -> List[Message]:
+        return prefix + [m for group in groups for m in group]
 
-    # Boundaries
-    protected_start = min(2, len(result))
-    protected_end = min(protected_tail, len(result) - protected_start)
-    mid_start = protected_start
-    mid_end = len(result) - protected_end
-
-    # Pass 1: truncate long observation messages
-    for i in range(mid_start, mid_end):
-        if _estimate_tokens(result) <= max_tokens:
+    while len(groups) > 1 and _estimate_tokens(flatten()) > max_tokens:
+        # Expand the protected tail to complete groups; never orphan tool calls.
+        if sum(len(group) for group in groups[1:]) < protected_tail:
             break
-        msg = result[i]
-        content = msg.get("content", "")
-        if msg["role"] == "user" and len(content) > truncated_obs_chars:
-            result[i] = {**msg, "content": content[:truncated_obs_chars] + "\n[... truncated ...]"}
-
-    # Pass 2: drop middle messages if still over
-    if _estimate_tokens(result) > max_tokens and mid_end > mid_start:
-        # Drop oldest middle messages one-by-one until under budget
-        drop_count = 0
-        for i in range(mid_start, mid_end):
-            drop_count += 1
-            trimmed = (
-                result[:mid_start]
-                + [{"role": "user", "content": f"[{drop_count} earlier turns omitted]"}]
-                + result[mid_start + drop_count:]
-            )
-            if _estimate_tokens(trimmed) <= max_tokens:
-                result = trimmed
-                break
-        else:
-            # Drop all middle messages
-            result = (
-                result[:mid_start]
-                + [{"role": "user", "content": f"[{drop_count} earlier turns omitted]"}]
-                + result[mid_end:]
-            )
-
-    # Pass 3: if still over, truncate remaining observations (including tail)
-    if _estimate_tokens(result) > max_tokens:
-        for i in range(len(result) - 1, -1, -1):
-            if _estimate_tokens(result) <= max_tokens:
-                break
-            msg = result[i]
-            content = msg.get("content", "")
-            if msg["role"] == "user" and len(content) > truncated_obs_chars:
-                result[i] = {**msg, "content": content[:truncated_obs_chars] + "\n[... truncated ...]"}
-
-    return result
+        groups.pop(0)
+    return flatten()
 
 
 def run_react_loop(
@@ -159,196 +147,291 @@ def run_react_loop(
     pre_tool_hook: Optional[Callable[[str, str], None]] = None,
     llm_lock: Optional[Any] = None,
     capture_trace_v2: bool = False,
+    tool_protocol: str = "auto",
+    max_protocol_retries: int = 0,
+    tuning_final_policy: str = "legacy",
 ) -> Dict[str, object]:
-    """Execute a ReAct loop using proper multi-turn chat messages.
+    """Run one agent; native and text transports share the same budget rules.
 
-    ``observation_augmenter``, ``pre_tool_hook``, and ``llm_lock`` form the
-    PoolAct integration boundary.  When a lock is supplied, graph injection,
-    LLM reasoning, action parsing, and pending-claim recording happen in one
-    critical section; tool execution happens after the lock is released.
+    The library preserves zero protocol repairs by default. Runners may
+    explicitly request bounded repairs; every repair uses a normal agent step.
+    One forced final call remains the historical, recorded horizon exemption.
+    Infrastructure exceptions propagate; only ToolInputError is model feedback.
+    max_prompt_tokens is an admission threshold on cumulative reported prompt
+    usage, not an exact pre-tokenized allowance for the next request.
     """
-
-    # --- Build initial message history ---
-    messages: List[Message] = []
+    if tool_protocol not in ("auto", "native", "text"):
+        raise ValueError("tool_protocol must be auto, native, or text")
+    if tuning_final_policy not in ("legacy", "submitted"):
+        raise ValueError("tuning_final_policy must be legacy or submitted")
+    for name, value in (("max_steps", max_steps), ("max_evals", max_evals),
+                        ("max_protocol_retries", max_protocol_retries),
+                        ("max_prompt_tokens", max_prompt_tokens),
+                        ("max_context_tokens", max_context_tokens)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(name + " must be a non-negative integer or None")
+    if max_protocol_retries is None:
+        raise ValueError("max_protocol_retries must be an integer")
+    for name, value in (("time_budget", time_budget), ("overhead_scale", overhead_scale)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                  or not math.isfinite(value) or value < 0):
+            raise ValueError(name + " must be finite and non-negative")
+    if overhead_scale is None:
+        raise ValueError("overhead_scale cannot be None")
+    validate_execution_contracts(
+        tools=tools, agent_clock=agent_clock,
+        observation_augmenter=observation_augmenter, pre_tool_hook=pre_tool_hook,
+        time_budget=time_budget, overhead_scale=overhead_scale,
+    )
+    resolved_protocol = resolve_tool_protocol(llm, tool_protocol)
+    native = resolved_protocol == "native"
+    schemas = native_tool_schemas(tools) if native else None
+    schema_token_estimate = (len(json.dumps(schemas, ensure_ascii=False, allow_nan=False)) // 3
+                             if native else 0)
     sys_text = system_prompt or build_system_prompt(instruction_notes=instruction_notes)
-    messages.append({"role": "system", "content": sys_text})
-
+    if native:
+        sys_text = native_system_prompt(sys_text)
+    messages: List[Message] = [{"role": "system", "content": sys_text}]
     if context:
         messages.append({"role": "user", "content": context.strip()})
-
-    # --- Tracking variables ---
-    steps: List[str] = []
+    steps: List[str] = ["System Prompt:", sys_text, ""]
+    if context:
+        steps.append(f"Prompt: Task description:\n{context.strip()}")
     total_overhead = 0.0
     answer: Optional[str] = None
     answer_perf: Optional[float] = None
     answer_metrics: Optional[Dict[str, object]] = None
     answer_overhead: Optional[float] = None
-    aborted = False
-    _over_budget_note: Optional[str] = None
-    _prev_augmented_idx: Optional[int] = None
-    evaluations = 0
-    api_calls = 0
-    llm_time = 0.0
-    eval_time = 0.0
-    prompt_tokens = 0
-    completion_tokens = 0
-    cached_prompt_tokens = 0
-    instruction_tokens = 0
-
-    abort_reason: Optional[str] = None
     answer_source: Optional[str] = None
+    answer_score_source: Optional[str] = None
+    aborted = False
+    abort_reason: Optional[str] = None
+    over_budget_note: Optional[str] = None
+    prev_augmented_idx: Optional[int] = None
+    evaluations = api_calls = agent_steps = protocol_retries = 0
+    http_request_attempts = 0
+    llm_time = eval_time = 0.0
+    prompt_tokens = completion_tokens = cached_prompt_tokens = instruction_tokens = 0
     eval_records: List[Tuple[str, Optional[str], float, float]] = []
     tool_records: List[Tuple[str, str, Optional[object]]] = []
     llm_call_traces: List[Dict[str, object]] = []
     tool_call_traces: List[Dict[str, object]] = []
+    protocol_failures: List[Dict[str, object]] = []
+    usage_attempts: List[Dict[str, object]] = []
 
-    def start_llm_call_trace(
-        input_messages: List[Message],
-        output: LLMOutput,
-        latency_seconds: float,
-        *,
-        forced: bool,
-    ) -> Dict[str, object]:
-        if not capture_trace_v2:
-            return {}
-        return {
-            "input_messages": copy.deepcopy(input_messages),
+    def augment_latest_message() -> None:
+        nonlocal prev_augmented_idx
+        if observation_augmenter is None or len(messages) < 2:
+            return
+        index = len(messages) - 1
+        message = messages[index]
+        if message.get("role") not in ("user", "tool") or index == prev_augmented_idx:
+            return
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise TypeError("Environment messages must contain text")
+        messages[index] = {**message, "content": observation_augmenter(content)}
+        prev_augmented_idx = index
+
+    def prepared_messages() -> Optional[List[Message]]:
+        if max_prompt_tokens is not None and prompt_tokens >= max_prompt_tokens:
+            return None
+        if max_context_tokens is not None:
+            message_allowance = max_context_tokens - schema_token_estimate
+            if message_allowance < 0:
+                return None
+            prepared = _trim_messages(messages, message_allowance)
+            if _estimate_tokens(prepared) + schema_token_estimate > max_context_tokens:
+                return None
+        else:
+            prepared = messages
+        return copy.deepcopy(prepared)
+
+    def generate(send_messages: List[Message], *, forced: bool) -> Tuple[LLMOutput, Dict[str, object]]:
+        nonlocal llm_time, api_calls, http_request_attempts
+        nonlocal prompt_tokens, completion_tokens, cached_prompt_tokens, instruction_tokens
+        start = time.perf_counter()
+        if native:
+            output = llm.generate(send_messages, tools=schemas, tool_choice="none" if forced else "auto")
+        else:
+            output = llm.generate(send_messages)
+        elapsed = time.perf_counter() - start
+        llm_time += elapsed
+        api_calls += 1
+        http_request_attempts += output.request_attempts
+        if output.prompt_tokens is not None:
+            prompt_tokens += output.prompt_tokens
+            if api_calls == 1:
+                instruction_tokens = output.prompt_tokens
+        if output.completion_tokens is not None:
+            completion_tokens += output.completion_tokens
+        if output.cached_prompt_tokens is not None:
+            cached_prompt_tokens += output.cached_prompt_tokens
+        if output.tool_calls:
+            # Backend implementations other than the built-in client must also
+            # satisfy the envelope contract before any hook or tool can run.
+            ids = set()
+            for native_call in output.tool_calls:
+                call_id = native_call.get("id") if isinstance(native_call, dict) else None
+                if not isinstance(call_id, str) or not call_id.strip() or call_id in ids:
+                    raise ValueError("Native response requires non-empty unique call IDs")
+                ids.add(call_id)
+        attempts = copy.deepcopy(output.attempt_usage)
+        usage_attempts.append({"llm_call_index": api_calls, "attempts": attempts})
+        original = copy.deepcopy(output.assistant_message)
+        if original is None:
+            original = {"role": "assistant", "content": output.text}
+            if output.tool_calls:
+                original["tool_calls"] = copy.deepcopy(output.tool_calls)
+        record = {
+            "input_messages": copy.deepcopy(send_messages),
+            "output_message": original,
             "output_message_index": None,
-            "raw_output": output.text.strip(),
+            "raw_output": output.text,
+            "finish_reason": output.finish_reason,
+            "attempt_usage": attempts,
             "forced": forced,
-            "latency_seconds": latency_seconds,
+            "latency_seconds": elapsed,
             "request_attempts": output.request_attempts,
             "usage": {
                 "input_tokens": output.prompt_tokens,
                 "output_tokens": output.completion_tokens,
                 "cache": {
-                    "reported": (
-                        output.cached_prompt_tokens is not None
-                        or output.cache_write_prompt_tokens is not None
-                    ),
+                    "reported": output.cached_prompt_tokens is not None or output.cache_write_prompt_tokens is not None,
                     "read_tokens": output.cached_prompt_tokens,
                     "write_tokens": output.cache_write_prompt_tokens,
                 },
             },
         }
+        return output, record
 
-    def finish_llm_call_trace(
-        record: Dict[str, object],
-        output_message_index: Optional[int],
-    ) -> None:
-        if not capture_trace_v2:
-            return
-        record["output_message_index"] = output_message_index
-        if output_message_index is not None:
-            stored = messages[output_message_index]["content"]
-            if record["raw_output"] == stored:
-                record.pop("raw_output", None)
+    def record_assistant(output: LLMOutput, record: Dict[str, object], text: str) -> None:
+        if native or output.tool_calls:
+            message = copy.deepcopy(record["output_message"])
+        else:
+            message = {"role": "assistant", "content": text}
+        messages.append(message)
+        record["output_message_index"] = len(messages) - 1
+        if record["raw_output"] == message.get("content"):
+            record.pop("raw_output", None)
         llm_call_traces.append(record)
+        _append_to_steps(text, steps)
+        if output.tool_calls:
+            steps.append("Native tool calls: " + json.dumps(output.tool_calls, ensure_ascii=False, allow_nan=False))
 
-    def augment_latest_user_message() -> None:
-        """Inject the latest shared-state snapshot exactly once."""
-        nonlocal _prev_augmented_idx
-        if observation_augmenter is None or len(messages) < 2:
-            return
-        last_index = len(messages) - 1
-        last_user = messages[last_index]
-        if last_user.get("role") != "user" or last_index == _prev_augmented_idx:
-            return
-        augmented = observation_augmenter(last_user["content"])
-        messages[last_index] = {**last_user, "content": augmented}
-        _prev_augmented_idx = last_index
-
-    # Log system prompt and context for trace output
-    steps.append("System Prompt:")
-    steps.append(sys_text)
-    steps.append("")
-    if context:
-        steps.append(f"Prompt: Task description:\n{context.strip()}")
+    def reject_decision(output: LLMOutput, reason: str, *, forced: bool) -> None:
+        protocol_failures.append({
+            "agent_step": agent_steps, "llm_call_index": api_calls,
+            "forced": forced, "reason": reason, "finish_reason": output.finish_reason,
+        })
+        notice = "Protocol error: " + reason + ". No tool was executed."
+        # Every delivered native call gets a paired rejection, including a
+        # forbidden multiple-call batch. Never execute only the first one.
+        if output.tool_calls:
+            seen = set()
+            for call in output.tool_calls:
+                call_id = call.get("id")
+                if not isinstance(call_id, str) or not call_id or call_id in seen:
+                    raise ValueError("Native response has invalid call IDs; cannot safely continue its history")
+                seen.add(call_id)
+                messages.append({"role": "tool", "tool_call_id": call_id, "content": notice})
+        elif not forced:
+            messages.append({
+                "role": "user",
+                "content": notice + (" Use the supplied function tools or submit your final answer."
+                                    if native else " Use one Action directive or Answer: followed by your final answer."),
+            })
+        steps.append(notice)
 
     effective_max_steps = max_steps if max_steps is not None else 999999
-    for _ in range(effective_max_steps):
-        # PoolAct serializes exactly this section.  The next agent observes
-        # both completed graph updates and the claim recorded below.
+    for step_index in range(effective_max_steps):
+        if max_evals is not None and evaluations >= max_evals:
+            aborted, abort_reason = True, "Maximum evaluations reached"
+            break
+        if time_budget is not None and total_overhead >= time_budget:
+            aborted, abort_reason = True, "Time budget exceeded"
+            break
         lock_context = llm_lock if llm_lock is not None else nullcontext()
         with lock_context:
-            augment_latest_user_message()
-
-            # Build send_messages for the LLM call (may be trimmed).
-            if max_context_tokens is not None:
-                send_messages = _trim_messages(messages, max_context_tokens)
-            else:
-                send_messages = list(messages)
-            start = time.perf_counter()
-            llm_output = llm.generate(send_messages)
-            api_elapsed = time.perf_counter() - start
-            call_trace = start_llm_call_trace(
-                send_messages, llm_output, api_elapsed, forced=False
-            )
-            llm_time += api_elapsed
-            api_calls += 1
-            if llm_output.prompt_tokens is not None:
-                prompt_tokens += llm_output.prompt_tokens
-                if api_calls == 1:
-                    instruction_tokens = llm_output.prompt_tokens
-            if llm_output.completion_tokens is not None:
-                completion_tokens += llm_output.completion_tokens
-            if llm_output.cached_prompt_tokens is not None:
-                cached_prompt_tokens += llm_output.cached_prompt_tokens
-            output = llm_output.text.strip()
-            if not output:
-                finish_llm_call_trace(call_trace, None)
+            augment_latest_message()
+            send_messages = prepared_messages()
+            if send_messages is None:
                 aborted = True
-                abort_reason = "LLM returned empty response"
+                abort_reason = ("Prompt token budget exceeded" if max_prompt_tokens is not None
+                                and prompt_tokens >= max_prompt_tokens else "Context token budget exceeded")
                 break
-
-            # Safety cap: truncate degenerate/runaway outputs (>8000 chars)
-            if len(output) > 8000:
-                logger.warning(
-                    "Truncating degenerate LLM output (%d chars -> 8000)",
-                    len(output),
-                )
-                output = output[:8000] + "\n[... output truncated due to excessive length ...]"
-
-            action = _extract_action(output)
-            if action:
-                truncated = _truncate_after_action(output)
-                messages.append({"role": "assistant", "content": truncated})
-                _append_to_steps(truncated, steps)
-                finish_llm_call_trace(call_trace, len(messages) - 1)
+            output, call_trace = generate(send_messages, forced=False)
+            agent_steps += 1
+            text = output.text.strip()
+            action = None
+            protocol_error = None
+            if output.finish_reason == "length":
+                protocol_error = "Model completion token limit reached"
+            elif output.tool_calls:
+                if not native:
+                    protocol_error = "Native tool calls received in text protocol"
+                elif len(output.tool_calls) != 1:
+                    protocol_error = "Exactly one native tool call is allowed per decision"
+                else:
+                    function = output.tool_calls[0].get("function") or {}
+                    name, argument = function.get("name"), function.get("arguments")
+                    try:
+                        if not isinstance(name, str) or not name:
+                            raise ValueError("missing function name")
+                        if not isinstance(argument, str):
+                            raise ValueError("arguments must be a JSON object string")
+                        parsed = json.loads(argument)
+                        if not isinstance(parsed, dict):
+                            raise ValueError("arguments must be a JSON object")
+                        json.dumps(parsed, allow_nan=False)
+                        action = (name, argument)
+                    except (ValueError, TypeError, OverflowError, RecursionError) as exc:
+                        protocol_error = "Invalid native function arguments: " + str(exc)
+            elif native:
+                if _extract_action(text) is not None:
+                    protocol_error = "Text Action is not a native function call"
+                elif text:
+                    answer = _extract_answer(text) or structured_final_answer(text) or text
+                else:
+                    protocol_error = "LLM returned empty response"
             else:
-                answer = _extract_answer(output)
-                if answer:
-                    messages.append({"role": "assistant", "content": output})
-                    _append_to_steps(output, steps)
-                    finish_llm_call_trace(call_trace, len(messages) - 1)
-                    answer_source = "natural_model_answer"
-                    answer_perf, answer_overhead = _lookup_answer_metrics(
-                        answer, eval_records
-                    )
-                    break
-                messages.append({"role": "assistant", "content": output})
-                _append_to_steps(output, steps)
-                finish_llm_call_trace(call_trace, len(messages) - 1)
-                aborted = True
-                abort_reason = "Missing Action directive"
+                action = _extract_action(text)
+                if action is None:
+                    answer = _extract_answer(text)
+                    if not answer:
+                        protocol_error = "Missing Action directive" if text else "LLM returned empty response"
+            if action is not None and action[0] not in tools:
+                protocol_error = f"Unknown tool '{action[0]}'"
+                action = None
+            record_assistant(output, call_trace, _truncate_after_action(text) if action and not native else text)
+            if protocol_error is not None:
+                reject_decision(output, protocol_error, forced=False)
+                if protocol_retries < max_protocol_retries and step_index + 1 < effective_max_steps:
+                    protocol_retries += 1
+                    continue
+                aborted, abort_reason = True, protocol_error
                 break
-
+            if answer is not None:
+                answer_source = "natural_model_answer"
+                break
+            if action is None:
+                raise RuntimeError("Decision produced neither an answer nor a tool action")
             tool_name, argument = action
-            tool = tools.get(tool_name)
-            if tool is None:
-                aborted = True
-                abort_reason = f"Unknown tool '{tool_name}'"
-                break
+            tool = tools[tool_name]
+            request_message_index = len(messages) - 1
             if pre_tool_hook is not None:
                 pre_tool_hook(tool_name, argument)
 
         steps.append(f"Tool input: {argument}")
+        input_error = False
         try:
             perf, raw_overhead, tool_output = _parse_tool_return(tool(argument))
-        except Exception as exc:
-            # Gracefully handle tool errors (e.g. malformed LLM payloads)
+        except ToolInputError as exc:
+            input_error = True
             perf, raw_overhead, tool_output = None, 0.0, f"Tool error: {exc}"
-        overhead = float(raw_overhead) * overhead_scale
+        overhead = raw_overhead * overhead_scale
+        if not math.isfinite(overhead) or not math.isfinite(total_overhead + overhead):
+            raise ValueError("Tool cost overflow")
         eval_time += overhead
         total_overhead += overhead
         if agent_clock is not None:
@@ -356,235 +439,132 @@ def run_react_loop(
         evaluations += 1
         tool_records.append((tool_name, argument, tool_output))
         tool_trace: Dict[str, object] = {
-            "request_message_index": len(messages) - 1,
-            "result_message_index": None,
-            "name": tool_name,
-            "arguments": _trace_argument(argument),
-            "performance": perf,
-            "simulated_cost_seconds": overhead,
-            "visible_to_model": False,
+            "request_message_index": request_message_index,
+            "result_message_index": None, "name": tool_name,
+            "arguments": _trace_argument(argument), "raw_arguments": argument,
+            "canonical_argument": _canonicalize_payload(argument),
+            "tool_result": copy.deepcopy(tool_output),
+            "performance": perf, "simulated_cost_seconds": overhead,
+            "visible_to_model": False, "included_in_eval_records": False,
+            "input_error": input_error,
         }
-
-        # Check budget BEFORE recording eval or showing observation —
-        # if this eval pushed us over budget, the LLM should not benefit
-        # from seeing the result, and it should not appear in
-        # eval_records (which the fallback answer logic uses).
         if time_budget is not None and total_overhead >= time_budget:
-            # Store the over-budget note but don't append as a separate
-            # user message yet — it will be combined with the forced-answer
-            # prompt to avoid consecutive user messages.
-            _over_budget_note = (
+            over_budget_note = (
                 "Observation: [over-budget — result withheld. "
-                "This evaluation exceeded the time budget.]"
+                "This evaluation reached or exceeded the time budget.]"
             )
             steps.append("Observation: [over-budget, result withheld]")
             if tool_output is not None:
                 tool_trace["withheld_result"] = tool_output
+            if native:
+                messages.append({
+                    "role": "tool", "tool_call_id": output.tool_calls[0]["id"],
+                    "name": tool_name, "content": over_budget_note,
+                })
+                tool_trace["result_message_index"] = len(messages) - 1
+                tool_trace["observation"] = over_budget_note
+                tool_trace["response_kind"] = "withheld_notice"
+                over_budget_note = None
             tool_call_traces.append(tool_trace)
-            aborted = True
-            abort_reason = "Time budget exceeded"
+            aborted, abort_reason = True, "Time budget exceeded"
             break
-
-        # Record eval AFTER budget check — over-budget evals are excluded.
         if perf is not None:
-            canonical_argument = _canonicalize_payload(argument)
-            eval_records.append((argument, canonical_argument, perf, overhead))
-
+            eval_records.append((argument, _canonicalize_payload(argument), perf, overhead))
+            tool_trace["included_in_eval_records"] = True
+        observation = "Observation: " + (str(tool_output) if tool_output is not None else f"perf={perf:.6f}")
         if include_cost_in_observation and overhead_scale > 0.0 and overhead >= 0.5:
-            # time_aware mode: show cost + time budget remaining.
-            # Skip in FREE mode (overhead_scale=0) — don't show "cost=0s"
-            # which would signal to the model that tools are free.
-            # Also skip when overhead rounds to 0s (e.g. search_meta at
-            # 0.05-0.2s) — showing "cost=0s" is misleading.
-            # Only show time budget, not step/context budget — those are
-            # internal limits, not part of the EEI cost signal.
-            budget_parts = []
+            observation += f" | cost={overhead:.0f}s" if tool_output is not None else f", cost={overhead:.0f}s"
             if time_budget is not None:
-                remaining = max(0.0, time_budget - total_overhead)
-                budget_parts.append(f"time_left={remaining:.0f}s")
-            budget_hint = ", ".join(budget_parts) if budget_parts else ""
-            if tool_output is not None:
-                observation = (
-                    f"Observation: {tool_output} | cost={overhead:.0f}s"
-                )
-                if budget_hint:
-                    observation += f" [{budget_hint}]"
-            else:
-                observation = (
-                    f"Observation: perf={perf:.6f}, cost={overhead:.0f}s"
-                )
-                if budget_hint:
-                    observation += f" [{budget_hint}]"
+                observation += f" [time_left={max(0.0, time_budget - total_overhead):.0f}s]"
         elif include_overhead_in_observation:
-            if tool_output is not None:
-                observation = f"Observation: {tool_output} | overhead={overhead:.2f}"
-            else:
-                observation = f"Observation: perf={perf:.6f}, overhead={overhead:.2f}"
-        else:
-            if tool_output is not None:
-                observation = f"Observation: {tool_output}"
-            else:
-                observation = f"Observation: perf={perf:.6f}"
-        messages.append({"role": "user", "content": observation})
+            observation += f" | overhead={overhead:.2f}" if tool_output is not None else f", overhead={overhead:.2f}"
+        message = {"role": "user", "content": observation}
+        if native:
+            message.update(role="tool", tool_call_id=output.tool_calls[0]["id"], name=tool_name)
+        messages.append(message)
         steps.append(observation)
-        tool_trace["visible_to_model"] = True
-        tool_trace["result_message_index"] = len(messages) - 1
-        tool_trace["observation"] = observation
+        tool_trace.update(visible_to_model=True, result_message_index=len(messages) - 1, observation=observation)
         if tool_output is not None and not isinstance(tool_output, str):
             tool_trace["structured_result"] = tool_output
         tool_call_traces.append(tool_trace)
-        if max_evals is not None and evaluations >= max_evals:
-            aborted = True
-            abort_reason = "Maximum evaluations reached"
-            break
-        if max_prompt_tokens is not None and prompt_tokens >= max_prompt_tokens:
-            aborted = True
-            abort_reason = "Prompt token budget exceeded"
-            break
-        if max_context_tokens is not None:
-            if _estimate_tokens(messages) >= max_context_tokens:
-                aborted = True
-                abort_reason = "Context token budget exceeded"
-                break
     else:
-        aborted = True
-        abort_reason = "Maximum steps reached"
+        aborted, abort_reason = True, "Maximum steps reached"
 
     if aborted and answer is None:
-        reason_text = abort_reason or "Loop aborted"
-        note = (
-            f"System: Loop aborted ({reason_text}). "
-            "Respond immediately with Answer: <your final choice> "
-            "and no other text."
-        )
-        # If there was an over-budget observation, combine it with the
-        # forced-answer prompt into a single user message to preserve
-        # proper assistant/user alternation.
-        if _over_budget_note is not None:
-            note = _over_budget_note + "\n\n" + note
-            _over_budget_note = None
+        note = (f"System: Loop aborted ({abort_reason or 'Loop aborted'}). "
+                "Respond immediately with Answer: <your final choice> and no other text.")
+        if over_budget_note is not None:
+            note = over_budget_note + "\n\n" + note
         messages.append({"role": "user", "content": note})
         steps.append(note)
         lock_context = llm_lock if llm_lock is not None else nullcontext()
         with lock_context:
-            # A forced final answer is still an LLM reasoning call.  Serialize
-            # it and show the latest pooled state just like a normal turn.
-            augment_latest_user_message()
-            if max_context_tokens is not None:
-                send_messages = _trim_messages(messages, max_context_tokens)
-            else:
-                send_messages = list(messages)
-            start = time.perf_counter()
-            forced_output = llm.generate(send_messages)
-            api_elapsed = time.perf_counter() - start
-            forced_call_trace = start_llm_call_trace(
-                list(send_messages), forced_output, api_elapsed, forced=True
-            )
-        llm_time += api_elapsed
-        api_calls += 1
-        if forced_output.prompt_tokens is not None:
-            prompt_tokens += forced_output.prompt_tokens
-        if forced_output.completion_tokens is not None:
-            completion_tokens += forced_output.completion_tokens
-        if forced_output.cached_prompt_tokens is not None:
-            cached_prompt_tokens += forced_output.cached_prompt_tokens
-        forced_text = forced_output.text.strip()
-        if forced_text:
-            messages.append({"role": "assistant", "content": forced_text})
-            _append_to_steps(forced_text, steps)
-            finish_llm_call_trace(forced_call_trace, len(messages) - 1)
-            answer = _extract_answer(forced_text) or forced_text
-            answer_source = "forced_model_answer"
-            _perf_raw, answer_overhead = _finalize_answer(
-                answer or "",
-                eval_records,
-                answer_evaluator,
-                tool_records,
-                total_overhead,
-            )
-            answer_perf, answer_metrics = _unpack_perf(_perf_raw)
-        else:
-            finish_llm_call_trace(forced_call_trace, None)
+            augment_latest_message()
+            send_messages = prepared_messages()
+            # Do not silently send a request larger than its context/token cap.
+            if send_messages is not None:
+                forced, forced_trace = generate(send_messages, forced=True)
+                forced_text = forced.text.strip()
+                record_assistant(forced, forced_trace, forced_text)
+                if forced.tool_calls:
+                    reject_decision(forced, "Tools are disabled during forced final", forced=True)
+                elif forced.finish_reason == "length":
+                    reject_decision(forced, "Forced final completion token limit reached", forced=True)
+                elif forced_text:
+                    # A textual Action is not a forced answer either.
+                    if _extract_action(forced_text) is not None:
+                        reject_decision(forced, "Action received during forced final", forced=True)
+                    else:
+                        answer = _extract_answer(forced_text) or structured_final_answer(forced_text) or forced_text
+                        answer_source = "forced_model_answer"
+                else:
+                    reject_decision(forced, "Forced final returned empty response", forced=True)
 
-    if answer is not None and answer_perf is None and answer_metrics is None:
-        _perf_raw, answer_overhead = _finalize_answer(
-            answer,
-            eval_records,
-            answer_evaluator,
-            tool_records,
-            total_overhead,
+    if answer is not None:
+        raw_perf, answer_overhead = _finalize_answer(
+            answer, eval_records, answer_evaluator, tool_records, total_overhead,
         )
-        answer_perf, answer_metrics = _unpack_perf(_perf_raw)
-
-    # Fallback: if the answer doesn't match any eval_record (e.g. the
-    # agent hallucinated a config it never evaluated, or submitted a
-    # non-config text), use the best evaluated config instead.  Only
-    # applies when there is no external answer_evaluator (i.e. tuning).
-    if (
-        answer is not None
-        and answer_perf is None
-        and answer_metrics is None
-        and answer_evaluator is None
-        and eval_records
-    ):
-        scored_records = [
-            (raw, perf, ovh)
-            for raw, _canon, perf, ovh in eval_records
-            if perf is not None
-        ]
-        if scored_records:
-            best_raw, best_perf, best_ovh = max(
-                scored_records, key=lambda r: r[1]
-            )
-            answer = best_raw
-            answer_perf = best_perf
-            answer_overhead = best_ovh
-            answer_source = "best_evaluated_fallback"
-            logger.info(
-                "Forced answer didn't match eval records; "
-                "falling back to best evaluated config (perf=%.6f)",
-                best_perf,
-            )
+        answer_perf, answer_metrics = _unpack_perf(raw_perf)
+        if answer_evaluator is not None:
+            answer_score_source = "answer_evaluator"
+        elif answer_perf is not None:
+            answer_score_source = "matching_tool_call"
+    if (tuning_final_policy == "legacy" and answer is not None and answer_perf is None
+            and answer_metrics is None and answer_evaluator is None and eval_records):
+        scored = [(raw, perf, overhead) for raw, _, perf, overhead in eval_records if perf is not None]
+        if scored:
+            answer, answer_perf, answer_overhead = max(scored, key=lambda record: record[1])
+            answer_source = answer_score_source = "best_evaluated_fallback"
 
     result = LoopResult(
-        answer=answer,
-        answer_perf=answer_perf,
-        answer_overhead=answer_overhead,
-        answer_metrics=answer_metrics,
-        steps=steps,
-        total_overhead=total_overhead,
-        aborted=aborted,
-        evaluations=evaluations,
-        api_calls=api_calls,
-        llm_time=llm_time,
-        eval_time=eval_time,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cached_prompt_tokens=cached_prompt_tokens,
-        instruction_tokens=instruction_tokens,
-        messages=messages,
-        tool_records=tool_records,
-        eval_records=eval_records,
+        answer=answer, answer_perf=answer_perf, answer_overhead=answer_overhead,
+        answer_metrics=answer_metrics, steps=steps, total_overhead=total_overhead,
+        aborted=aborted, evaluations=evaluations, api_calls=api_calls,
+        llm_time=llm_time, eval_time=eval_time, prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens, cached_prompt_tokens=cached_prompt_tokens,
+        instruction_tokens=instruction_tokens, messages=messages,
+        tool_records=tool_records, eval_records=eval_records,
+    ).__dict__
+    result.update(
+        tool_protocol=resolved_protocol, max_protocol_retries=max_protocol_retries,
+        tuning_final_policy=tuning_final_policy, protocol_retries=protocol_retries,
+        protocol_failures=protocol_failures, agent_steps=agent_steps,
+        http_request_attempts=http_request_attempts, usage_attempts=usage_attempts,
+        termination_reason=abort_reason if aborted else "Natural answer",
+        answer_source=answer_source, answer_score_source=answer_score_source,
     )
-    result_dict = result.__dict__
     if capture_trace_v2:
-        result_dict["_trace_v2_capture"] = {
-            "llm_calls": llm_call_traces,
-            "tool_calls": tool_call_traces,
-            "termination_reason": abort_reason if aborted else "Natural answer",
-            "answer_source": answer_source,
+        result["_trace_v2_capture"] = {
+            "llm_calls": llm_call_traces, "tool_calls": tool_call_traces,
+            "termination_reason": result["termination_reason"], "answer_source": answer_source,
         }
-    return result_dict
+    return result
 
 
 def _truncate_after_action(text: str) -> str:
-    """Return text up to and including the first Action line."""
-    lines = []
-    for line in text.splitlines():
-        lines.append(line)
-        if _normalize_label(line).startswith("Action:"):
-            break
-    return "\n".join(lines)
+    """Retain the complete real action, not just its first JSON line."""
+    from expgym.tool_protocol import truncate_text_action
+    return truncate_text_action(text)
 
 
 def _append_to_steps(text: str, steps: List[str]) -> None:
@@ -629,20 +609,25 @@ def build_system_prompt(
 def _canonicalize_payload(payload: str) -> Optional[str]:
     try:
         data = json.loads(payload)
-    except json.JSONDecodeError:
+    except (ValueError, TypeError, OverflowError, RecursionError):
         return None
-    if isinstance(data, dict):
-        return json.dumps(data, sort_keys=True, separators=(",", ":"))
-    if isinstance(data, list):
-        return json.dumps(data, separators=(",", ":"))
+    try:
+        if isinstance(data, dict):
+            return json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        if isinstance(data, list):
+            return json.dumps(data, separators=(",", ":"), allow_nan=False)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        return None
     return None
 
 
 def _trace_argument(payload: str) -> object:
     """Preserve machine-readable tool arguments without duplicating raw JSON."""
     try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
+        value = json.loads(payload)
+        json.dumps(value, allow_nan=False)
+        return value
+    except (ValueError, TypeError, OverflowError, RecursionError):
         return {"raw": payload, "encoding": "text"}
 
 
@@ -652,7 +637,9 @@ def _lookup_answer_metrics(
 ) -> Tuple[Optional[float], Optional[float]]:
     canonical_answer = _canonicalize_payload(answer_text)
     for raw_argument, canonical_argument, perf, overhead in reversed(eval_records):
-        if canonical_answer and canonical_argument:
+        # A JSON configuration must match the complete answer; mentioning it
+        # inside prose is not a scored final configuration.
+        if canonical_argument is not None:
             if canonical_answer == canonical_argument:
                 return perf, overhead
         elif canonical_answer:
@@ -677,9 +664,16 @@ def _finalize_answer(
     """
     if evaluator is not None:
         try:
-            result = evaluator(answer, tool_records)
+            signature = inspect.signature(evaluator)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("Answer evaluator must expose a callable signature") from exc
+        try:
+            signature.bind(answer, tool_records)
         except TypeError:
+            signature.bind(answer)
             result = evaluator(answer)
+        else:
+            result = evaluator(answer, tool_records)
         return result, total_overhead
     return _lookup_answer_metrics(answer, eval_records)
 
@@ -695,83 +689,55 @@ def _unpack_perf(
     """
     if raw is None:
         return None, None
+    # Validate before extracting a primary scalar; invalid backend values must
+    # never become a finite score through clipping or fallback selection.
+    json.dumps(raw, allow_nan=False)
     if isinstance(raw, dict):
         primary = raw.get("label_acc")
         if primary is None:
             # Fallback: pick first numeric value
             for v in raw.values():
-                if isinstance(v, (int, float)):
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
                     primary = float(v)
                     break
-        return primary, raw
-    return float(raw), None
+        if isinstance(primary, bool) or not isinstance(primary, (int, float)) or not math.isfinite(primary):
+            raise ValueError("Evaluator metrics must contain a finite numeric primary score")
+        return float(primary), raw
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise TypeError("Evaluator performance must be numeric, not boolean or text")
+    scalar = float(raw)
+    if not math.isfinite(scalar):
+        raise ValueError("Evaluator performance must be finite")
+    return scalar, None
 
 
 def _parse_tool_return(result: ToolReturn) -> Tuple[Optional[float], float, Optional[object]]:
-    if isinstance(result, tuple) and len(result) == 2:
-        first, second = result
-        if isinstance(first, (int, float)) and isinstance(second, (int, float)):
-            return float(first), float(second), None
-        if isinstance(second, (int, float)):
-            return None, float(second), first
-    if isinstance(result, tuple) and len(result) == 3:
-        output, perf, overhead = result
-        return float(perf) if perf is not None else None, float(overhead), output
-    raise TypeError("Tool must return (perf, overhead) or (output, overhead).")
+    if not isinstance(result, tuple) or len(result) not in (2, 3):
+        raise TypeError("Tool must return (perf, cost), (output, cost), or (output, perf, cost)")
+    if len(result) == 2:
+        first, cost = result
+        if isinstance(first, bool):
+            raise TypeError("Tool performance cannot be boolean")
+        perf, output = (first, None) if isinstance(first, (int, float)) else (None, first)
+    else:
+        output, perf, cost = result
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+        raise ValueError("Tool cost must be finite and non-negative")
+    if perf is not None:
+        if isinstance(perf, bool) or not isinstance(perf, (int, float)) or not math.isfinite(perf):
+            raise ValueError("Tool performance must be finite numeric or None")
+        perf = float(perf)
+    return perf, float(cost), output
 
 
 def _extract_answer(block: str) -> Optional[str]:
-    lines = block.splitlines()
-    for i, line in enumerate(lines):
-        clean = _normalize_label(line)
-        if "Answer:" in clean:
-            first_part = clean.split("Answer:", 1)[-1].strip()
-            # Capture remaining lines after "Answer:" for multi-line answers
-            remaining = "\n".join(lines[i + 1:]).strip()
-            if remaining:
-                return first_part + "\n" + remaining if first_part else remaining
-            return first_part
-    return None
+    from expgym.tool_protocol import extract_text_answer
+    return extract_text_answer(block)
 
 
 def _extract_action(block: str) -> Optional[Tuple[str, str]]:
-    lines = block.splitlines()
-    i = 0
-    while i < len(lines):
-        clean = _normalize_label(lines[i])
-        if "Action:" in clean:
-            payload = clean.split("Action:", 1)[-1].strip()
-            payload = _strip_markup_prefix(payload)
-            if "[" in payload and "{" not in payload:
-                tool_name, remainder = payload.split("[", 1)
-                tool_name = _strip_markup_prefix(tool_name)
-                body = remainder
-                j = i
-                while not body.rstrip().endswith("]") and j + 1 < len(lines):
-                    j += 1
-                    body += lines[j].strip()
-                body = body.strip()
-                if body.endswith("]"):
-                    argument = body[:-1]
-                    return tool_name.strip(), argument
-                i = j
-            else:
-                parts = payload.split(None, 1)
-                tool_name = _strip_markup_prefix(parts[0]) if parts else ""
-                if len(parts) > 1 and parts[1].strip():
-                    argument = parts[1].strip()
-                    return tool_name.strip(), _strip_json_protocol_suffix(argument)
-                body = ""
-                j = i
-                while j + 1 < len(lines):
-                    j += 1
-                    next_line = lines[j].strip()
-                    if next_line:
-                        body = next_line
-                        break
-                return tool_name.strip(), body
-        i += 1
-    return None
+    from expgym.tool_protocol import extract_text_action
+    return extract_text_action(block)
 
 
 def _strip_json_protocol_suffix(argument: str) -> str:
@@ -837,7 +803,17 @@ class FakeLLM(LLMBackend):
         self._final_answer = final_answer
 
     def generate(self, messages) -> LLMOutput:
-        if self._step < len(self._plan):
+        # A budget/horizon stop can occur before this stub exhausts its plan.
+        # Honor the same final-answer instruction as a real backend instead
+        # of returning another Action that cannot be scored as a configuration.
+        latest = messages[-1] if isinstance(messages, list) and messages else {}
+        forced_answer = (
+            isinstance(latest, dict)
+            and latest.get("role") == "user"
+            and "System: Loop aborted (" in latest.get("content", "")
+            and "Respond immediately with Answer:" in latest.get("content", "")
+        )
+        if not forced_answer and self._step < len(self._plan):
             tool_name, payload = self._plan[self._step]
             self._last_payload = payload
             self._last_tool = tool_name
@@ -850,6 +826,8 @@ class FakeLLM(LLMBackend):
 
         self._step += 1
         choice = self._final_answer or self._last_payload or "No viable configuration"
+        if forced_answer:
+            return LLMOutput(text=f"Answer: {choice}")
         text = (
             "Thought: I have enough signal from the evaluated configs.\n"
             f"Answer: {choice}"

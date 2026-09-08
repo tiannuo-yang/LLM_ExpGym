@@ -4,15 +4,18 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from numbers import Integral, Real
 import random
 import os
 import threading
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Callable, Any
 
 from expgym.react_loop import build_system_prompt as build_react_system_prompt
+from expgym.errors import InvalidConfigurationError
 
 warnings.filterwarnings(
     "ignore",
@@ -290,22 +293,66 @@ def _load_hpobench_uncached(task_name: str) -> HPOBenchTask:
     raise ValueError(f"Unknown tuning task: {task_name}")
 
 
+def _nasbench101_edge_pairs(variant: str) -> List[Tuple[int, int]]:
+    """Edge-index meanings, in the same order as the compact NAS101 decoder."""
+    if variant.upper() == "B":
+        # B's selectors address the reversed bit string, decoded by column.
+        return [pair for _, pair in sorted(
+            (20 - (row + column * (column - 1) // 2), (row, column))
+            for column in range(7) for row in range(column)
+        )]
+    return [(row, column) for row in range(7) for column in range(row + 1, 7)]
+
+
 def _task_hints(task_name: str) -> Optional[str]:
     """Return task-specific semantic hints to help LLMs understand the search space."""
     if task_name.startswith("hpobench:nasbench101:"):
-        return (
-            "Note: This is a neural architecture search task on a 7-node directed acyclic graph (DAG). "
-            "The edge_* parameters form the upper-triangular adjacency matrix (0 or 1) of the DAG. "
-            "The op_node_* parameters choose the operation for each intermediate node. "
-            "Node 0 is the input and node 6 is the output. "
-            "IMPORTANT CONSTRAINTS: "
-            "(1) The total number of edges set to 1 must be AT MOST 9. "
-            "Architectures with more than 9 edges are INVALID and will always score 0. "
-            "(2) There must be a connected path from the input node (0) to the output node (6). "
-            "Disconnected graphs are degenerate and score 0. "
-            "(3) Do NOT set all edges to 1 — that exceeds the 9-edge limit. "
-            "You must specify ALL parameters in every evaluation call (set unused edges to 0)."
+        variant = task_name.split(":")[2].upper()
+        if variant not in {"A", "B", "C"}:
+            raise ValueError("NASBench101 variant must be A, B, or C.")
+        common = (
+            f"Note: NASBench101-{variant} is a neural architecture search task on a "
+            "7-node directed acyclic graph (DAG). Node 0 is the input and node 6 "
+            "is the output; op_node_0 through op_node_4 specify operations on "
+            "nodes 1 through 5. The decoded graph must have AT MOST 9 edges "
+            "and a connected path from node 0 to node 6. Graphs with more than "
+            "9 edges or no input-to-output path will always score 0. "
+            "You must specify ALL parameters in every evaluation call. "
         )
+        if variant == "A":
+            encoding = (
+                "Each of the 21 edge_0 through edge_20 parameters is a binary "
+                "adjacency entry (0=absent, 1=present), ordered row by row in "
+                "the upper-triangular adjacency matrix. Set unused edges to 0; "
+                "do not set all 21 entries to 1. Edge parameter mapping: "
+            )
+        elif variant == "B":
+            encoding = (
+                "The 9 parameters edge_0 through edge_8 are edge-ID selectors, "
+                "each an integer from 0 to 20, NOT binary adjacency entries. "
+                "Each selector chooses one edge from the mapping below. "
+                "Repeated IDs select that edge only once, so duplicates can "
+                "represent fewer than 9 edges. There is no unused sentinel: "
+                "ID 0 is a real edge (5->6), not an absent edge. IDs use the "
+                "decoder's reversed column-wise bit order. Edge-ID mapping: "
+            )
+        else:
+            encoding = (
+                "The 21 parameters edge_0 through edge_20 are real-valued "
+                "edge priorities in [0,1], NOT binary adjacency entries. "
+                "num_edges is an integer from 0 to 9; exactly the num_edges "
+                "highest-priority edges are selected (top-k). A priority of "
+                "0 is not an absent-edge sentinel; selection depends on rank. "
+                "Use distinct priorities to avoid tie ambiguity. num_edges=0 "
+                "selects no edges and cannot connect input to output. Priorities "
+                "use row-wise upper-triangular order. Edge parameter mapping: "
+            )
+        prefix = "" if variant == "B" else "edge_"
+        mapping = ", ".join(
+            f"{prefix}{index}={source}->{target}"
+            for index, (source, target) in enumerate(_nasbench101_edge_pairs(variant))
+        )
+        return common + encoding + mapping + "."
     if task_name.startswith("hpobench:nasbench201:"):
         return (
             "Note: This is a neural architecture search task. "
@@ -332,6 +379,110 @@ def _describe_config_space(cs: Any) -> str:
     return "\n".join(lines)
 
 
+def _schema_scalar(value: Any) -> Any:
+    """Convert ConfigSpace/NumPy scalars without losing JSON field types."""
+    if hasattr(value, "item"):
+        value = value.item()
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real) and math.isfinite(value):
+        return float(value)
+    raise TypeError(f"Unsupported JSON schema scalar: {value!r}")
+
+
+def _schema_enum(values: Any) -> Dict[str, Any]:
+    values = [_schema_scalar(value) for value in values]
+    types = set()
+    for value in values:
+        types.add("null" if value is None else "boolean" if isinstance(value, bool)
+                  else "integer" if isinstance(value, int)
+                  else "number" if isinstance(value, float) else "string")
+    if "number" in types:
+        types.discard("integer")
+    if not types:
+        raise ValueError("A hyperparameter must have at least one allowed value")
+    return {"type": next(iter(types)) if len(types) == 1 else sorted(types), "enum": values}
+
+
+def _ensure_supported_config_space(config_space: Any) -> None:
+    """Fail explicitly for spaces outside the flat scalar tool contract.
+
+    These are task-definition errors, not errors in a model's configuration.
+    The nine paper tasks are unconditional, unquantized numeric/string spaces.
+    """
+    for accessor, label in (("get_conditions", "conditional"),
+                            ("get_forbiddens", "forbidden-clause")):
+        getter = getattr(config_space, accessor, None)
+        if getter is not None and getter():
+            raise ValueError("Unsupported {} configuration space".format(label))
+    for hp in config_space.get_hyperparameters():
+        if getattr(hp, "q", None) is not None:
+            raise ValueError("Unsupported quantized hyperparameter: {}".format(hp.name))
+        values = (getattr(hp, "choices", None) if hasattr(hp, "choices") else
+                  getattr(hp, "sequence", None) if hasattr(hp, "sequence") else
+                  [hp.value] if hasattr(hp, "value") else None)
+        if values is not None:
+            for raw in values:
+                value = _schema_scalar(raw)
+                if value is None or isinstance(value, bool):
+                    raise ValueError("Unsupported boolean/null hyperparameter: {}".format(hp.name))
+        elif not (hasattr(hp, "lower") and hasattr(hp, "upper")):
+            raise TypeError("Unsupported hyperparameter type: {}".format(type(hp).__name__))
+        else:
+            bounds = [_schema_scalar(hp.lower), _schema_scalar(hp.upper)]
+            if any(isinstance(bound, bool) or not isinstance(bound, Real) for bound in bounds):
+                raise ValueError("Hyperparameter bounds must be finite numbers: {}".format(hp.name))
+            if bounds[0] > bounds[1]:
+                raise ValueError("Hyperparameter bounds are reversed: {}".format(hp.name))
+
+
+def _config_space_schema(config_space: Any) -> Dict[str, Any]:
+    """Describe the existing flat, all-parameters-required HPO tool payload."""
+    _ensure_supported_config_space(config_space)
+    properties = {}
+    for hp in config_space.get_hyperparameters():
+        if hasattr(hp, "choices"):
+            prop = _schema_enum(hp.choices)
+        elif hasattr(hp, "sequence"):
+            prop = _schema_enum(hp.sequence)
+        elif hasattr(hp, "lower") and hasattr(hp, "upper"):
+            is_integer = any("IntegerHyperparameter" in cls.__name__
+                             for cls in type(hp).__mro__)
+            prop = {"type": "integer" if is_integer else "number",
+                    "minimum": _schema_scalar(hp.lower), "maximum": _schema_scalar(hp.upper)}
+            if getattr(hp, "log", False):
+                prop["description"] = "Log-scaled hyperparameter; provide its value within the stated bounds."
+        elif hasattr(hp, "value"):
+            prop = _schema_enum([hp.value])
+        else:
+            raise TypeError(f"Unsupported hyperparameter type for tool schema: {type(hp).__name__}")
+        properties[hp.name] = prop
+    return {"type": "object", "properties": properties,
+            "required": list(properties), "additionalProperties": False}
+
+
+def _backend_number(value: Any, field: str, minimum: float,
+                    maximum: Optional[float] = None) -> float:
+    """Validate backend numbers before conversion, clipping, or normalization.
+
+    This deliberately does not raise InvalidConfigurationError: a corrupt
+    backend result must fail scoring rather than be counted as a model error.
+    """
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("Backend {} must be a real number".format(field))
+    try:
+        number = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError("Backend {} must be finite".format(field)) from exc
+    if not math.isfinite(number):
+        raise ValueError("Backend {} must be finite".format(field))
+    if number < minimum or (maximum is not None and number > maximum):
+        raise ValueError("Backend {} outside supported range".format(field))
+    return number
+
+
 def _hpobench_evaluate(task: HPOBenchTask, config: Dict[str, Any]) -> Tuple[float, float]:
     # Benchmark instances are shared across PoolAct agents. Guard mutable
     # ConfigSpace/surrogate state when agents evaluate concurrently.
@@ -344,8 +495,11 @@ def _hpobench_evaluate(task: HPOBenchTask, config: Dict[str, Any]) -> Tuple[floa
             configuration=config,
             fidelity=task.fidelity,
         )
-    obj_value = float(result.get("function_value", 1.0))
-    cost = float(result.get("cost", 0.0))
+    if not isinstance(result, Mapping):
+        raise TypeError("HPOBench result must be a mapping")
+    # Required fields: missing output is a backend failure, not a zero score.
+    obj_value = _backend_number(result["function_value"], "function_value", 0.0, 100.0)
+    cost = _backend_number(result["cost"], "cost", 0.0)
     if 1.0 < obj_value <= 100.0:
         perf = 1.0 - (obj_value / 100.0)
     else:
@@ -456,6 +610,7 @@ def _performance(vec: List[float]) -> float:
     #     t = (s - tail_start) / (1.0 - tail_start)  # t in (0,1]
     #     s = tail_start + (t ** gamma) * (1.0 - tail_start)
     # return s
+    score = _backend_number(score, "builtin raw performance", -math.inf)
     return max(0.0, min(1.0, score))
 
 
@@ -490,29 +645,47 @@ def _overhead(vec: List[float]) -> float:
 
     noise = _hash_noise(list(reversed(vec)), scale=0.005)
     overhead = base_seconds * warmup_term * lr_penalty_factor + noise
+    overhead = _backend_number(overhead, "builtin raw cost", 0.0)
     return max(8.0, min(140.0, overhead))
 
 
 def _validate_config(config: Dict[str, int]) -> None:
+    if not isinstance(config, dict):
+        raise InvalidConfigurationError("Configuration must be a dict")
     missing = [p.name for p in PARAMETER_RANGES if p.name not in config]
     if missing:
-        raise ValueError(f"Missing parameters: {missing}")
+        raise InvalidConfigurationError(f"Missing parameters: {missing}")
+    unknown = set(config) - {p.name for p in PARAMETER_RANGES}
+    if unknown:
+        raise InvalidConfigurationError(f"Unknown hyperparameter(s) {unknown}")
     for bounds in PARAMETER_RANGES:
         value = config[bounds.name]
-        if not isinstance(value, int):
-            raise TypeError(f"Parameter {bounds.name} must be int, got {type(value)!r}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise InvalidConfigurationError(f"Parameter {bounds.name} must be an integer")
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite or value != int(value):
+            raise InvalidConfigurationError(f"Parameter {bounds.name} must be a finite integer")
         if not bounds.low <= value <= bounds.high:
-            raise ValueError(
+            raise InvalidConfigurationError(
                 f"Parameter {bounds.name}={value} outside range [{bounds.low}, {bounds.high}]"
             )
+        config[bounds.name] = int(value)
 
 
 def evaluate_config(config: Dict[str, int]) -> Tuple[float, float]:
     """Return (performance, overhead) for the given configuration dict."""
 
-    _validate_config(config)
-    vec = _vectorize(config)
-    return _performance(vec), _overhead(vec)
+    if not isinstance(config, dict):
+        raise InvalidConfigurationError("Configuration must be a dict")
+    normalized = dict(config)
+    _validate_config(normalized)
+    vec = _vectorize(normalized)
+    perf = _backend_number(_performance(vec), "builtin performance", 0.0, 1.0)
+    cost = _backend_number(_overhead(vec), "builtin cost", 0.0)
+    return perf, cost
 
 
 def evaluate_config_action(payload: str) -> Tuple[float, float]:
@@ -520,38 +693,47 @@ def evaluate_config_action(payload: str) -> Tuple[float, float]:
 
     try:
         data = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        return f"Invalid JSON payload: {exc}. Send a single valid JSON object.", 0.0
+    except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+        raise InvalidConfigurationError(
+            f"Invalid JSON payload: {exc}. Send a single valid JSON object."
+        ) from exc
     if isinstance(data, list):
         if len(data) != len(PARAMETER_RANGES):
-            raise ValueError("Expected list of length 10 for configuration vector")
-        config = {rng.name: int(value) for rng, value in zip(PARAMETER_RANGES, data)}
+            raise InvalidConfigurationError("Expected list of length 10 for configuration vector")
+        config = {rng.name: value for rng, value in zip(PARAMETER_RANGES, data)}
     elif isinstance(data, dict):
-        config = {name: int(value) for name, value in data.items()}
+        config = data
     else:
-        raise TypeError("Configuration payload must be dict or list")
+        raise InvalidConfigurationError("Configuration payload must be dict or list")
     return evaluate_config(config)
 
 
 def evaluate_hpobench_action(task: HPOBenchTask, payload: str) -> Tuple[Any, ...]:
     try:
         data = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        return f"Invalid JSON payload: {exc}. Send a single valid JSON object.", 0.0
+    except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+        raise InvalidConfigurationError(
+            f"Invalid JSON payload: {exc}. Send a single valid JSON object."
+        ) from exc
     allowed = {hp.name for hp in task.config_space.get_hyperparameters()}
     fidelity_keys = set(task.fidelity.keys())
     if isinstance(data, list):
-        config = {hp.name: data[i] for i, hp in enumerate(task.config_space.get_hyperparameters())}
+        parameters = list(task.config_space.get_hyperparameters())
+        if len(data) != len(parameters):
+            raise InvalidConfigurationError(
+                f"Expected list of length {len(parameters)} for configuration vector"
+            )
+        config = {hp.name: value for hp, value in zip(parameters, data)}
     elif isinstance(data, dict):
         config = {k: v for k, v in data.items() if k in allowed}
         unknown = [k for k in data.keys() if k not in allowed and k not in fidelity_keys]
         if unknown:
-            raise ValueError(f"Unknown hyperparameter(s) {set(unknown)}")
+            raise InvalidConfigurationError(f"Unknown hyperparameter(s) {set(unknown)}")
     else:
-        raise TypeError("Configuration payload must be dict or list")
+        raise InvalidConfigurationError("Configuration payload must be dict or list")
     error = _validate_hpobench_config(task.config_space, config)
     if error is not None:
-        return error, 0.0
+        raise InvalidConfigurationError(error)
     perf, cost = _hpobench_evaluate(task, config)
     if perf == 0.0:
         return (
@@ -563,16 +745,51 @@ def evaluate_hpobench_action(task: HPOBenchTask, payload: str) -> Tuple[Any, ...
 
 
 def _validate_hpobench_config(config_space: Any, config: Dict[str, Any]) -> Optional[str]:
+    _ensure_supported_config_space(config_space)
     missing = [hp.name for hp in config_space.get_hyperparameters() if hp.name not in config]
     if missing:
         return f"Invalid config: missing {', '.join(missing)}. You must specify ALL parameters."
     errors = []
     for hp in config_space.get_hyperparameters():
         value = config[hp.name]
-        if hasattr(hp, "choices"):
-            if value not in hp.choices:
+        # JSON scalars only. bool is not an integer hyperparameter, and
+        # nonfinite values must not reach ConfigSpace or a benchmark backend.
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            errors.append(f"{hp.name} invalid type")
+            continue
+        if isinstance(value, (int, float)):
+            try:
+                finite_value = math.isfinite(value)
+            except OverflowError:
+                finite_value = False
+            if not finite_value:
+                errors.append(f"{hp.name} must be finite")
+                continue
+        if hasattr(hp, "choices") or hasattr(hp, "sequence") or hasattr(hp, "value"):
+            choices = (hp.choices if hasattr(hp, "choices") else
+                       hp.sequence if hasattr(hp, "sequence") else [hp.value])
+            matching = [choice for choice in choices
+                        if not isinstance(choice, bool)
+                        and ((isinstance(value, str) and isinstance(choice, str))
+                             or (isinstance(value, (int, float)) and isinstance(choice, Real)))
+                        and value == choice]
+            if not matching:
                 errors.append(f"{hp.name} out of range")
+            elif isinstance(matching[0], Integral):
+                # ConfigSpace 0.4 and 1.x differ on 1.0 for integer choices.
+                # Preserve its mathematical meaning, consistently in both.
+                config[hp.name] = int(value)
         elif hasattr(hp, "lower") and hasattr(hp, "upper"):
+            if not isinstance(value, (int, float)):
+                errors.append(f"{hp.name} invalid type")
+                continue
+            is_integer = any("IntegerHyperparameter" in cls.__name__
+                             for cls in type(hp).__mro__)
+            if is_integer:
+                if value != int(value):
+                    errors.append(f"{hp.name} must be integer")
+                    continue
+                config[hp.name] = int(value)
             if value < hp.lower or value > hp.upper:
                 errors.append(f"{hp.name} out of range")
     if errors:
@@ -617,14 +834,24 @@ def summarize_goal(include_overhead: bool) -> str:
 # --- Scenario wiring (prompt + FakeLLM helpers). ---
 
 
-def build_context(include_overhead: bool, *, tuning_task: str = "neural_network_training") -> str:
+def build_context(
+    include_overhead: bool, *, tuning_task: str = "neural_network_training",
+    tool_protocol: str = "text",
+) -> str:
     """Scenario context for the tuning task."""
+    if tool_protocol not in ("text", "native"):
+        raise ValueError("build_context tool_protocol must be resolved text or native")
+    tool_instruction = (
+        'Action format: Action: evaluate_config {"param": value, ...}'
+        if tool_protocol == "text" else
+        'Call the evaluate_config function with arguments {"param": value, ...} using a native tool call.'
+    )
 
     if tuning_task == "neural_network_training":
         lines = [
             summarize_goal(include_overhead),
             describe_parameter_ranges(),
-            "Action format: Action: evaluate_config {\"param\": value, ...}",
+            tool_instruction,
             "Answer format: Answer: {\"param\": value, ...}",
         ]
     else:
@@ -637,7 +864,7 @@ def build_context(include_overhead: bool, *, tuning_task: str = "neural_network_
         if hints:
             lines.append(hints)
         lines.extend([
-            "Action format: Action: evaluate_config {\"param\": value, ...}",
+            tool_instruction,
             "Answer format: Answer: {\"param\": value, ...}",
         ])
     if include_overhead:
@@ -673,6 +900,8 @@ def build_fake_plan(
         payloads = [format_config(cfg) for cfg in candidate_configs]
         return [("evaluate_config", payload) for payload in payloads]
     task = _load_hpobench(tuning_task)
+    import numpy as np
+
     with _HPOBENCH_EVAL_LOCKS[task.name]:
         if seed is not None:
             task.config_space.seed(seed)
@@ -680,15 +909,47 @@ def build_fake_plan(
             dict(task.config_space.sample_configuration())
             for _ in range(max(1, probes))
         ]
-    payloads = [json.dumps(cfg) for cfg in configs]
+    # ConfigSpace 1.x can return NumPy scalars for categorical choices.
+    # Preserve their numeric/boolean types in the JSON sent by the fake agent.
+    payloads = [
+        json.dumps({
+            name: value.item() if isinstance(value, np.generic) else value
+            for name, value in config.items()
+        })
+        for config in configs
+    ]
     return [("evaluate_config", payload) for payload in payloads]
 
 
 def build_tools(*, tuning_task: str = "neural_network_training") -> Dict[str, Callable[[str], Tuple[float, float]]]:
     if tuning_task == "neural_network_training":
-        return {"evaluate_config": evaluate_config_action}
-    task = _load_hpobench(tuning_task)
-    return {"evaluate_config": lambda payload: evaluate_hpobench_action(task, payload)}
+        def evaluate(payload: str):
+            return evaluate_config_action(payload)
+
+        properties = {bounds.name: {"type": "integer", "minimum": bounds.low,
+                                    "maximum": bounds.high} for bounds in PARAMETER_RANGES}
+        parameters = {"type": "object", "properties": properties,
+                      "required": list(properties), "additionalProperties": False}
+        description = "Evaluate a complete flat configuration and return performance and simulated evaluation cost."
+    else:
+        task = _load_hpobench(tuning_task)
+
+        def evaluate(payload: str):
+            return evaluate_hpobench_action(task, payload)
+
+        parameters = _config_space_schema(task.config_space)
+        description = (
+            f"Evaluate a complete flat configuration for {tuning_task}. "
+            "Return performance and simulated evaluation cost; fidelity is fixed "
+            f"at {json.dumps(task.fidelity, sort_keys=True)} and is not an input field."
+        )
+        hints = _task_hints(tuning_task)
+        if hints:
+            description += " " + hints
+    evaluate.__expgym_tool_schema__ = {
+        "name": "evaluate_config", "description": description, "parameters": parameters,
+    }
+    return {"evaluate_config": evaluate}
 
 
 SCENARIO = {

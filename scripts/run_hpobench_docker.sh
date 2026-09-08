@@ -37,6 +37,10 @@ If no runner options are provided, this runs one ParamNet smoke:
   --tuning-tasks hpobench:paramnet:adult:steps
   --cost-regimes cost_tight
 
+Runner sampling flags --top-p P / --top-k K (also --top-p=P / --top-k=K)
+are forwarded unchanged to either runner and validated by its shared CLI.
+Defaults remain top_p=1.0 and omitted top_k; no model-name policy is inferred.
+
 With --poolact, the default smoke instead uses:
   --model openai/gpt-4.1-nano
   --scenario tuning
@@ -52,7 +56,36 @@ Docker setup:
   Linux: install/start Docker Engine.
   macOS: install/start Docker Desktop.
   Windows: install/start Docker Desktop with WSL2, then run this script from WSL.
+
+Endpoint resolution follows the selected runner: --base-url overrides
+EXPGYM_BASE_URL, which overrides the selected backend's *_BASE_URL. Only URL
+hostnames localhost and 127.0.0.1 are rewritten to host.docker.internal.
 EOF
+}
+
+# Rewrite only the URL authority's hostname. A global string substitution can
+# corrupt userinfo, paths, queries, or a remote hostname containing "localhost".
+# Use Bash alone so the Docker wrapper does not require a host Python install.
+docker_endpoint() {
+  local endpoint="$1" prefix authority suffix userinfo host port
+  if [[ "$endpoint" =~ ^([A-Za-z][A-Za-z0-9+.-]*://)([^/?#]*)(.*)$ ]]; then
+    prefix="${BASH_REMATCH[1]}"
+    authority="${BASH_REMATCH[2]}"
+    suffix="${BASH_REMATCH[3]}"
+    userinfo=""
+    if [[ "$authority" == *@* ]]; then
+      userinfo="${authority%@*}@"
+      authority="${authority##*@}"
+    fi
+    host="${authority%%:*}"
+    port="${authority#"$host"}"
+    case "$host" in
+      [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127.0.0.1)
+        endpoint="${prefix}${userinfo}host.docker.internal${port}${suffix}"
+        ;;
+    esac
+  fi
+  printf '%s' "$endpoint"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -152,11 +185,48 @@ DOCKER_MOUNTS=(
 )
 
 RUN_BACKEND="${EXPGYM_BACKEND:-openrouter}"
+HAS_CLI_BASE_URL=0
 for ((i = 0; i < ${#RUNNER_ARGS[@]}; i++)); do
-  if [[ "${RUNNER_ARGS[$i]}" == "--backend" && $((i + 1)) -lt ${#RUNNER_ARGS[@]} ]]; then
-    RUN_BACKEND="${RUNNER_ARGS[$((i + 1))]}"
-  fi
+  case "${RUNNER_ARGS[$i]}" in
+    --backend)
+      if [[ $((i + 1)) -lt ${#RUNNER_ARGS[@]} ]]; then
+        i=$((i + 1))
+        RUN_BACKEND="${RUNNER_ARGS[$i]}"
+      fi
+      ;;
+    --backend=*)
+      RUN_BACKEND="${RUNNER_ARGS[$i]#--backend=}"
+      ;;
+    --base-url)
+      if [[ $((i + 1)) -lt ${#RUNNER_ARGS[@]} ]]; then
+        i=$((i + 1))
+        HAS_CLI_BASE_URL=1
+        RUNNER_ARGS[$i]="$(docker_endpoint "${RUNNER_ARGS[$i]}")"
+      fi
+      ;;
+    --base-url=*)
+      HAS_CLI_BASE_URL=1
+      RUNNER_ARGS[$i]="--base-url=$(docker_endpoint "${RUNNER_ARGS[$i]#--base-url=}")"
+      ;;
+  esac
 done
+# Keep an environment-selected backend aligned with the authentication choice
+# above. CLI --backend still wins inside the runner, including PoolAct defaults.
+DOCKER_ENV+=(-e "EXPGYM_BACKEND=$RUN_BACKEND")
+
+BACKEND_BASE_URL_ENV=""
+case "$RUN_BACKEND" in
+  sub2api) BACKEND_BASE_URL_ENV=SUB2API_BASE_URL ;;
+  openai) BACKEND_BASE_URL_ENV=OPENAI_BASE_URL ;;
+  openrouter) BACKEND_BASE_URL_ENV=OPENROUTER_BASE_URL ;;
+esac
+if [[ "$HAS_CLI_BASE_URL" -eq 0 ]]; then
+  if [[ -n "${EXPGYM_BASE_URL:-}" ]]; then
+    DOCKER_ENV+=(-e "EXPGYM_BASE_URL=$(docker_endpoint "$EXPGYM_BASE_URL")")
+  elif [[ -n "$BACKEND_BASE_URL_ENV" && -n "${!BACKEND_BASE_URL_ENV:-}" ]]; then
+    DOCKER_ENV+=(-e "$BACKEND_BASE_URL_ENV=$(docker_endpoint "${!BACKEND_BASE_URL_ENV}")")
+  fi
+fi
 
 case "$RUN_BACKEND" in
   sub2api)
@@ -165,11 +235,6 @@ case "$RUN_BACKEND" in
       exit 1
     fi
     DOCKER_ENV+=(-e SUB2API_API_KEY)
-    if [[ -n "${SUB2API_BASE_URL:-}" ]]; then
-      DOCKER_SUB2API_BASE_URL="${SUB2API_BASE_URL/127.0.0.1/host.docker.internal}"
-      DOCKER_SUB2API_BASE_URL="${DOCKER_SUB2API_BASE_URL/localhost/host.docker.internal}"
-      DOCKER_ENV+=(-e "SUB2API_BASE_URL=$DOCKER_SUB2API_BASE_URL")
-    fi
     if [[ -n "${SUB2API_MODEL:-}" ]]; then
       DOCKER_ENV+=(-e SUB2API_MODEL)
     fi

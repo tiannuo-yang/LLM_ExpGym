@@ -11,7 +11,9 @@ returned hooks to :func:`expgym.react_loop.run_react_loop`.
 """
 from __future__ import annotations
 
+import inspect
 import json
+import math
 import re
 import threading
 from collections import Counter
@@ -19,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from expgym.extras.aggregation_diagnostics import build_aggregation_diagnostics
 from expgym.extras.parallel_cache import (
     ActionClaim,
     AgentClock,
@@ -34,7 +37,7 @@ from expgym.extras.parallel_cache import (
     wrap_tools_with_poolact,
 )
 
-POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v2"
+POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v3"
 
 
 @dataclass
@@ -68,8 +71,13 @@ class PoolActCoordinator:
         agent_id: int,
         *,
         overhead_scale: float = 1.0,
+        time_budget: Optional[float] = None,
     ) -> PoolActAgentRuntime:
-        """Wrap one agent's tools and return all ReAct-loop hooks."""
+        """Wrap one agent's tools and return all ReAct-loop hooks.
+
+        ``time_budget`` is the same strict ceiling, in scaled simulated seconds,
+        passed to ``run_react_loop``. It prevents withheld results being shared.
+        """
         if agent_id < 0 or agent_id >= self.n_agents:
             raise ValueError(
                 f"agent_id must be in [0, {self.n_agents}), got {agent_id}"
@@ -82,6 +90,7 @@ class PoolActCoordinator:
             agent_id,
             clock=clock,
             overhead_scale=overhead_scale,
+            time_budget=time_budget,
         )
         return PoolActAgentRuntime(
             tools=wrapped,
@@ -90,6 +99,7 @@ class PoolActCoordinator:
                 self.graph,
                 clock=clock,
                 agent_id=agent_id,
+                time_budget=time_budget,
             ),
             pre_tool_hook=make_pre_tool_hook(
                 self.graph,
@@ -161,10 +171,21 @@ def _evaluate_aggregate(
 ) -> tuple[Optional[float], Optional[Dict[str, Any]]]:
     if evaluator is None:
         return None, None
+    # Select the legacy one-argument form before execution. Catching a TypeError
+    # from the evaluator itself and trying again would mask/repeat a real error.
+    call_args = (answer, [])
     try:
-        score = evaluator(answer, [])
-    except TypeError:
-        score = evaluator(answer)
+        signature = inspect.signature(evaluator)
+    except (ValueError, TypeError):
+        signature = None  # Uninspectable callables use the public two-arg form.
+    if signature is not None:
+        try:
+            signature.bind(*call_args)
+        except TypeError:
+            signature.bind(answer)
+            call_args = (answer,)
+    score = evaluator(*call_args)
+    _require_finite_scores(score, "aggregate evaluator score")
     if isinstance(score, dict):
         primary = score.get("label_acc")
         return (
@@ -174,6 +195,18 @@ def _evaluate_aggregate(
     if isinstance(score, (int, float)):
         return float(score), None
     return None, None
+
+
+def _require_finite_scores(value: Any, location: str) -> None:
+    """Reject invalid score data rather than silently voting/scoring it as zero."""
+    if isinstance(value, (int, float)) and not math.isfinite(value):
+        raise ValueError(f"Non-finite score at {location}")
+    if isinstance(value, dict):
+        for key, child in value.items():
+            _require_finite_scores(child, f"{location}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _require_finite_scores(child, f"{location}[{index}]")
 
 
 def _canonical_audit_label(value: Any) -> str:
@@ -196,7 +229,7 @@ def _canonical_evidence_ids(value: Any) -> tuple[Any, ...]:
     for item in value:
         try:
             normalized.add(int(item))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             normalized.add(str(item))
     return tuple(sorted(normalized, key=lambda item: (str(type(item)), str(item))))
 
@@ -216,6 +249,9 @@ def aggregate_results(
         raise ValueError("results must not be empty")
     individual_answers = [result.get("answer") or "" for result in results]
     individual_perfs = [result.get("answer_perf") for result in results]
+    for index, result in enumerate(results):
+        _require_finite_scores(result.get("answer_perf"), f"agent[{index}].answer_perf")
+        _require_finite_scores(result.get("answer_metrics"), f"agent[{index}].answer_metrics")
 
     if scenario == "tuning":
         best = max(
@@ -233,6 +269,11 @@ def aggregate_results(
             "answer_metrics": best.get("answer_metrics"),
             "individual_answers": individual_answers,
             "individual_perfs": individual_perfs,
+            "diagnostics": build_aggregation_diagnostics(
+                scenario, results,
+                selected_agent_index=next(index for index, result in enumerate(results)
+                                          if result is best),
+            ),
         }
 
     if scenario == "restricted_search":
@@ -252,6 +293,9 @@ def aggregate_results(
             "answer_metrics": metrics,
             "individual_answers": individual_answers,
             "individual_perfs": individual_perfs,
+            "diagnostics": build_aggregation_diagnostics(
+                scenario, results, selected_agent_index=winner_index, search_keys=keys,
+            ),
         }
 
     if scenario != "evidence_audit":
@@ -260,6 +304,8 @@ def aggregate_results(
     parsed_answers: List[Dict[str, Any]] = []
     for answer in individual_answers:
         try:
+            # Preserve the historical vote acceptance set. Task evaluators may
+            # accept other wrappers; changing voting requires a separate policy.
             parsed = json.loads(answer) if isinstance(answer, str) else answer
         except (json.JSONDecodeError, TypeError):
             parsed = {}
@@ -269,7 +315,15 @@ def aggregate_results(
         {hypothesis_id for parsed in parsed_answers for hypothesis_id in parsed}
     )
     voted: Dict[str, Any] = {}
+    audit_votes: Dict[str, List[Dict[str, Any]]] = {}
     for hypothesis_id in hypothesis_ids:
+        audit_votes[hypothesis_id] = [
+            {"agent_index": index,
+             "label": _canonical_audit_label(parsed[hypothesis_id].get("label")),
+             "evidence_key": _canonical_evidence_ids(parsed[hypothesis_id].get("evidence_ids"))}
+            for index, parsed in enumerate(parsed_answers)
+            if isinstance(parsed.get(hypothesis_id), dict)
+        ]
         entries = [
             parsed[hypothesis_id]
             for parsed in parsed_answers
@@ -299,6 +353,9 @@ def aggregate_results(
         "answer_metrics": metrics,
         "individual_answers": individual_answers,
         "individual_perfs": individual_perfs,
+        "diagnostics": build_aggregation_diagnostics(
+            scenario, results, parsed_answers=parsed_answers, audit_votes=audit_votes,
+        ),
     }
 
 

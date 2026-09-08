@@ -5,17 +5,25 @@ such as Gemini that offer OpenAI-compatible endpoints.
 """
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import logging
+import math
 import os
 import socket
 import ssl
+import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from email.message import Message
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from expgym.react_loop import LLMBackend, LLMOutput
@@ -28,6 +36,18 @@ DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/ch
 DEFAULT_VLLM_URL = "http://localhost:8000/v1/chat/completions"
 DEFAULT_SUB2API_URL = "http://127.0.0.1:8080/v1/chat/completions"
 DEFAULT_RETRY_HTTP_STATUSES = (429, 500, 502, 503, 504)
+
+
+class APIClientError(RuntimeError):
+    """Terminal transport/protocol failure with all known attempt usage.
+
+    Missing usage is unknown, not zero. Raw response evidence remains in the
+    optional attempt dump; this metadata also survives when generation fails.
+    """
+
+    def __init__(self, message: str, attempt_usage: List[Dict[str, object]]) -> None:
+        super().__init__(message)
+        self.attempt_usage = copy.deepcopy(attempt_usage)
 
 
 def _normalize_chat_completions_url(base_url: str) -> str:
@@ -129,6 +149,7 @@ class OpenAIConfig:
     retry_base_seconds: float = 3.0
     retry_max_seconds: float = 120.0
     retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES
+    reasoning_effort: Optional[str] = None
 
 
 class OpenAICompatibleLLM(LLMBackend):
@@ -136,6 +157,8 @@ class OpenAICompatibleLLM(LLMBackend):
 
     Accepts either a messages list (multi-turn) or a plain string (legacy).
     """
+
+    supports_native_tools = True
 
     def __init__(
         self,
@@ -160,20 +183,45 @@ class OpenAICompatibleLLM(LLMBackend):
         retry_base_seconds: float = 3.0,
         retry_max_seconds: float = 120.0,
         retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES,
+        dump_context: Optional[Dict[str, object]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not key:
             raise ValueError("An API key is required for OpenAICompatibleLLM")
+        if (isinstance(top_p, bool) or not isinstance(top_p, (int, float))
+                or not 0.0 < top_p <= 1.0 or not math.isfinite(top_p)):
+            raise ValueError("top_p must be a finite number in (0, 1]")
+        if top_k is not None and (
+            isinstance(top_k, bool) or not isinstance(top_k, int)
+            or (top_k != -1 and top_k < 1)
+        ):
+            raise ValueError("top_k must be None, -1 (disable), or a positive integer")
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
         if retry_base_seconds < 0 or retry_max_seconds < 0:
             raise ValueError("retry delays must be non-negative")
+        if max_tokens is not None and (
+            isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1
+        ):
+            raise ValueError("max_tokens must be a positive integer")
+        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
+            raise ValueError("chat_template_kwargs must be a JSON object")
+        if reasoning_effort is not None and (
+            not isinstance(reasoning_effort, str) or not reasoning_effort.strip()
+        ):
+            raise ValueError("reasoning_effort must be a non-empty string")
+        if reasoning_effort is not None and isinstance(reasoning, dict):
+            enabled = reasoning.get("enabled")
+            if ((enabled is False and reasoning_effort != "none")
+                    or (enabled is True and reasoning_effort == "none")):
+                raise ValueError("reasoning_effort conflicts with explicit reasoning.enabled")
         self.config = OpenAIConfig(
             api_key=key,
             model=model,
             system_prompt=system_prompt,
             temperature=temperature,
-            top_p=top_p,
+            top_p=float(top_p),
             seed=seed,
             chat_template_kwargs=chat_template_kwargs or {},
             timeout=timeout,
@@ -191,8 +239,130 @@ class OpenAICompatibleLLM(LLMBackend):
             retry_base_seconds=retry_base_seconds,
             retry_max_seconds=retry_max_seconds,
             retry_http_statuses=tuple(retry_http_statuses),
+            reasoning_effort=reasoning_effort,
         )
         self._transport = transport
+        dump_directory = os.getenv("EXPGYM_API_DUMP_DIR")
+        self._dump_directory = Path(dump_directory) if dump_directory else None
+        self._dump_run_id = os.getenv("EXPGYM_RUN_ID")
+        self._dump_context = dict(dump_context or {})
+        self._dump_client_id = uuid.uuid4().hex
+
+    @property
+    def dump_metadata(self) -> Optional[Dict[str, object]]:
+        """Public audit identity, independent of generation and resume settings."""
+        if self._dump_directory is None:
+            return None
+        return {
+            "schema_version": "expgym.api_attempt.v1",
+            "client_id": self._dump_client_id,
+            "run_id": self._dump_run_id,
+        }
+
+    @staticmethod
+    def _is_secret_field(name: str) -> bool:
+        normalized = name.lower().replace("-", "_")
+        return normalized in {
+            "authorization", "proxy_authorization", "api_key", "apikey", "x_api_key",
+            "access_token", "refresh_token", "password", "secret", "client_secret",
+        } or normalized.endswith(("_api_key", "_access_token", "_secret"))
+
+    def _redact_dump_value(self, value: object) -> object:
+        """Exclude credential fields and any echoed configured credentials."""
+        if isinstance(value, dict):
+            return {
+                key: "[REDACTED]" if self._is_secret_field(str(key)) else self._redact_dump_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [self._redact_dump_value(item) for item in value]
+        if isinstance(value, str):
+            secrets = [self.config.api_key]
+            secrets.extend(
+                header_value for name, header_value in self.config.extra_headers.items()
+                if self._is_secret_field(name)
+            )
+            for secret in sorted(set(secrets), key=len, reverse=True):
+                if secret:
+                    value = value.replace(secret, "[REDACTED]")
+            return value
+        return value
+
+    def _dump_attempt(
+        self,
+        metadata: Dict[str, object],
+        payload: Dict[str, object],
+        started: float,
+        *,
+        state: str,
+        raw: Optional[bytes] = None,
+        error: Optional[Exception] = None,
+        http_status: Optional[int] = None,
+        retry_delay: Optional[float] = None,
+    ) -> None:
+        """Atomically record each HTTP attempt, including failed and pending ones.
+
+        Dump failures propagate so an explicitly audited run cannot silently lose
+        requests. Transport headers are never serialized. Non-JSON response bytes
+        are decoded with backslash escapes so malformed responses remain inspectable.
+        """
+        if self._dump_directory is None:
+            return
+        parsed_url = urllib.parse.urlsplit(self.config.base_url)
+        endpoint = urllib.parse.urlunsplit((
+            parsed_url.scheme, parsed_url.netloc.rsplit("@", 1)[-1], parsed_url.path, "", "",
+        ))
+        response_text = raw.decode("utf-8", "backslashreplace") if raw is not None else None
+        response_json = None
+        if raw is not None:
+            try:
+                response_json = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError, RecursionError):
+                pass
+        safe_response = self._redact_dump_value(response_json)
+        if safe_response != response_json:
+            # A provider may echo a credential in its error body. Keep a redacted
+            # equivalent instead of persisting that credential in the raw string.
+            response_text = json.dumps(safe_response, ensure_ascii=False)
+        record = {
+            "schema_version": "expgym.api_attempt.v1",
+            **metadata,
+            "run_id": self._dump_run_id,
+            "client_id": self._dump_client_id,
+            "context": self._dump_context,
+            "pid": os.getpid(),
+            "thread_id": threading.get_ident(),
+            "thread_name": threading.current_thread().name,
+            "state": state,
+            "finished_at_utc": None if state == "in_progress" else datetime.now(timezone.utc).isoformat(),
+            "wall_time_seconds": time.monotonic() - started,
+            "endpoint": endpoint,
+            "request_payload": payload,
+            "response_raw": response_text,
+            "response_json": safe_response,
+            "http_status": http_status,
+            "error": {"type": type(error).__name__, "message": str(error)} if error else None,
+            "will_retry": retry_delay is not None,
+            "retry_delay_seconds": retry_delay,
+        }
+        self._dump_directory.mkdir(parents=True, exist_ok=True)
+        destination = self._dump_directory / (str(metadata["request_id"]) + ".json")
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=str(self._dump_directory),
+            prefix=".api-attempt-", suffix=".tmp", delete=False,
+        )
+        temporary = Path(handle.name)
+        try:
+            with handle:
+                json.dump(self._redact_dump_value(record), handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(str(temporary), str(destination))
+        except BaseException:
+            if temporary.exists():
+                temporary.unlink()
+            raise
 
     def _build_request(self, payload: Dict[str, object]) -> urllib.request.Request:
         return urllib.request.Request(
@@ -222,10 +392,119 @@ class OpenAICompatibleLLM(LLMBackend):
         return min(exponential, self.config.retry_max_seconds)
 
     @staticmethod
-    def _decode_response(raw: bytes) -> Tuple[Dict[str, object], str]:
+    def _normalize_tool_calls(value: object) -> List[Dict[str, object]]:
+        """Validate transport shape, not the model's argument content.
+
+        Argument strings are preserved verbatim, even when they are invalid
+        JSON or violate the tool schema. Such a delivered action must consume
+        an agent step in the loop, never trigger hidden HTTP resampling here.
+        Structured provider arguments are serialized without changing values;
+        the original assistant message is separately retained for history.
+        """
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("API message tool_calls must be a list")
+        normalized = []
+        seen_ids = set()
+        for call in value:
+            if not isinstance(call, dict) or call.get("type") != "function":
+                raise ValueError("API tool call must have type function")
+            call_id = call.get("id")
+            if not isinstance(call_id, str) or not call_id.strip() or call_id in seen_ids:
+                raise ValueError("API tool calls require non-empty unique ids")
+            seen_ids.add(call_id)
+            function = call.get("function")
+            if not isinstance(function, dict):
+                raise ValueError("API tool call missing function")
+            name = function.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("API tool call missing function name")
+            if "arguments" not in function:
+                raise ValueError("API tool call missing function arguments")
+            arguments = function["arguments"]
+            if isinstance(arguments, str):
+                encoded = arguments
+            else:
+                try:
+                    encoded = json.dumps(arguments, ensure_ascii=False, allow_nan=False)
+                except (ValueError, TypeError, OverflowError) as exc:
+                    raise ValueError("API tool call arguments have a non-JSON representation") from exc
+            item = copy.deepcopy(call)
+            item["function"]["arguments"] = encoded
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _validate_usage(usage: object) -> None:
+        """Fail explicitly on unusable accounting, never resample a completion."""
+        if usage is None:
+            return
+        if not isinstance(usage, dict):
+            raise ValueError("API usage must be an object or null")
+        numeric_keys = (
+            "prompt_tokens", "input_tokens", "completion_tokens", "output_tokens",
+            "total_tokens", "reasoning_tokens",
+        )
+        counts = [(key, usage[key]) for key in numeric_keys if key in usage]
+        for details_key in ("prompt_tokens_details", "input_tokens_details",
+                            "completion_tokens_details", "output_tokens_details"):
+            details = usage.get(details_key)
+            if details is None:
+                continue
+            if not isinstance(details, dict):
+                raise ValueError("API usage token details must be an object or null")
+            counts.extend(
+                (details_key + "." + key, details[key])
+                for key in ("cached_tokens", "cache_write_tokens", "reasoning_tokens")
+                if key in details
+            )
+        for key, value in counts:
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise ValueError("API usage " + key + " must be a non-negative integer or null")
+
+    def _attempt_usage_record(
+        self, metadata: Dict[str, object], state: str,
+        raw: Optional[bytes] = None, http_status: Optional[int] = None,
+    ) -> Dict[str, object]:
+        usage = None
+        usage_error = None
+        if raw is not None:
+            try:
+                data = json.loads(raw.decode("utf-8"))
+                if isinstance(data, dict) and data.get("usage") is not None:
+                    try:
+                        self._validate_usage(data["usage"])
+                        json.dumps(data["usage"], allow_nan=False)
+                    except (ValueError, TypeError, RecursionError) as exc:
+                        usage_error = str(exc)
+                    else:
+                        usage = self._redact_dump_value(copy.deepcopy(data["usage"]))
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                pass
+        record = {
+            "attempt": metadata["attempt"],
+            "request_id": metadata["request_id"],
+            "generation_id": metadata["generation_id"],
+            "state": state,
+            "http_status": http_status,
+            "usage": usage,
+        }
+        if usage_error is not None:
+            # Invalid provider accounting is not usable as a token total. The
+            # original bytes remain in the attempt dump, without invented zeros.
+            record["usage_error"] = usage_error
+        return record
+
+    @classmethod
+    def _decode_response(
+        cls, raw: bytes,
+    ) -> Tuple[Dict[str, object], str, List[Dict[str, object]], Dict[str, object], Optional[str]]:
         try:
             data = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise ValueError("API returned invalid JSON") from exc
         if not isinstance(data, dict):
             raise ValueError("API response is not an object")
@@ -233,32 +512,97 @@ class OpenAICompatibleLLM(LLMBackend):
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise ValueError("API returned no choices")
         message = choices[0].get("message")
-        if not isinstance(message, dict) or "content" not in message:
+        if not isinstance(message, dict):
             raise ValueError("API choice missing message content")
+        if not any(key in message for key in (
+            "content", "tool_calls", "reasoning_content", "reasoning", "refusal",
+        )):
+            raise ValueError("API choice missing assistant response fields")
+        if message.get("role", "assistant") != "assistant":
+            raise ValueError("API choice message role must be assistant")
+        tool_calls = cls._normalize_tool_calls(message.get("tool_calls"))
         content = message.get("content")
         if isinstance(content, str):
             text = content.strip()
         elif isinstance(content, list):
-            text = "\n".join(
-                str(part.get("text", ""))
-                for part in content
-                if isinstance(part, dict) and part.get("type") == "text"
-            ).strip()
-        else:
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    part_text = part.get("text", "")
+                    if not isinstance(part_text, str):
+                        raise ValueError("API text content parts must contain strings")
+                    text_parts.append(part_text)
+            text = "\n".join(text_parts).strip()
+        elif content is None:
             text = ""
-        if not text:
-            raise ValueError("API choice missing message content")
-        return data, text
+        else:
+            raise ValueError("API message content must be text, a content list, or null")
+        # An empty visible completion, reasoning-only output, or length stop
+        # is still a delivered model decision. The loop handles its protocol
+        # outcome after charging this step; it is not an HTTP retry condition.
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            raise ValueError("API choice finish_reason must be a string or null")
+        if finish_reason == "tool_calls" and not tool_calls:
+            raise ValueError("API tool_calls finish_reason missing tool calls")
+        cls._validate_usage(data.get("usage"))
+        # Keep the complete provider message for the next conversation turn,
+        # including reasoning fields and the original (unnormalized) tool calls.
+        assistant_message = copy.deepcopy(message)
+        assistant_message.setdefault("role", "assistant")
+        return data, text, tool_calls, assistant_message, finish_reason
 
-    def generate(self, messages: Union[str, List[Dict[str, str]]]) -> LLMOutput:
+    def generate(
+        self,
+        messages: Union[str, List[Dict[str, object]]],
+        *,
+        tools: Optional[List[Dict[str, object]]] = None,
+        tool_choice: Optional[Union[str, Dict[str, object]]] = None,
+    ) -> LLMOutput:
+        """Return one delivered decision, retrying only transport failures.
+
+        Every terminal exception retains known attempt usage, including a dump
+        failure after a completion arrived. Original exception types are kept
+        for callers that distinguish filesystem failures from API failures.
+        """
+        attempt_usage: List[Dict[str, object]] = []
+        try:
+            return self._generate(
+                messages, tools=tools, tool_choice=tool_choice, attempt_usage=attempt_usage,
+            )
+        except Exception as exc:
+            exc.attempt_usage = copy.deepcopy(attempt_usage)
+            raise
+
+    def _generate(
+        self,
+        messages: Union[str, List[Dict[str, object]]],
+        *,
+        tools: Optional[List[Dict[str, object]]],
+        tool_choice: Optional[Union[str, Dict[str, object]]],
+        attempt_usage: List[Dict[str, object]],
+    ) -> LLMOutput:
+        """Generate text and/or native calls without flattening chat history.
+
+        Supplying tool definitions enables native auto selection; a final-answer
+        request passes the same definitions with ``tool_choice="none"``. Omitting
+        both arguments retains the legacy text-only request shape.
+        """
+        if tools is not None and not isinstance(tools, list):
+            raise ValueError("tools must be a list of OpenAI tool definitions")
+        if tool_choice is not None and not isinstance(tool_choice, (str, dict)):
+            raise ValueError("tool_choice must be a string or an OpenAI choice object")
         if isinstance(messages, str):
             # Legacy: wrap plain string into messages list
-            msgs: List[Dict[str, str]] = []
+            msgs: List[Dict[str, object]] = []
             if self.config.system_prompt:
                 msgs.append({"role": "system", "content": self.config.system_prompt})
             msgs.append({"role": "user", "content": messages})
         else:
-            msgs = list(messages)
+            # Assistant reasoning/tool calls and tool-role/tool_call_id entries
+            # must survive intact. A private copy also protects callers from
+            # provider-specific prompt adjustments and subsequent mutation.
+            msgs = copy.deepcopy(messages)
 
         # Prepend /nothink to system message for Qwen3 thinking suppression
         if (self.config.nothink_prefix
@@ -284,17 +628,48 @@ class OpenAICompatibleLLM(LLMBackend):
             payload["provider"] = self.config.provider
         if self.config.reasoning is not None:
             payload["reasoning"] = self.config.reasoning
+        if self.config.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.config.reasoning_effort
         if self.config.chat_template_kwargs:
             payload["chat_template_kwargs"] = self.config.chat_template_kwargs
         if self.config.prompt_cache_key is not None:
             payload["prompt_cache_key"] = self.config.prompt_cache_key
+        if tools is not None:
+            payload["tools"] = copy.deepcopy(tools)
+            payload["tool_choice"] = copy.deepcopy(tool_choice) if tool_choice is not None else "auto"
+            payload["parallel_tool_calls"] = False
+        elif tool_choice is not None:
+            payload["tool_choice"] = copy.deepcopy(tool_choice)
+        generation_id = uuid.uuid4().hex
         for attempt in range(self.config.max_retries + 1):
             request = self._build_request(payload)
+            started = time.monotonic()
+            metadata = {
+                "generation_id": generation_id,
+                "request_id": uuid.uuid4().hex,
+                "attempt": attempt + 1,
+                "max_attempts": self.config.max_retries + 1,
+                "started_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            self._dump_attempt(metadata, payload, started, state="in_progress")
             try:
                 raw = self._transport(request, self.config.timeout)
             except urllib.error.HTTPError as exc:
                 code = exc.code
-                body = exc.read().decode("utf-8", "ignore")
+                try:
+                    raw_error = exc.read()
+                except Exception as read_error:
+                    attempt_usage.append(self._attempt_usage_record(metadata, "error", http_status=code))
+                    self._dump_attempt(metadata, payload, started, state="error", error=read_error, http_status=code)
+                    raise
+                body = raw_error.decode("utf-8", "ignore")
+                attempt_usage.append(self._attempt_usage_record(metadata, "error", raw_error, code))
+                will_retry = code in self.config.retry_http_statuses and attempt < self.config.max_retries
+                wait = self._retry_delay(attempt, exc.headers) if will_retry else None
+                self._dump_attempt(
+                    metadata, payload, started, state="error", raw=raw_error,
+                    error=exc, http_status=code, retry_delay=wait,
+                )
                 if (
                     code in self.config.retry_http_statuses
                     and attempt < self.config.max_retries
@@ -310,8 +685,15 @@ class OpenAICompatibleLLM(LLMBackend):
                     import time as _time
                     _time.sleep(wait)
                     continue
-                raise RuntimeError(f"API error: {body}") from exc
+                raise APIClientError(
+                    "API error: " + str(self._redact_dump_value(body)), attempt_usage,
+                ) from exc
             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                attempt_usage.append(self._attempt_usage_record(metadata, "error"))
+                wait = self._retry_delay(attempt) if attempt < self.config.max_retries else None
+                self._dump_attempt(
+                    metadata, payload, started, state="error", error=exc, retry_delay=wait,
+                )
                 if attempt < self.config.max_retries:
                     wait = self._retry_delay(attempt)
                     logger.warning(
@@ -319,33 +701,42 @@ class OpenAICompatibleLLM(LLMBackend):
                         attempt + 1,
                         self.config.max_retries,
                         wait,
-                        exc,
+                        self._redact_dump_value(str(exc)),
                     )
                     import time as _time
                     _time.sleep(wait)
                     continue
-                raise RuntimeError(f"API connection failed: {exc}") from exc
+                raise APIClientError(
+                    "API connection failed: " + str(self._redact_dump_value(str(exc))), attempt_usage,
+                ) from exc
+            except Exception as exc:
+                attempt_usage.append(self._attempt_usage_record(metadata, "error"))
+                self._dump_attempt(metadata, payload, started, state="error", error=exc)
+                raise
             try:
-                data, text = self._decode_response(raw)
-            except ValueError as exc:
-                if attempt < self.config.max_retries:
-                    wait = self._retry_delay(attempt)
-                    logger.warning(
-                        "%s, retry %d/%d in %.1fs",
-                        exc,
-                        attempt + 1,
-                        self.config.max_retries,
-                        wait,
-                    )
-                    import time as _time
-                    _time.sleep(wait)
-                    continue
-                raise RuntimeError(str(exc)) from exc
+                data, text, tool_calls, assistant_message, finish_reason = self._decode_response(raw)
+            except Exception as exc:
+                attempt_usage.append(self._attempt_usage_record(metadata, "malformed_response", raw))
+                self._dump_attempt(
+                    metadata, payload, started, state="malformed_response", raw=raw,
+                    error=exc,
+                )
+                # A decoded HTTP success with an uncertain structure is an
+                # explicit invalid run, not a chance to sample another answer.
+                raise APIClientError(str(exc), attempt_usage) from exc
+            # Transport returns bytes only: an exact success status is not
+            # available through this interface, so do not fabricate HTTP 200.
+            attempt_usage.append(self._attempt_usage_record(metadata, "success", raw))
+            self._dump_attempt(metadata, payload, started, state="success", raw=raw)
             break
 
         usage = data.get("usage") or {}
-        prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
-        completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        prompt_tokens = usage.get("prompt_tokens")
+        if prompt_tokens is None:
+            prompt_tokens = usage.get("input_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if completion_tokens is None:
+            completion_tokens = usage.get("output_tokens")
         prompt_token_details = (
             usage.get("prompt_tokens_details")
             or usage.get("input_tokens_details")
@@ -368,6 +759,12 @@ class OpenAICompatibleLLM(LLMBackend):
             cached_prompt_tokens=cached_prompt_tokens,
             cache_write_prompt_tokens=cache_write_prompt_tokens,
             request_attempts=attempt + 1,
+            tool_calls=tool_calls,
+            assistant_message=assistant_message,
+            finish_reason=finish_reason,
+            # Scalar counters above describe the delivered response only.
+            # Account for all attempts separately; usage=None is unknown cost.
+            attempt_usage=attempt_usage,
         )
 
 
@@ -408,9 +805,9 @@ def build_openrouter_client(
     provider = kwargs.pop("provider", None)
     if provider is None and require_parameters:
         provider = {"require_parameters": True}
-    # Disable thinking by default for deterministic output
+    # Retain the legacy default only when no explicit effort was requested.
     reasoning = kwargs.pop("reasoning", None)
-    if reasoning is None and disable_thinking:
+    if reasoning is None and disable_thinking and kwargs.get("reasoning_effort") is None:
         reasoning = {"enabled": False}
     return OpenAICompatibleLLM(
         api_key=key,

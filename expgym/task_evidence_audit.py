@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from expgym.react_loop import build_system_prompt as build_react_system_prompt
+from expgym.errors import ToolInputError
+
+# Canonical native arguments do not redefine the historical metric. In
+# particular EA remains independent of LA and legacy int() evidence coercion
+# remains in both feedback and final-answer scoring.
+EVIDENCE_SCORING_PROTOCOL = "legacy-int-coercion-independent-ea-v1"
 
 _REPO_DATA = os.path.join(os.path.dirname(__file__), "..", "data")
 _DATA_ROOT = os.environ.get("EXPGYM_DATA_ROOT", _REPO_DATA)
@@ -154,20 +160,18 @@ def _format_hypotheses(
 
 
 def _parse_payload(payload: str) -> Dict[str, object]:
+    if not isinstance(payload, str):
+        raise ToolInputError("Payload must be JSON text.")
     payload = payload.strip()
     try:
         data = json.loads(payload)
-    except json.JSONDecodeError:
-        decoder = json.JSONDecoder()
-        data, end = decoder.raw_decode(payload)
-        trailing = payload[end:].strip()
-        if trailing:
-            raise
+    except (ValueError, RecursionError, OverflowError) as exc:
+        raise ToolInputError("Payload must be valid JSON.") from exc
     if not isinstance(data, dict):
         if isinstance(data, list) and data and isinstance(data[0], dict):
             data = data[0]
         else:
-            raise ValueError("Payload must be a JSON object.")
+            raise ToolInputError("Payload must be a JSON object.")
     return data
 
 
@@ -175,8 +179,11 @@ def _normalize_evidence(value: object) -> List[int]:
     if value is None:
         return []
     if isinstance(value, list):
-        return [int(v) for v in value]
-    raise TypeError("evidence_ids must be a list of ints")
+        try:
+            return [int(v) for v in value]
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ToolInputError("evidence_ids must contain int-convertible values") from exc
+    raise ToolInputError("evidence_ids must be a list of ints")
 
 
 def _build_missing_hints(doc_id: int, missing: Sequence[int]) -> str:
@@ -203,7 +210,7 @@ class EvidenceAuditTools:
         evidence_ids = _normalize_evidence(data.get("evidence_ids"))
         evidence_set = set(evidence_ids)
         if nda_id not in self._doc.annotations:
-            raise ValueError(f"Unknown nda_id: {nda_id}")
+            raise ToolInputError(f"Unknown nda_id: {nda_id}")
 
         # Deterministic overhead in [280, 320] per (doc, nda_id, evidence) call
         ev_key = ",".join(str(e) for e in sorted(evidence_set))
@@ -243,7 +250,11 @@ def _build_context(
     include_overhead: bool,
     cc_split: str = "cc-large",
     hypothesis_order: Optional[List[str]] = None,
+    *,
+    tool_protocol: str = "text",
 ) -> str:
+    if tool_protocol not in ("text", "native"):
+        raise ValueError("build_context tool_protocol must be resolved text or native")
     num_hyp = len(_get_labels(cc_split))
     notes = [
         "You are auditing a legal document against {} hypotheses.".format(num_hyp),
@@ -259,7 +270,9 @@ def _build_context(
     notes.extend(
         [
             "",
-            "Action: human_feedback {\"nda_id\": \"nda-11\", \"evidence_ids\": [3, 7]}",
+            ('Action: human_feedback {"nda_id": "nda-11", "evidence_ids": [3, 7]}'
+             if tool_protocol == "text" else
+             'Call the human_feedback function with arguments {"nda_id": "nda-11", "evidence_ids": [3, 7]} using a native tool call.'),
             "Answer: {\"nda-11\": {\"label\": \"...\", \"evidence_ids\": [...]}, ...}",
             "Your final answer MUST include ALL {} hypotheses.".format(num_hyp),
             "",
@@ -279,11 +292,13 @@ def build_context(
     row_index: int = 0,
     cc_split: str = "cc-large",
     hypothesis_order: Optional[List[str]] = None,
+    tool_protocol: str = "text",
 ) -> str:
     doc = _load_example(row_index)
     return _build_context(
         doc, include_overhead, cc_split=cc_split,
         hypothesis_order=hypothesis_order,
+        tool_protocol=tool_protocol,
     )
 
 
@@ -330,14 +345,14 @@ def build_answer_evaluator(
         empty = {"label_acc": 0.0, "evidence_acc": 0.0, "verification_eff": None}
         try:
             data = json.loads(prediction)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError, OverflowError):
             # Strip trailing non-JSON chars (e.g. ";", markdown fences)
             cleaned = prediction.strip().rstrip(";").strip()
             if cleaned.startswith("```"):
                 cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
             try:
                 data = json.loads(cleaned)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError, OverflowError):
                 return empty
         if not isinstance(data, dict):
             return empty
@@ -349,7 +364,7 @@ def build_answer_evaluator(
                 continue
             try:
                 payload = json.loads(argument)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError, OverflowError):
                 continue
             if isinstance(payload, list) and payload and isinstance(payload[0], dict):
                 payload = payload[0]
@@ -424,7 +439,31 @@ def build_answer_evaluator(
 
 def build_tools(row_index: int = 0, cc_split: str = "cc-large") -> Dict[str, Callable[[str], Tuple[str, float]]]:
     tools = EvidenceAuditTools(row_index)
-    return {"human_feedback": tools.human_feedback}
+
+    def human_feedback(payload: str) -> Tuple[str, float]:
+        return tools.human_feedback(payload)
+
+    human_feedback.__expgym_tool_schema__ = {
+        "name": "human_feedback",
+        "description": (
+            "Verify the proposed evidence segment IDs for a document hypothesis. "
+            "Return evidence feedback and simulated cost, not the correct entailment label. "
+            "Submit canonical integer IDs; scoring retains the legacy evidence protocol."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                # The historical tool accepts every annotated hypothesis even
+                # when the displayed/evaluated cc_split is smaller.
+                "nda_id": {"type": "string", "enum": list(tools._doc.annotations)},
+                "evidence_ids": {"type": "array", "items": {"type": "integer"},
+                                 "description": "Proposed document evidence segment IDs; [] for none."},
+            },
+            "required": ["nda_id", "evidence_ids"],
+            "additionalProperties": False,
+        },
+    }
+    return {"human_feedback": human_feedback}
 
 
 SCENARIO = {

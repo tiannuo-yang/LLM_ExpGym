@@ -12,6 +12,7 @@ from expgym.react_loop import FakeLLM, LLMBackend, build_system_prompt, run_reac
 from expgym.task_tuning import SCENARIO as TUNING_SCENARIO
 from expgym.task_restricted_search import SCENARIO as RESTRICTED_SEARCH_SCENARIO
 from expgym.task_evidence_audit import SCENARIO as EVIDENCE_AUDIT_SCENARIO
+from expgym.tool_protocol import resolve_tool_protocol
 
 Scenario = Dict[str, object]
 _SCENARIOS: Dict[str, Scenario] = {
@@ -125,6 +126,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
     if backend == "gemini":
@@ -138,6 +140,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
     if backend == "openrouter":
@@ -153,14 +156,12 @@ def build_llm(
             referer=args.openrouter_referer,
             title=args.openrouter_title,
             prompt_cache_key=prompt_cache_key,
+            **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
     if backend == "vllm":
         from expgym.llm_clients import build_vllm_client
 
-        chat_kwargs = None
-        if args.vllm_disable_thinking:
-            chat_kwargs = {"enable_thinking": False}
         return build_vllm_client(
             api_key=args.api_key,
             model=args.model or "local-model",
@@ -168,8 +169,8 @@ def build_llm(
             temperature=getattr(args, "temperature", 0.0),
             seed=args.seed,
             base_url=args.base_url,
-            chat_template_kwargs=chat_kwargs,
             prompt_cache_key=prompt_cache_key,
+            **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
     if backend == "sub2api":
@@ -183,9 +184,124 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
     raise ValueError(f"Unknown backend: {backend}")
+
+
+def _generation_options(
+    args: argparse.Namespace, backend: Optional[str] = None,
+) -> Dict[str, object]:
+    """Preserve legacy sampling defaults; pass optional generation controls."""
+    chat_kwargs = getattr(args, "chat_template_kwargs", None)
+    if (backend or getattr(args, "backend", "vllm")) == "vllm" and getattr(
+        args, "vllm_disable_thinking", False
+    ):
+        chat_kwargs = dict(chat_kwargs or {})
+        if chat_kwargs.get("enable_thinking") not in (None, False):
+            raise ValueError("--vllm-disable-thinking conflicts with chat_template_kwargs.enable_thinking")
+        chat_kwargs["enable_thinking"] = False
+    return {
+        "max_tokens": getattr(args, "max_tokens", None),
+        "top_p": getattr(args, "top_p", 1.0),
+        "top_k": getattr(args, "top_k", None),
+        "chat_template_kwargs": chat_kwargs,
+        "reasoning_effort": getattr(args, "reasoning_effort", None),
+    }
+
+
+def _loop_options(args: argparse.Namespace) -> Dict[str, object]:
+    """Shared, fingerprintable protocol choices for both experiment runners."""
+    return {
+        "tool_protocol": getattr(args, "tool_protocol", "auto"),
+        "max_protocol_retries": getattr(args, "max_protocol_retries", 1),
+        "tuning_final_policy": getattr(args, "tuning_final_policy", "legacy"),
+    }
+
+
+def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
+    def positive_integer(value: str) -> int:
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a positive integer") from exc
+        if parsed < 1:
+            raise argparse.ArgumentTypeError("must be a positive integer")
+        return parsed
+
+    def non_negative_integer(value: str) -> int:
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+        if parsed < 0:
+            raise argparse.ArgumentTypeError("must be a non-negative integer")
+        return parsed
+
+    def nucleus_probability(value: str) -> float:
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a finite number in (0, 1]") from exc
+        if not math.isfinite(parsed) or not 0.0 < parsed <= 1.0:
+            raise argparse.ArgumentTypeError("must be a finite number in (0, 1]")
+        return parsed
+
+    def top_k_count(value: str) -> int:
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be -1 (disable) or a positive integer") from exc
+        if parsed != -1 and parsed < 1:
+            raise argparse.ArgumentTypeError("must be -1 (disable) or a positive integer")
+        return parsed
+
+    def json_object(value: str) -> Dict[str, object]:
+        def reject_constant(constant: str) -> None:
+            raise ValueError("non-finite JSON constant: " + constant)
+
+        try:
+            parsed = json.loads(value, parse_constant=reject_constant)
+            json.dumps(parsed, allow_nan=False)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a JSON object: " + str(exc)) from exc
+        if not isinstance(parsed, dict):
+            raise argparse.ArgumentTypeError("must be a JSON object")
+        return parsed
+
+    parser.add_argument(
+        "--top-p", type=nucleus_probability, default=1.0,
+        help="Nucleus probability in (0, 1]; default 1.0 preserves the legacy client payload.",
+    )
+    parser.add_argument(
+        "--top-k", type=top_k_count, default=None,
+        help="Optional provider top-k: -1 disables filtering, positive integers cap it; omitted by default.",
+    )
+    parser.add_argument(
+        "--max-tokens", type=positive_integer, default=None,
+        help="Per-request completion token cap; omitted by default (provider default).",
+    )
+    parser.add_argument(
+        "--chat-template-kwargs", type=json_object, default=None, metavar="JSON",
+        help="Optional JSON object passed to the provider chat template, e.g. thinking controls.",
+    )
+    parser.add_argument(
+        "--reasoning-effort", default=None,
+        help="Optional provider reasoning effort; omitted to preserve provider defaults.",
+    )
+    parser.add_argument(
+        "--tool-protocol", choices=["auto", "native", "text"], default="auto",
+        help="Tool protocol: auto selects native tools on capable clients, otherwise text ReAct.",
+    )
+    parser.add_argument(
+        "--max-protocol-retries", type=non_negative_integer, default=1,
+        help="Bounded malformed-decision repairs; each repair consumes a normal agent step.",
+    )
+    parser.add_argument(
+        "--tuning-final-policy", choices=["submitted", "legacy"], default="legacy",
+        help="Score the submitted tuning answer offline, or retain historical best-observed fallback.",
+    )
 
 
 def _transport_options(args: argparse.Namespace) -> Dict[str, object]:
@@ -195,11 +311,13 @@ def _transport_options(args: argparse.Namespace) -> Dict[str, object]:
         "max_retries": getattr(args, "max_retries", 10),
         "retry_base_seconds": getattr(args, "retry_base_seconds", 3.0),
         "retry_max_seconds": getattr(args, "retry_max_seconds", 120.0),
+        "dump_context": getattr(args, "_api_dump_context", None),
     }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the ExpGym demo experiment.")
+    _add_generation_arguments(parser)
     parser.add_argument(
         "--scenario",
         choices=sorted(_SCENARIOS.keys()),
@@ -225,7 +343,7 @@ def parse_args() -> argparse.Namespace:
         "--seed",
         type=int,
         default=1206,
-        help="Global seed for deterministic sampling.",
+        help="Requested model/environment seed; provider sampling determinism must be verified separately.",
     )
     parser.add_argument(
         "--base-url",
@@ -246,7 +364,7 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="Number of seeded configs the fake LLM probes before answering.",
     )
-    parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--max-steps", type=int, default=30)
     parser.add_argument("--request-timeout", type=float, default=600.0)
     parser.add_argument("--max-retries", type=int, default=10)
     parser.add_argument("--retry-base-seconds", type=float, default=3.0)
@@ -365,7 +483,7 @@ def main() -> None:
         llm = build_llm(
             args.backend, fake_plan, args, system_prompt=system_prompt
         )
-        context = _call_scenario(scenario["build_context"], include_overhead, args)
+        context = _resolve_context(scenario, include_overhead, args, llm)
         instruction_notes = _call_scenario(
             scenario["build_instruction_notes"], include_overhead, args
         )
@@ -382,7 +500,14 @@ def main() -> None:
             include_overhead_in_observation=include_overhead,
             include_cost_in_observation=include_cost,
             answer_evaluator=answer_evaluator,
+            **_loop_options(args),
         )
+        # Import lazily: the sweep imports this module's scenario/client helpers.
+        from scripts.run_paper_sweep import _score_result
+
+        result["score_check"] = _score_result(result, tools, answer_evaluator)
+        if not result["score_check"].get("ok"):
+            raise RuntimeError(f"score check failed: {result['score_check']}")
 
         _print_result(mode, result)
         _print_metrics(result)
@@ -449,7 +574,7 @@ def _print_metrics(result: dict) -> None:
     )
 
 
-def _call_scenario(fn, primary_arg, args):
+def _call_scenario(fn, primary_arg, args, *, tool_protocol=None):
     """Call a scenario hook, introspecting its signature to pass only accepted kwargs."""
     if fn is None:
         return None
@@ -470,6 +595,8 @@ def _call_scenario(fn, primary_arg, args):
         "cc_split": getattr(args, "cc_split", None),
         "hypothesis_order": getattr(args, "hypothesis_order", None),
     }
+    if tool_protocol is not None:
+        candidates["tool_protocol"] = tool_protocol
     for name, value in candidates.items():
         if name in params:
             kwargs[name] = value
@@ -481,6 +608,17 @@ def _call_scenario(fn, primary_arg, args):
         kwargs = {k: v for k, v in candidates.items() if v is not None}
 
     return fn(primary_arg, **kwargs)
+
+
+def _resolve_context(scenario: Scenario, include_overhead: bool, args: argparse.Namespace, llm: LLMBackend) -> str:
+    """Render source-owned task instructions for the loop's resolved protocol.
+
+    Dataset text and caller-supplied context are never rewritten here.
+    """
+    protocol = resolve_tool_protocol(llm, getattr(args, "tool_protocol", "auto"))
+    return _call_scenario(
+        scenario["build_context"], include_overhead, args, tool_protocol=protocol,
+    )
 
 
 def _resolve_tools(scenario: Scenario, args: argparse.Namespace) -> dict:

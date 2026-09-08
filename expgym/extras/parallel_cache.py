@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+from expgym.execution_contract import bind_execution_contract, validate_execution_contracts
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +40,16 @@ class AgentClock:
     def __init__(self) -> None:
         self._time: float = 0.0
 
+    def bind_execution_policy(self, *, time_budget: Optional[float] = None,
+                              overhead_scale: float = 1.0) -> None:
+        """Declare the loop's policy; rebinding different values is an error.
+
+        An ordinary AgentClock remains unbound until explicitly bound or used
+        by an official shared wrapper/augmenter. Binding does not advance time.
+        """
+        bind_execution_contract(self, clock=self, time_budget=time_budget,
+                                overhead_scale=overhead_scale)
+
     @property
     def now(self) -> float:
         """Current simulated time."""
@@ -43,12 +57,24 @@ class AgentClock:
 
     def advance(self, dt: float) -> None:
         """Advance the clock by *dt* seconds."""
-        self._time += dt
+        dt = _finite_nonnegative(dt, "clock increment")
+        self._time = _finite_nonnegative(self._time + dt, "accumulated clock")
 
 
 # ---------------------------------------------------------------------------
 # Helper: extract raw overhead from tool result tuples
 # ---------------------------------------------------------------------------
+
+def _finite_nonnegative(value: Any, name: str) -> float:
+    """Validate simulated time without silently converting bad data to free work."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be a finite nonnegative number") from exc
+    if isinstance(value, bool) or not math.isfinite(numeric) or numeric < 0:
+        raise ValueError(f"{name} must be a finite nonnegative number")
+    return numeric
+
 
 def _extract_overhead_from_result(result: Any) -> float:
     """Extract the raw overhead value from a tool result tuple.
@@ -56,14 +82,22 @@ def _extract_overhead_from_result(result: Any) -> float:
     Handles the react_loop contract:
     - 2-tuple (perf_or_output, overhead) -> overhead
     - 3-tuple (output, perf, overhead) -> overhead
-    Returns 0.0 on failure.
+    Invalid tool returns/costs are infrastructure errors, never free feedback.
     """
     if isinstance(result, tuple) and len(result) in (2, 3):
-        try:
-            return float(result[-1])
-        except (TypeError, ValueError):
-            pass
-    return 0.0
+        if len(result) == 2 and not isinstance(result[-1], (int, float)):
+            raise ValueError("A two-element tool return requires numeric overhead")
+        return _finite_nonnegative(result[-1], "tool overhead")
+    raise ValueError("Tool must return a two- or three-element tuple with overhead")
+
+
+def _completion_time(clock: Optional[AgentClock], raw_overhead: float,
+                     overhead_scale: float) -> float:
+    scaled = _finite_nonnegative(raw_overhead * overhead_scale, "scaled tool overhead")
+    start = clock.now if clock is not None else 0.0
+    completion = _finite_nonnegative(start + scaled, "tool completion time")
+    # An absent clock is the explicit legacy, non-time-gated mode.
+    return completion if clock is not None else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +137,7 @@ class SharedObservationCache:
         payload: str,
         *,
         visible_before: Optional[float] = None,
+        completion_before: Optional[float] = None,
     ) -> Optional[Any]:
         """Look up a cached result. Returns None on miss.
 
@@ -110,12 +145,18 @@ class SharedObservationCache:
             visible_before: If set, only return results whose
                 completion_time <= visible_before.  ``None`` (default)
                 means see everything (backward compat).
+            completion_before: Optional strict feedback-budget bound.
         """
+        if visible_before is not None:
+            visible_before = _finite_nonnegative(visible_before, "cache visibility time")
+        if completion_before is not None:
+            completion_before = _finite_nonnegative(completion_before, "cache budget")
         key = (tool_name, self._canonicalize(payload))
         with self._lock:
             if key in self._cache:
                 result, completion_time = self._cache[key]
-                if visible_before is not None and completion_time > visible_before:
+                if ((visible_before is not None and completion_time > visible_before)
+                        or (completion_before is not None and completion_time >= completion_before)):
                     self._misses += 1
                     return None
                 self._hits += 1
@@ -137,6 +178,7 @@ class SharedObservationCache:
         differ from the simulated EEI timeline, so a later ``put`` may replace
         an entry when its completion time is earlier.
         """
+        completion_time = _finite_nonnegative(completion_time, "cache completion time")
         key = (tool_name, self._canonicalize(payload))
         with self._lock:
             if key in self._cache:
@@ -265,6 +307,7 @@ def _zero_overhead(result: Any) -> Any:
     - 2-tuple ``(perf_or_output, overhead)`` -> ``(perf_or_output, 0.0)``
     - 3-tuple ``(output, perf, overhead)`` -> ``(output, perf, 0.0)``
     """
+    _extract_overhead_from_result(result)
     if isinstance(result, tuple):
         if len(result) == 2:
             return (result[0], 0.0)
@@ -333,6 +376,7 @@ def wrap_tools_with_cache(
     *,
     clock: Optional[AgentClock] = None,
     overhead_scale: float = 1.0,
+    time_budget: Optional[float] = None,
 ) -> Dict[str, Callable]:
     """Wrap tool functions to use a shared cache.
 
@@ -344,15 +388,28 @@ def wrap_tools_with_cache(
         cache: Shared cache instance.
         clock: Optional AgentClock for time-gated visibility.
         overhead_scale: Scale factor for overhead when computing completion_time.
+        time_budget: Optional strict ceiling in scaled simulated seconds.
 
     Returns:
         New tools dict with wrapped callables.
     """
+    if time_budget is not None and clock is None:
+        raise ValueError("time_budget requires an AgentClock in simulated seconds")
+    overhead_scale = _finite_nonnegative(overhead_scale, "overhead_scale")
+    if time_budget is not None:
+        time_budget = _finite_nonnegative(time_budget, "time_budget")
+    validate_execution_contracts(
+        tools=tools, agent_clock=clock, observation_augmenter=None, pre_tool_hook=None,
+        time_budget=time_budget, overhead_scale=overhead_scale,
+    )
+    if clock is not None:
+        bind_execution_contract(clock, clock=clock, time_budget=time_budget,
+                                overhead_scale=overhead_scale)
     wrapped = {}
     for tool_name, func in tools.items():
         wrapped[tool_name] = _make_cached_wrapper(
             tool_name, func, cache,
-            clock=clock, overhead_scale=overhead_scale,
+            clock=clock, overhead_scale=overhead_scale, time_budget=time_budget,
         )
     return wrapped
 
@@ -364,22 +421,26 @@ def _make_cached_wrapper(
     *,
     clock: Optional[AgentClock] = None,
     overhead_scale: float = 1.0,
+    time_budget: Optional[float] = None,
 ) -> Callable:
     """Create a wrapper that checks cache before calling the original tool."""
+    @wraps(original_fn)
     def wrapper(payload: str) -> Any:
         vb = clock.now if clock is not None else None
-        cached = cache.get(tool_name, payload, visible_before=vb)
+        cached = cache.get(tool_name, payload, visible_before=vb, completion_before=time_budget)
         if cached is not None:
             return _zero_overhead(cached)
         result = original_fn(payload)
         raw_overhead = _extract_overhead_from_result(result)
-        scaled_overhead = raw_overhead * overhead_scale
         # The ReAct loop owns the clock and advances it exactly once after
         # parsing the tool return.  The wrapper only predicts when this
         # result becomes visible on the simulated parallel timeline.
-        ct = (clock.now + scaled_overhead) if clock is not None else 0.0
-        cache.put(tool_name, payload, result, completion_time=ct)
+        ct = _completion_time(clock, raw_overhead, overhead_scale)
+        if time_budget is None or ct < time_budget:
+            cache.put(tool_name, payload, result, completion_time=ct)
         return result
+    bind_execution_contract(wrapper, clock=clock, time_budget=time_budget,
+                            overhead_scale=overhead_scale)
     return wrapper
 
 
@@ -424,6 +485,7 @@ def _make_ledger_wrapper(
     agent_id: int,
 ) -> Callable:
     """Create a wrapper with caching + ledger recording."""
+    @wraps(original_fn)
     def wrapper(payload: str) -> Any:
         payload_summary = _summarize_payload(payload)
 
@@ -438,6 +500,7 @@ def _make_ledger_wrapper(
             return result
 
         result = original_fn(payload)
+        _extract_overhead_from_result(result)
         cache.put(tool_name, payload, result)
         result_summary = _summarize_result(tool_name, result)
         ledger.record(
@@ -445,6 +508,9 @@ def _make_ledger_wrapper(
             result_summary, cache_hit=False,
         )
         return result
+    # Legacy ledger has no simulated-time visibility and supports only the
+    # genuinely unlimited, clockless mode; do not silently change its data.
+    bind_execution_contract(wrapper, clock=None, time_budget=None)
     return wrapper
 
 
@@ -472,6 +538,7 @@ def make_ledger_augmenter(
         if ledger_text:
             return "{}\n\n{}".format(observation, ledger_text)
         return observation
+    bind_execution_contract(augmenter, clock=None, time_budget=None)
     return augmenter
 
 
@@ -589,8 +656,15 @@ class SharedExplorationGraph:
         # Per-agent state: last node visited (for edge tracking)
         self._agent_last_node: Dict[int, str] = {}
 
+        # Keep completed observations, not only merged nodes. A node's earliest
+        # timestamp cannot time-gate its later visits, results or traversals.
+        # Typical runs have at most agents * max_evals entries, so rebuilding a
+        # visible snapshot is small and avoids leaking future merged metadata.
+        self._observations: List[Tuple[float, str, tuple]] = []
+        self._record_history = True
+
         # Pending claims: (tool_name, canonical_payload) -> [ActionClaim]
-        # Used by the PoolAct wrapper to prevent duplicate work.
+        # Advisory only: a pending action is not a completed observation.
         self._claims: Dict[Tuple[str, str], List[ActionClaim]] = {}
 
     # ------------------------------------------------------------------
@@ -648,6 +722,7 @@ class SharedExplorationGraph:
 
         Creates an ActionClaim with ``completion_time=inf`` (pending).
         """
+        start_time = _finite_nonnegative(start_time, "claim start time")
         key = (tool_name, self._canonicalize(payload))
         display = self._claim_display(tool_name, payload)
         claim = ActionClaim(
@@ -683,6 +758,7 @@ class SharedExplorationGraph:
         completion_time: float = 0.0,
     ) -> None:
         """Mark *agent_id*'s pending claim as completed."""
+        completion_time = _finite_nonnegative(completion_time, "claim completion time")
         key = (tool_name, self._canonicalize(payload))
         with self._lock:
             for claim in reversed(self._claims.get(key, [])):
@@ -690,6 +766,22 @@ class SharedExplorationGraph:
                         and claim.completion_time == float("inf")):
                     claim.completion_time = completion_time
                     break
+
+    def complete_agent_claims(self, agent_id: int, *, completion_time: float = 0.0) -> int:
+        """Close abandoned claims in a runner's ``finally`` block.
+
+        This publishes no feedback and does not advance any clock. Other agents'
+        claims and already completed timestamps are left untouched.
+        """
+        completion_time = _finite_nonnegative(completion_time, "agent cleanup time")
+        closed = 0
+        with self._lock:
+            for claims in self._claims.values():
+                for claim in claims:
+                    if claim.agent_id == agent_id and claim.completion_time == float("inf"):
+                        claim.completion_time = max(claim.start_time, completion_time)
+                        closed += 1
+        return closed
 
     def is_in_progress_by_other(
         self,
@@ -706,10 +798,14 @@ class SharedExplorationGraph:
         i.e. it has started but not yet finished from the observer's
         perspective.
         """
+        if visible_at is not None:
+            visible_at = _finite_nonnegative(visible_at, "claim visibility time")
         key = (tool_name, self._canonicalize(payload))
         with self._lock:
             for claim in self._claims.get(key, []):
                 if claim.agent_id == agent_id:
+                    continue
+                if visible_at is None and claim.completion_time != float("inf"):
                     continue
                 if visible_at is not None:
                     if claim.start_time > visible_at:
@@ -730,10 +826,14 @@ class SharedExplorationGraph:
         Used by ``format_for_injection`` to populate the 'In Progress'
         section of the graph display.
         """
+        if visible_at is not None:
+            visible_at = _finite_nonnegative(visible_at, "claim visibility time")
         pending: List[ActionClaim] = []
         with self._lock:
             for claims in self._claims.values():
                 for claim in claims:
+                    if visible_at is None and claim.completion_time != float("inf"):
+                        continue
                     if visible_at is not None:
                         if claim.start_time > visible_at:
                             continue
@@ -776,6 +876,15 @@ class SharedExplorationGraph:
         self._edges[key].count += 1
         self._edges[key].agents.add(agent_id)
 
+    def _remember_observation(
+        self, method: str, args: tuple, completion_time: float,
+    ) -> float:
+        """Remember an immutable completed event; caller holds ``_lock``."""
+        completion_time = _finite_nonnegative(completion_time, "graph completion time")
+        if self._record_history:
+            self._observations.append((completion_time, method, copy.deepcopy(args)))
+        return completion_time
+
     def record_search_meta(
         self,
         agent_id: int,
@@ -786,6 +895,9 @@ class SharedExplorationGraph:
     ) -> None:
         """Record a search_meta call."""
         with self._lock:
+            completion_time = self._remember_observation(
+                "record_search_meta", (agent_id, query, returned_doc_ids), completion_time,
+            )
             skey = self._search_key(query)
             if query not in self._search_nodes:
                 self._search_nodes[query] = SearchNode(
@@ -819,6 +931,9 @@ class SharedExplorationGraph:
         One node per query, storing the returned article title.
         """
         with self._lock:
+            completion_time = self._remember_observation(
+                "record_search", (agent_id, query, article_title), completion_time,
+            )
             skey = self._search_key(query)
             if query not in self._search_nodes:
                 self._search_nodes[query] = SearchNode(
@@ -847,6 +962,9 @@ class SharedExplorationGraph:
     ) -> None:
         """Record a fetch_doc call, merged by doc_id."""
         with self._lock:
+            completion_time = self._remember_observation(
+                "record_fetch_doc", (agent_id, doc_id, title, content_snippet), completion_time,
+            )
             fkey = self._fetch_key(doc_id)
             if doc_id not in self._fetch_nodes:
                 self._fetch_nodes[doc_id] = FetchNode(
@@ -899,6 +1017,10 @@ class SharedExplorationGraph:
             completion_time: Simulated time when this eval completed.
         """
         with self._lock:
+            completion_time = self._remember_observation(
+                "record_evaluate_config",
+                (agent_id, config_key, config_display, perf, cost), completion_time,
+            )
             ekey = self._eval_key(config_key)
             if config_key not in self._eval_nodes:
                 self._eval_nodes[config_key] = EvalNode(
@@ -926,6 +1048,7 @@ class SharedExplorationGraph:
         *,
         visible_before: Optional[float] = None,
         agent_id: Optional[int] = None,
+        completion_before: Optional[float] = None,
     ) -> str:
         """Format the graph for LLM context injection.
 
@@ -939,9 +1062,15 @@ class SharedExplorationGraph:
                 means see everything (backward compat).
             agent_id: The viewing agent's ID.  Used in diversity mode
                 to label own vs others' results.
+            completion_before: Optional strict upper bound in simulated seconds,
+                excluding budget-boundary feedback even during forced finalization.
 
         Returns empty string if no nodes recorded.
         """
+        if visible_before is not None:
+            visible_before = _finite_nonnegative(visible_before, "graph visibility time")
+        if completion_before is not None:
+            completion_before = _finite_nonnegative(completion_before, "graph budget")
         with self._lock:
             # Formatting happens after releasing the lock. Deep-copy mutable
             # nodes/sets so concurrent agents cannot mutate the snapshot while
@@ -951,21 +1080,25 @@ class SharedExplorationGraph:
             end_nodes = copy.deepcopy(self._end_nodes)
             eval_nodes = copy.deepcopy(self._eval_nodes)
             edges = copy.deepcopy(self._edges)
+            observations = copy.deepcopy(self._observations)
 
         # Apply time-gating filter if requested
-        if visible_before is not None:
-            search_nodes = {
-                k: v for k, v in search_nodes.items()
-                if v.completion_time <= visible_before
-            }
-            fetch_nodes = {
-                k: v for k, v in fetch_nodes.items()
-                if v.completion_time <= visible_before
-            }
-            eval_nodes = {
-                k: v for k, v in eval_nodes.items()
-                if v.completion_time <= visible_before
-            }
+        if visible_before is not None or completion_before is not None:
+            snapshot = SharedExplorationGraph(
+                n_agents=self._n_agents, max_content_len=self._max_content_len,
+                diversity_mode=self._diversity_mode,
+            )
+            snapshot._record_history = False
+            for completion_time, method, args in observations:
+                if visible_before is not None and completion_time > visible_before:
+                    continue
+                if completion_before is not None and completion_time >= completion_before:
+                    continue
+                getattr(snapshot, method)(*args, completion_time=completion_time)
+            search_nodes = snapshot._search_nodes
+            fetch_nodes = snapshot._fetch_nodes
+            eval_nodes = snapshot._eval_nodes
+            edges = snapshot._edges
             # END nodes have no completion_time — hide them when
             # time-gating is active to prevent future-answer leakage.
             end_nodes = {}
@@ -1544,6 +1677,7 @@ def wrap_tools_with_poolact(
     *,
     clock: Optional[AgentClock] = None,
     overhead_scale: float = 1.0,
+    time_budget: Optional[float] = None,
 ) -> Dict[str, Callable]:
     """Wrap tools with the PoolAct strategy described in the paper.
 
@@ -1565,6 +1699,9 @@ def wrap_tools_with_poolact(
         agent_id: Identifier for this agent.
         clock: Optional AgentClock for time-gated visibility.
         overhead_scale: Scale factor for overhead when computing completion_time.
+        time_budget: Optional strict ceiling in scaled simulated seconds.
+            Results at or beyond it are returned for audit/budget accounting,
+            but are not published as shared observations.
 
     Returns:
         New tools dict with wrapped callables.
@@ -1573,13 +1710,27 @@ def wrap_tools_with_poolact(
     # used this name for a flat ledger.  Keep that call shape working while
     # making the graph implementation the unambiguous default.
     if isinstance(graph, SharedExplorationLedger):
+        if time_budget is not None:
+            raise ValueError("The legacy ledger wrapper does not support a time_budget")
         return wrap_tools_with_ledger(tools, cache, graph, agent_id)
 
+    if time_budget is not None and clock is None:
+        raise ValueError("time_budget requires an AgentClock in simulated seconds")
+    overhead_scale = _finite_nonnegative(overhead_scale, "overhead_scale")
+    if time_budget is not None:
+        time_budget = _finite_nonnegative(time_budget, "time_budget")
+    validate_execution_contracts(
+        tools=tools, agent_clock=clock, observation_augmenter=None, pre_tool_hook=None,
+        time_budget=time_budget, overhead_scale=overhead_scale,
+    )
+    if clock is not None:
+        bind_execution_contract(clock, clock=clock, time_budget=time_budget,
+                                overhead_scale=overhead_scale)
     wrapped = {}
     for tool_name, func in tools.items():
         wrapped[tool_name] = _make_poolact_graph_wrapper(
             tool_name, func, cache, graph, agent_id,
-            clock=clock, overhead_scale=overhead_scale,
+            clock=clock, overhead_scale=overhead_scale, time_budget=time_budget,
         )
     return wrapped
 
@@ -1593,6 +1744,7 @@ def _make_poolact_graph_wrapper(
     *,
     clock: Optional[AgentClock] = None,
     overhead_scale: float = 1.0,
+    time_budget: Optional[float] = None,
 ) -> Callable:
     """Create a wrapper with caching + graph recording + pending claims.
 
@@ -1603,7 +1755,7 @@ def _make_poolact_graph_wrapper(
     Flow:
     1. Check cache (time-gated) → if hit, return cached result (0s).
     2. Record claim if not already registered by pre_tool_hook.
-    3. Execute tool, advance clock.
+    3. Execute tool; the ReAct loop owns clock advancement.
     4. Complete claim, cache result, record in graph.
 
     When used with ``make_pre_tool_hook()``, claims are recorded
@@ -1611,56 +1763,44 @@ def _make_poolact_graph_wrapper(
     can see them during their own LLM calls.  The wrapper then skips
     duplicate claim recording (step 2) but still completes the claim.
     """
+    @wraps(original_fn)
     def wrapper(payload: str) -> Any:
         vb = clock.now if clock is not None else None
-
-        # 1. Cache hit — result already available (instant, no overhead).
-        # A pre_tool_hook may already have recorded this action as pending;
-        # complete that claim here or it would remain "In Progress" forever.
-        cached = cache.get(tool_name, payload, visible_before=vb)
-        if cached is not None:
-            result = _zero_overhead(cached)
-            graph.complete_claim(
-                tool_name, payload, agent_id,
-                completion_time=vb if vb is not None else 0.0,
-            )
-            _record_in_graph(
-                graph, agent_id, tool_name, payload, cached,
-                completion_time=vb if vb is not None else 0.0,
-            )
-            return result
-
-        # 2. Record claim only if pre_tool_hook hasn't already done it.
         start_time = vb if vb is not None else 0.0
-        if not graph.has_pending_claim(tool_name, payload, agent_id):
-            graph.record_claim(
-                tool_name, payload, agent_id, start_time=start_time,
-            )
-
-        # 3. Execute tool
+        completion_time = start_time
         try:
-            result = original_fn(payload)
-        except BaseException:
-            # Failed tools must not leave a permanent pending claim.  There
-            # is no completed observation to cache or add to the graph.
-            graph.complete_claim(
-                tool_name, payload, agent_id, completion_time=start_time,
-            )
-            raise
-        raw_overhead = _extract_overhead_from_result(result)
-        scaled_overhead = raw_overhead * overhead_scale
-        ct = (clock.now + scaled_overhead) if clock is not None else 0.0
+            # Cache reads/return validation can fail too; a pre-tool claim must
+            # be cleaned up regardless of where failure occurs.
+            cached = cache.get(tool_name, payload, visible_before=vb, completion_before=time_budget)
+            if cached is not None:
+                result = _zero_overhead(cached)
+                _record_in_graph(
+                    graph, agent_id, tool_name, payload, cached,
+                    completion_time=completion_time,
+                )
+                return result
 
-        # 4. Complete claim + cache + graph
-        graph.complete_claim(
-            tool_name, payload, agent_id, completion_time=ct,
-        )
-        cache.put(tool_name, payload, result, completion_time=ct)
-        _record_in_graph(
-            graph, agent_id, tool_name, payload, result,
-            completion_time=ct,
-        )
-        return result
+            # Claims remain advisory: no duplicate-action blocking.
+            if not graph.has_pending_claim(tool_name, payload, agent_id):
+                graph.record_claim(tool_name, payload, agent_id, start_time=start_time)
+            result = original_fn(payload)
+            raw_overhead = _extract_overhead_from_result(result)
+            completion_time = _completion_time(clock, raw_overhead, overhead_scale)
+            if time_budget is None or completion_time < time_budget:
+                cache.put(tool_name, payload, result, completion_time=completion_time)
+                _record_in_graph(
+                    graph, agent_id, tool_name, payload, result,
+                    completion_time=completion_time,
+                )
+            return result
+        finally:
+            # Also covers malformed returns, invalid costs, cache/graph errors,
+            # and BaseException interrupts. Failed execution is not feedback.
+            graph.complete_claim(
+                tool_name, payload, agent_id, completion_time=completion_time,
+            )
+    bind_execution_contract(wrapper, clock=clock, time_budget=time_budget,
+                            overhead_scale=overhead_scale)
     return wrapper
 
 
@@ -1787,6 +1927,7 @@ def make_graph_augmenter(
     *,
     clock: Optional[AgentClock] = None,
     agent_id: Optional[int] = None,
+    time_budget: Optional[float] = None,
 ) -> Callable[[str], str]:
     """Create an observation_augmenter that appends the exploration graph.
 
@@ -1802,6 +1943,7 @@ def make_graph_augmenter(
         graph: Shared exploration graph instance.
         clock: Optional AgentClock for time-gated visibility.
         agent_id: The agent's ID, used to label own vs others' results.
+        time_budget: Optional strict feedback ceiling in scaled simulated seconds.
 
     Returns:
         A callable ``(observation: str) -> str`` that appends the graph.
@@ -1809,11 +1951,12 @@ def make_graph_augmenter(
     def augmenter(observation: str) -> str:
         vb = clock.now if clock is not None else None
         graph_text = graph.format_for_injection(
-            visible_before=vb, agent_id=agent_id,
+            visible_before=vb, agent_id=agent_id, completion_before=time_budget,
         )
         if graph_text:
             return "{}\n\n{}".format(observation, graph_text)
         return observation
+    bind_execution_contract(augmenter, clock=clock, time_budget=time_budget)
     return augmenter
 
 
@@ -1839,6 +1982,7 @@ def make_pre_tool_hook(
             graph.record_claim(
                 tool_name, payload, agent_id, start_time=start_time,
             )
+    bind_execution_contract(hook, clock=clock)
     return hook
 
 
