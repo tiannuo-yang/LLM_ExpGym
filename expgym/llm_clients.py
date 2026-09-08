@@ -50,6 +50,16 @@ class APIClientError(RuntimeError):
         self.attempt_usage = copy.deepcopy(attempt_usage)
 
 
+class APICompletionAbortedError(APIClientError):
+    """Provider explicitly aborted a completion; terminal, never resampled.
+
+    Partial text/tool calls are evidence, not a delivered agent decision. The
+    original response stays in the attempt dump and usage stays on the error.
+    """
+
+    finish_reason = "abort"
+
+
 def _normalize_chat_completions_url(base_url: str) -> str:
     """Accept either an OpenAI-compatible base URL or the full chat endpoint."""
     parsed = urllib.parse.urlparse(base_url.rstrip("/"))
@@ -724,6 +734,16 @@ class OpenAICompatibleLLM(LLMBackend):
                 # A decoded HTTP success with an uncertain structure is an
                 # explicit invalid run, not a chance to sample another answer.
                 raise APIClientError(str(exc), attempt_usage) from exc
+            if finish_reason == "abort":
+                # An explicit provider abort is not a completed model decision,
+                # even when partial content or tool calls look valid. Preserve
+                # this physical attempt, but do not retry, score, or execute it.
+                attempt_usage.append(self._attempt_usage_record(metadata, "error", raw))
+                error = APICompletionAbortedError(
+                    "API generation aborted (finish_reason=abort)", attempt_usage,
+                )
+                self._dump_attempt(metadata, payload, started, state="error", raw=raw, error=error)
+                raise error
             # Transport returns bytes only: an exact success status is not
             # available through this interface, so do not fabricate HTTP 200.
             attempt_usage.append(self._attempt_usage_record(metadata, "success", raw))
