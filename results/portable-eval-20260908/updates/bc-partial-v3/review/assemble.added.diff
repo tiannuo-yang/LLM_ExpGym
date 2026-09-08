@@ -1,0 +1,138 @@
+--- /dev/null
++++ b/publication/bc_partial_delivery_v3/assemble.py
+@@ -0,0 +1,135 @@
++#!/usr/bin/env python3
++"""One fixed ROOT-reviewed prose control original, never a generic allowlist."""
++import argparse
++import json
++import os
++from pathlib import Path
++import sys
++import tempfile
++
++if not (Path(__file__).parent / 'common.py').is_file():
++    sys.path.insert(0, str(Path(__file__).parent.parent / 'shard_delivery_candidate_v2'))
++import common as c
++import restore
++
++CONTROL_NAME = 'operator_single_pid_sigint_20260908T102501Z.json'
++CONTROL_TARGET = 'portable_eval_20260908/pilot_runs/k3_bc312_1203474_v3/' + CONTROL_NAME
++CONTROL_SHA = '15bbab050595d4c9137cd971f5201f42900d4da2856a0b822b65f9bb1b374de2'
++CONTROL_BYTES = 21217
++CONTROL_PROSE = 'Explicit ROOT message for single verified PID 2533615 only; 2026-09-08 service grammar abort'
++TOOL_PINS = {
++    'common.py': '7147524d5799dc1264f088518db19251c5f906bc2da501854ce279f56d73263e',
++    'restore.py': 'ec20a0e22c8f810b09e894e0ddc6cc8dec114a66be4fe23cab8a55f3b62ac710',
++}
++
++
++def verify_tools():
++    for module in (c, restore):
++        path = c.lexical(module.__file__)
++        c.need(c.sha(path.read_bytes()) == TOOL_PINS[path.name], 'frozen_tool_identity')
++    c.scanner()
++
++
++def control_original(path, secrets=()):
++    """Exact original bytes plus unchanged scanner's sole documented failure.
++
++    The ROOT authorization is only for this fixed path/content, not the field
++    name in other files. No transformed scan view or source rewrite is used.
++    """
++    path = c.lexical(path)
++    c.need(path.name == CONTROL_NAME, 'control_basename')
++    raw = c.scanner().stable_read(path, limit=CONTROL_BYTES)
++    errors, notes = c.scanner().scan_bytes(raw, CONTROL_NAME, secrets)
++    c.need(dict(errors) == {'credential_metadata_field': 1} and not notes,
++           'control_exact_original_scan_findings')
++    value = c.strict_json(raw)
++    c.need(isinstance(value, dict) and value.get('authorization') == CONTROL_PROSE,
++           'control_exact_prose')
++    # Retain the additive cross-field/decoded-key check without suppressing or
++    # changing the original scanner result. This bounded fixed JSON has no
++    # response_raw envelope; reject one rather than add protocol exceptions.
++    strings = {'keys': [], 'values': [], 'tokens': []}
++    def walk(item, depth=0):
++        c.need(depth <= 80, 'control_json_nesting')
++        if isinstance(item, dict):
++            for key, child in item.items():
++                c.need(key != 'response_raw', 'control_unexpected_envelope')
++                strings['keys'].append(key); strings['tokens'].append(key)
++                walk(child, depth + 1)
++        elif isinstance(item, list):
++            for child in item:
++                walk(child, depth + 1)
++        elif isinstance(item, str):
++            strings['values'].append(item); strings['tokens'].append(item)
++    walk(value)
++    for parts in strings.values():
++        joined = ''.join(parts)
++        c.need(not any(secret in joined for _, secret in secrets), 'control_known_secret_across_fields')
++    c.need(len(raw) == CONTROL_BYTES and c.sha(raw) == CONTROL_SHA, 'control_exact_bytes_digest')
++    return raw
++
++
++def assemble(index_path, index_sha, restored, control, output, secret_files=()):
++    verify_tools()
++    output = c.fresh(output)
++    restored, index_path = c.lexical(restored), c.lexical(index_path)
++    for source in (restored, index_path.parent):
++        c.need(output != source and source not in output.parents, 'output_inside_input')
++    secrets = c.scanner().load_secrets([c.lexical(path) for path in secret_files])
++    # Full bundle and restored wrapper must both be complete before assembly.
++    verified = restore.verify_bundle(index_path, index_sha, secrets)
++    rows = verified['files']
++    c.need(CONTROL_TARGET not in {row['path'] for row in rows}, 'duplicate_control_in_shards')
++    original_binding = {'kind': 'restored-originals', 'input_sha256': index_sha, 'single_archive': False}
++    original_marker = c.verify_completion(restored, original_binding, secrets)
++    c.need(c.inventory(restored / 'payload') == rows, 'restored_bundle_set_or_digest')
++    control_raw = control_original(control, secrets)
++    combined = sorted(rows + [{'path': CONTROL_TARGET, 'bytes': CONTROL_BYTES, 'sha256': CONTROL_SHA}],
++                      key=lambda row: row['path'])
++    c.no_path_prefixes(row['path'] for row in combined)
++    binding = {'kind': 'bc-partial-fixed-control-assembly-v1', 'index_sha256': index_sha,
++               'control_sha256': CONTROL_SHA, 'control_target': CONTROL_TARGET,
++               'strict_scanner_all_originals_passed': False}
++    with tempfile.TemporaryDirectory(prefix='.bc-assembly-', dir=output.parent) as scratch_name:
++        scratch = Path(scratch_name) / 'originals'; scratch.mkdir(mode=0o700)
++        for row in combined:
++            raw = control_raw if row['path'] == CONTROL_TARGET else c.scanner().stable_read(restored / 'payload' / row['path'])
++            c.need(len(raw) == row['bytes'] and c.sha(raw) == row['sha256'], 'assembly_source_bytes_changed')
++            c.write_new(scratch / row['path'], raw)
++        c.need(c.inventory(scratch) == combined, 'assembly_full_set_before_commit')
++        c.need(c.verify_completion(restored, original_binding, secrets) == original_marker,
++               'input_restore_changed')
++        c.need(control_original(control, secrets) == control_raw, 'control_changed')
++        marker_sha = c.commit_new_directory(scratch, output, binding, secrets)
++    c.need(c.inventory(output / 'payload') == combined, 'assembly_final_full_set')
++    c.need(c.verify_completion(restored, original_binding, secrets) == original_marker,
++           'input_restore_changed_after_commit')
++    return {'passed': True, 'file_count': len(combined), 'original_bytes': sum(row['bytes'] for row in combined),
++            'index_sha256': index_sha, 'control_sha256': CONTROL_SHA, 'control_target': CONTROL_TARGET,
++            'control_original_unchanged': True, 'input_restored_wrapper_unchanged': True,
++            'strict_scanner_all_originals_passed': False, 'exact_fixed_manual_prose_exception_count': 1,
++            'known_secret_sources_checked': len(secrets), 'complete_full_path_set': True,
++            'originals_relative_path': 'payload', 'completion_sha256': marker_sha,
++            'publication_performed': False, 'binding': binding}
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--index', required=True, type=Path)
++    parser.add_argument('--index-sha256', required=True)
++    parser.add_argument('--restored', required=True, type=Path)
++    parser.add_argument('--control', required=True, type=Path)
++    parser.add_argument('--output-dir', required=True, type=Path)
++    parser.add_argument('--secret-file', action='append', default=[], type=Path)
++    args = parser.parse_args()
++    print(json.dumps(assemble(args.index, args.index_sha256, args.restored, args.control,
++                              args.output_dir, args.secret_file), indent=2))
++
++
++if __name__ == '__main__':
++    try:
++        main()
++    except Exception as exc:
++        print(json.dumps({'passed': False, 'rule': str(exc) if isinstance(exc, c.DeliveryError)
++                          else 'assembly_failed', 'publication_performed': False}))
++        raise SystemExit(1)
