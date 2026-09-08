@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "classification": "Offline audit-tool correction; not a model rerun or an evaluation change",
+  "scope": "Preserve the frozen auditor; new one-line derivative fixes only semantic-zero counting against the actual trace-v2 discriminated score schema.",
+  "original_auditor": {
+    "path": "portable_eval_20260908/review/audit_a21_v3.py",
+    "sha256": "f8ec3e0c1c9fdc93832788a430a6a7c1994d977b98cc2d5ee0ff1a554e63792d",
+    "preserved_unchanged": true
+  },
+  "failed_first_full_audit_attempt": {
+    "exit_code": 1,
+    "exception": "KeyError: answer_perf",
+    "line": 135,
+    "reason": "outcome.answer_perf does not exist in trace-v2; scalar scores use outcome.score.value and Audit uses outcome.score.metrics[outcome.score.primary_metric].",
+    "scoring_subprocesses_started": 0,
+    "model_or_network_calls": 0,
+    "main_receipt_created": false,
+    "original_run_files_modified": false
+  },
+  "pre_execution_regression_found": "The provisional direct score.value lookup also fails for Audit; the all-21-real-schema regression caught this before any repaired full audit/scoring invocation. The derivative was not frozen then.",
+  "replacement_auditor": {
+    "path": "portable_eval_20260908/review/audit_a21_v3_score_schema_fix.py",
+    "sha256": "3f8f0e63861ced050613cd01881e06dc55d7fc92780ba82e094b563220fa914e",
+    "only_line_change": "zero_count += (outcome[\"score\"][\"metrics\"][outcome[\"score\"][\"primary_metric\"]] if \"metrics\" in outcome[\"score\"] else outcome[\"score\"][\"value\"]) == 0",
+    "scoring_child_and_raw_auditor_unchanged": true
+  },
+  "regression": {
+    "path": "portable_eval_20260908/review/test_a21_score_schema_fix.py",
+    "sha256": "06e03c2222ba3c8420fc9f2e6eb57927261483d6cfb874c288fc666df1326d0a",
+    "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 LLM_ExpGym/.venv/bin/python -B -m unittest discover -s portable_eval_20260908/review -p test_a21_score_schema_fix.py -v",
+    "tests_passed": 3,
+    "elapsed_seconds": 0.169,
+    "checks": ["Old file SHA unchanged and derivative differs by precisely one line", "All 21 actual trace-v2 scores agree with frozen result_for_score_check adapter; 1 semantic zero retained", "Zero-score and original missing-field failure boundary"]
+  },
+  "bound_execution_sha256": "1fedbdaa6ec360cacc209fd797a61b7092b20e3a42539bddcc6274ac3afd7009",
+  "accepted_raw_audit": {
+    "path": "portable_eval_20260908/validation/a21_v3_raw_independent.json",
+    "sha256": "d852f0ed1fe2646e4a7d3a07c3e78ff5867aa3c2cfbb929579b9de055615be6b",
+    "passed": true,
+    "strict_response_raw_vs_response_json_checked": 248
+  },
+  "model_requests_added": 0,
+  "main_repository_harness_and_original_evidence_changed": false,
+  "final_full_audit_status": "Recorded separately in the new a21_v3_independent.json; this repair note does not substitute for that result."
+}
