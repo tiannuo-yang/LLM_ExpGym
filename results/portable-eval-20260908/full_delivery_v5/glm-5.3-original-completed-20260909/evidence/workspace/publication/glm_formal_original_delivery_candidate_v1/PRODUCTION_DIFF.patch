@@ -1,0 +1,110 @@
+--- publication/k3_formal_original_delivery_candidate_v2/operator.py	2026-09-09 15:48:43.000000000 +0000
++++ publication/glm_formal_original_delivery_candidate_v1/operator.py	2026-09-09 19:17:02.000000000 +0000
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Exact K3 original-run local delivery; frozen single-batch helpers, no uploader."""
++"""Exact GLM original-run local delivery; frozen single-batch helpers, no uploader."""
+ import argparse
+ import hashlib
+ import importlib.util
+@@ -14,14 +14,14 @@
+ HERE = Path(__file__).resolve().parent
+ PUB = HERE.parent
+ WORKSPACE = str(PUB.parent)
+-EXPECTED = dict(batch_count=33, file_count=64188, original_bytes=1268512973)
++EXPECTED = dict(batch_count=36, file_count=70520, original_bytes=3242213793)
+ SCOPE = {
+-    "inventory_ref": {"path": str(PUB / "k3_formal_original_scope_candidate_v1/candidate/inventory.json"),
+-        "sha256": "8877bf050b9ecea2fc3c06c421916bd1c039fb161cf70c8bf5d6cbfe2b681281"},
+-    "index_ref": {"path": str(PUB / "k3_formal_original_scope_candidate_v1/candidate/batches/INDEX.candidate.json"),
+-        "sha256": "0a4f98032deb59447da592def5ad9f8c070b1964a228e7527e81851b7adec84a"},
+-    "seal_ref": {"path": WORKSPACE + "/portable_eval_20260908/source_cohorts/v4/portable_eval_20260908/operations/restart_user_20260909/sealed_restart_runs_v1/kimi-k3-formal-node-failure-20260909/inventory.json",
+-        "sha256": "b98bbd8d06627b7fb757fb0beac661d40d98d1d94da5098b0fbf1c5d6ab97c66"}}
++    "inventory_ref": {"path": str(PUB / "glm_formal_original_scope_candidate_v1/candidate/inventory.json"),
++        "sha256": "78610fabac42cf3606dca00a19a3148647eb9eaa413843658bc38f504ec47489"},
++    "index_ref": {"path": str(PUB / "glm_formal_original_scope_candidate_v1/candidate/batches/INDEX.candidate.json"),
++        "sha256": "843ee297489da15af9976a65d0ba97f12b634153320bf863e49ceb40049fe5b5"},
++    "seal_ref": {"path": WORKSPACE + "/portable_eval_20260908/source_cohorts/v4/portable_eval_20260908/operations/restart_user_20260909/sealed_restart_runs_v1/glm-5.3-formal-completed-20260909/inventory.json",
++        "sha256": "da5b89e1041e396c04673b6f363dd01a3f6d64b61bfd9fe6d60f0a6617957f22"}}
+ HELPERS = {
+     "scan": (PUB / "pinned_batches_scan_candidate_v1/scan_batches.py", "5b3dbdf84f789dec731a3f8c821c2981a0f00e61f4b951141e022fab491b568b"),
+     "batch": (PUB / "restart_v5_closed_local_delivery_v1/operator.py", "979fd024d739eb927825d156048cbd6a1850fb27ddc6a5c5677abba1e4d7d497")}
+@@ -39,7 +39,7 @@
+     raw = path.read_bytes()
+     if hashlib.sha256(raw).hexdigest() != digest:
+         raise ValueError("frozen_helper_identity")
+-    spec = importlib.util.spec_from_file_location("k3_delivery_" + kind, path)
++    spec = importlib.util.spec_from_file_location("glm_delivery_" + kind, path)
+     module = importlib.util.module_from_spec(spec)
+     exec(compile(raw, str(path), "exec"), module.__dict__)
+     return module
+@@ -60,7 +60,7 @@
+ 
+ 
+ def recheck(refs):
+-    # Independent bounded reads, not one cached copy of all 33 reports/locks.
++    # Independent bounded reads, not one cached copy of all 36 reports/locks.
+     for ref in refs.values():
+         d.Metadata().raw(ref, c.MEMBER)
+ 
+@@ -87,7 +87,7 @@
+         and prepared["secret_source_count"] == receipt["secret_source_count"] == 3
+         and receipt["all_batches_passed"] is True and receipt["metadata_and_private_specs_after_unchanged"] is True
+         and all(receipt[k] == EXPECTED[k] for k in EXPECTED)
+-        and receipt["original_execution_complete"] is False and receipt["original_score_complete"] is False
++        and receipt["original_execution_complete"] is True and receipt["original_score_complete"] is True
+         and receipt["implicit_retry_performed"] is False, "original_scan_not_complete")
+     for ref in prepared["metadata_refs"]:
+         # Each original source ref has its original pin, including >8 MiB inventory parts.
+@@ -97,7 +97,7 @@
+     collect(r, refs)
+     del r
+     candidates, index, seal, r = d.catalogue(SCOPE["inventory_ref"], SCOPE["index_ref"], SCOPE["seal_ref"], WORKSPACE, EXPECTED)
+-    c.need(seal["original_execution_complete"] is False and seal["original_score_complete"] is False, "original_failure_identity")
++    c.need(seal["original_execution_complete"] is True and seal["original_score_complete"] is True, "original_completion_identity")
+     collect(r, refs)
+     del r
+     c.need(len(prepared["batches"]) == len(receipt["batches"]) == len(candidates) == EXPECTED["batch_count"], "exact_batch_count")
+@@ -151,9 +151,9 @@
+     fields = {"schema_version", "issuer", "approved", "action", "driver_sha256", "workspace", "output_dir",
+         "python", "expected_totals", "inventory_ref", "index_ref", "seal_ref", "scan_go_ref", "prepared_ref",
+         "scan_receipt_ref", "secret_files", "tool_refs", "max_parallel_batches", "publication_authorized", "network_authorized"}
+-    c.need(set(go) == fields and go["schema_version"] == "root-k3-original-delivery-go-v1"
++    c.need(set(go) == fields and go["schema_version"] == "root-glm-original-delivery-go-v1"
+         and go["issuer"] == "ROOT" and go["approved"] is True
+-        and go["action"] == "pack_and_local_restore_exact_33_batches"
++        and go["action"] == "pack_and_local_restore_exact_36_batches"
+         and go["workspace"] == WORKSPACE and go["python"] == "/usr/bin/python3"
+         and go["expected_totals"] == EXPECTED and type(go["max_parallel_batches"]) is int
+         and go["max_parallel_batches"] == 1 and go["publication_authorized"] is False
+@@ -161,7 +161,7 @@
+     c.need(secret_files == go["secret_files"], "caller_secret_paths_mismatch")
+     d.check_keys(secret_files)  # Only canonical path, file type, owner and mode; never values.
+     for key, ref in SCOPE.items():
+-        c.need(identity(go[key]) == ref, "fixed_k3_scope")
++        c.need(identity(go[key]) == ref, "fixed_glm_scope")
+     output = c.fresh(d.absolute(go["output_dir"]))
+     r.raw({"path": str(Path(__file__).resolve()), "sha256": go["driver_sha256"]})
+     for ref in TOOL_REFS + [{"path": str(p), "sha256": h} for p, h in HELPERS.values()]:
+@@ -327,12 +327,12 @@
+         recheck(refs)
+     except Exception:
+         stable = passed = False
+-    summary = {"schema_version": "k3-original-local-delivery-operator-v2", "passed": passed, "batches": results,
++    summary = {"schema_version": "glm-original-local-delivery-operator-v1", "passed": passed, "batches": results,
+         "expected_totals": EXPECTED, "finished_batches": len(results), "unstarted_batch_ids": [b["batch_id"] for b in batches[len(results):]],
+         "file_count": sum(x.get("file_count", 0) for x in results), "original_bytes": sum(x.get("original_bytes", 0) for x in results),
+         "compressed_bytes": sum(x.get("compressed_bytes", 0) for x in results), "shards": sum(x.get("shards", 0) for x in results),
+         "metadata_after_unchanged": stable, "whole_final_source_restore_path_bytes_sha_complete": passed,
+-        "original_execution_complete": False, "original_score_complete": False, "local_workers": None if unresolved else 0,
++        "original_execution_complete": True, "original_score_complete": True, "local_workers": None if unresolved else 0,
+         "children": children, "unresolved_started_pids": unresolved, "all_started_children_reaped": not unresolved,
+         "stop_new_join_policy": True, "implicit_retry_performed": False, "posix_metadata_preserved": False,
+         "network_performed": False, "publication_performed": False, "remote_restore_performed": False,
+@@ -356,7 +356,7 @@
+         print(json.dumps({k: result[k] for k in ("passed", "finished_batches", "publication_performed")}))
+         return 0 if result["passed"] else 2
+     except BaseException as error:
+-        print(json.dumps({"passed": False, "rule": "k3_original_delivery_failed_no_retry", "publication_performed": False}))
++        print(json.dumps({"passed": False, "rule": "glm_original_delivery_failed_no_retry", "publication_performed": False}))
+         return 130 if isinstance(error, KeyboardInterrupt) else 2

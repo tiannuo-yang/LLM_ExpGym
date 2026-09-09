@@ -1,5 +1,7 @@
 # ExpGym / PoolAct 可迁移性修补：阶段性检查点
 
+2026-09-09 追加：[GLM-5.3 完整正式数据：37 包及恢复命令](full_delivery_v5/glm-5.3-original-completed-20260909/FULL_DELIVERY.zh.md)。全部 70,520 个实验文件及 1,114 个公开附属文件已完成本地归档、恢复和组装核验；GitHub 新副本完整恢复及异地分析复跑待后续实际证明。已有报告与历史失败记录保持不变。
+
 2026-09-09 新增：[GLM-5.3 与 Kimi-K3 双模型阶段结果及分析原件](full_delivery_v5/glm-5.3-original-completed-20260909/RESULTS.zh.md)。本次先交付可浏览结果与复核材料；GLM 完整归档、公共恢复与异地分析复跑尚未完成，不将本次报告发布当作全部交付验收。
 
 2026-09-09 追加：[Kimi-K3 公共恢复与分析复跑验证补充](full_delivery_v5/kimi-k3-original-node-failure-20260909/RESTORE_REPLAY_VERIFIED.zh.md)：34 包完整公共恢复及全部 10 份分析输出逐字节一致已验证；原 8 个 NODE_FAIL 未补齐。以下旧阶段说明与链接保留对应时点状态。

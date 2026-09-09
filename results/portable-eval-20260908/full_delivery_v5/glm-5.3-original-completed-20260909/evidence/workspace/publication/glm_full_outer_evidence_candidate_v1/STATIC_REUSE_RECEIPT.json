@@ -1,0 +1,94 @@
+{
+  "schema": "glm-outer-candidate-static-reuse-v1",
+  "candidate": true,
+  "approved": false,
+  "actual_check": {
+    "command": "/usr/bin/prlimit --core=0:0 -- /usr/bin/python3 -B - <<'PY'\nimport ast, hashlib, importlib.util, json\nfrom pathlib import Path\nold_path = Path('/lustrefs/users/chufan.shi/codex_space_tn/publication/k3_formal_outer_evidence_candidate_v1/prepare_metadata.py')\nnew_path = Path('/lustrefs/users/chufan.shi/codex_space_tn/publication/glm_full_outer_evidence_candidate_v1/prepare_metadata.py')\nold_raw, new_raw = old_path.read_bytes(), new_path.read_bytes()\nassert hashlib.sha256(old_raw).hexdigest() == 'cd6e38d33b0230a394a06f6b99df34b9176a0e11ffe6553039ddc21025f9e72e'\nold_ast, new_ast = ast.parse(old_raw), ast.parse(new_raw)\nold_f = {n.name:n for n in old_ast.body if isinstance(n, ast.FunctionDef)}\nnew_f = {n.name:n for n in new_ast.body if isinstance(n, ast.FunctionDef)}\nassert set(old_f) == set(new_f)\nfor name in set(old_f) - {'main'}:\n    assert ast.get_source_segment(old_raw.decode(), old_f[name]) == ast.get_source_segment(new_raw.decode(), new_f[name]), name\nchanges = []\ndef compare(a,b,path='main'):\n    if isinstance(a,ast.Constant) and isinstance(b,ast.Constant):\n        if type(a.value) is not type(b.value) or a.value != b.value: changes.append([path,a.value,b.value])\n        return\n    assert type(a) is type(b), path\n    if isinstance(a,ast.AST):\n        for field in a._fields: compare(getattr(a,field),getattr(b,field),path+'.'+field)\n    elif isinstance(a,list):\n        assert len(a)==len(b),path\n        for i,(left,right) in enumerate(zip(a,b)): compare(left,right,path+'[%d]'%i)\n    else: assert a==b,path\ncompare(old_f['main'],new_f['main'])\nassert len(changes)==6,changes\nspec=importlib.util.spec_from_file_location('outer_cpu_static',new_path)\nm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\npaths=[p for values in m.groups.values() for p in values]\nassert len(paths)==len(set(paths))==668\nassert len(m.PINS)==54 and set(m.PINS)<=set(paths)\nassert len(m.groups['raw_batch_proofs'])==396\nassert len(m.groups['raw_scan_outputs'])==182\nassert len(m.groups['raw_scope_candidates'])==39\nassert all(len(h)==64 and set(h)<=set('0123456789abcdef') for h in m.PINS.values())\nassert all('/glm_public_controls_subset_v1/' in str(p) for p in m.groups['controls_public_scope'])\nassert not any(p.name=='invocation.json' or str(p).endswith('.tar.gz') or '/restore/payload/' in str(p) or '/restored/payload/' in str(p) for p in paths)\nassert not (new_path.parent/'FILES.candidate.json').exists()\nassert not (new_path.parent/'HASH_RECEIPT.json').exists()\nprint(json.dumps({'passed':True,'static_only':True,'candidate_source_ref':{'path':str(new_path),'bytes':len(new_raw),'sha256':hashlib.sha256(new_raw).hexdigest()},'source_ref':{'path':str(old_path),'bytes':len(old_raw),'sha256':hashlib.sha256(old_raw).hexdigest()},'function_names':sorted(old_f),'non_main_functions_byte_identical':True,'main_ast_structure_identical':True,'main_constant_deltas':changes,'scope_count':len(paths),'external_pin_count':len(m.PINS),'groups':{k:len(v) for k,v in m.groups.items()},'real_metadata_main_executed':False,'input_metadata_or_payload_or_key_hashes':0},sort_keys=True))\nPY",
+    "chunk_id": "7d61c5",
+    "actual_exit_code": 0
+  },
+  "checks": {
+    "candidate_source_ref": {
+      "bytes": 15763,
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/publication/glm_full_outer_evidence_candidate_v1/prepare_metadata.py",
+      "sha256": "fab571b5252374afc2b247bf8db408a4a1fb778d47bbb884d7ae6223e60bd163"
+    },
+    "external_pin_count": 54,
+    "function_names": [
+      "add",
+      "fingerprint",
+      "hashed",
+      "main",
+      "need",
+      "write_new"
+    ],
+    "groups": {
+      "assembly_selection_and_proofs": 5,
+      "closed_selection_evidence": 8,
+      "closed_selection_peer_review": 1,
+      "controls_byte_verification": 4,
+      "controls_local_proofs": 5,
+      "controls_public_scope": 2,
+      "controls_scan_metadata": 4,
+      "frozen_practical_code": 12,
+      "preserved_metadata_preflight_failure": 1,
+      "raw_batch_proofs": 396,
+      "raw_pack_go": 1,
+      "raw_root_proofs": 2,
+      "raw_run_operator_metadata": 3,
+      "raw_scan_controls": 3,
+      "raw_scan_outputs": 182,
+      "raw_scope_candidates": 39
+    },
+    "input_metadata_or_payload_or_key_hashes": 0,
+    "main_ast_structure_identical": true,
+    "main_constant_deltas": [
+      [
+        "main.body[1].value.args[0].values[0].comparators[0]",
+        606,
+        668
+      ],
+      [
+        "main.body[1].value.args[0].values[1].comparators[0]",
+        606,
+        668
+      ],
+      [
+        "main.body[11].value.values[0]",
+        "k3-formal-outer-evidence-files-candidate-v1",
+        "glm-formal-outer-evidence-files-candidate-v1"
+      ],
+      [
+        "main.body[11].value.values[7]",
+        false,
+        true
+      ],
+      [
+        "main.body[11].value.values[8]",
+        false,
+        true
+      ],
+      [
+        "main.body[14].value.values[0]",
+        "k3-formal-outer-evidence-hash-receipt-v1",
+        "glm-formal-outer-evidence-hash-receipt-v1"
+      ]
+    ],
+    "non_main_functions_byte_identical": true,
+    "passed": true,
+    "real_metadata_main_executed": false,
+    "scope_count": 668,
+    "source_ref": {
+      "bytes": 12237,
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/publication/k3_formal_outer_evidence_candidate_v1/prepare_metadata.py",
+      "sha256": "cd6e38d33b0230a394a06f6b99df34b9176a0e11ffe6553039ddc21025f9e72e"
+    },
+    "static_only": true
+  },
+  "production_diff": {
+    "chunk_id": "a34908",
+    "actual_exit_code": 1,
+    "exit_one_means_differences_not_execution_failure": true
+  },
+  "real_metadata_main_executed": false
+}

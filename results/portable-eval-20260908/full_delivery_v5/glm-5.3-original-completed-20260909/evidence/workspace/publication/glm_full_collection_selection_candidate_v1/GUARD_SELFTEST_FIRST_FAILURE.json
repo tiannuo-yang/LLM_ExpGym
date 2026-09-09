@@ -1,0 +1,18 @@
+{
+  "schema_version": "glm-selection-pure-guard-selftest-preserved-failure-v1",
+  "passed": false,
+  "actual_main_or_closed_metadata_verification_executed": false,
+  "temporary_files_created": false,
+  "command": "/usr/bin/python3 -B - <<'PY'\nimport ast,hashlib,json,re\nfrom pathlib import Path,PurePosixPath\nsource=Path('/lustrefs/users/chufan.shi/codex_space_tn/publication/glm_full_collection_selection_candidate_v1/verify_selection.py').read_bytes()\nassert hashlib.sha256(source).hexdigest()=='2dc33525dd29582388af243ab4968f25a65aac8caedf41a0735ecfc7cf5b6daf'\ntree=ast.parse(source);names={'need','encoded','sha','strict_json','relative','integer','shape_ref','rows','row_digest','complete','verified_exit'}\nselected=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in names]\nassert len(selected)==len(names)\nspace={'hashlib':hashlib,'json':json,'re':re,'Path':Path,'PurePosixPath':PurePosixPath}\nexec(compile(ast.Module(body=selected,type_ignores=[]),'<pure-checker-functions>','exec'),space)\nn=0\ndef rejects(fn,*args):\n global n\n try:fn(*args)\n except ValueError:n+=1\n else:raise AssertionError('expected rejection')\nfor x in (True,False,1.0,-1,None):rejects(space['integer'],x)\nfor x in ('/abs','a/../b','a//b','.','a\\\\b','a/./b'):rejects(space['relative'],x)\nrow={'path':'a','bytes':0,'sha256':hashlib.sha256(b'').hexdigest()}\nassert space['rows']([row])=={'a':row};n+=1\nrejects(space['rows'],[row,row]);rejects(space['rows'],[{**row,'bytes':False}])\nwork=Path('/synthetic/closed/batch-000001')\nref=lambda suffix:{'path':str(work/suffix),'bytes':0,'sha256':hashlib.sha256(b'').hexdigest()}\ne={'stage':'pack','pid':1,'exit_code':0,'confirmed_reaped':True,'closure_evidence':'wait','wait_returned':True,'failure_layers':[],'stdout_ref':ref('pack.stdout.json'),'stderr_ref':ref('pack.stderr.log')}\nc={'stage':'pack','pid':1,'exit_code':0,'confirmed_reaped':True,'closure_evidence':'wait','wait_attempts':1,'poll_attempted':False,'wait_had_exception':False,'failure_layers':[],'work':str(work)}\nspace['verified_exit'](e,c,'pack',work);n+=1\nfor d in ({'exit_code':False},{'confirmed_reaped':1},{'wait_attempts':True},{'poll_attempted':True},{'failure_layers':['synthetic_failure']}):rejects(space['verified_exit'],e,{**c,**d},'pack',work)\nassert space['complete']({'a':row},{'kind':'synthetic'})['inventory_sha256']==hashlib.sha256(space['encoded'](row)).hexdigest();n+=1\nrejects(space['strict_json'],b'{\"a\":1,\"a\":2}')\nrejects(space['strict_json'],b'{\"a\":NaN}')\nprint(json.dumps({'passed':True,'pure_assertions':n,'checker_sha256':hashlib.sha256(source).hexdigest(),'main_executed':False,'metadata_or_payload_read':False,'temporary_files_created':False,'production_modules_imported':False},sort_keys=True))\nPY",
+  "tool_result": {
+    "chunk_id": "6ad607",
+    "wall_time_seconds": 0.000006253,
+    "exit_code": 1,
+    "original_token_count": 37,
+    "output": "Traceback (most recent call last):\n  File \"<stdin>\", line 17, in <module>\n  File \"<stdin>\", line 15, in rejects\nAssertionError: expected rejection\n"
+  },
+  "source_sha256": "2dc33525dd29582388af243ab4968f25a65aac8caedf41a0735ecfc7cf5b6daf",
+  "cause": "Synthetic relative-path rejection for '.' exposed that PurePosixPath('.').parts is empty, so all(parts predicate) passed vacuously. No actual input rows or payload were involved.",
+  "correction_scope": "Only add value != '.' in this new verifier's relative() before any actual main run; frozen original tools unchanged.",
+  "forbidden_actual_actions_performed": false
+}
