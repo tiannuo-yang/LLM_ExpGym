@@ -1,5 +1,7 @@
 # ExpGym / PoolAct 可迁移性修补：阶段性检查点
 
+2026-09-09 追加：[Kimi-K3 原正式运行完整数据：34包及恢复说明](full_delivery_v5/kimi-k3-original-node-failure-20260909/FULL_DELIVERY.zh.md)。保留697完成＋8项节点故障；本地完整校验已通过，远端完整恢复与异地分析重放回执待另行公布。以下阶段说明保留对应时点状态。
+
 2026-09-09 新增：[Kimi-K3 v5 阶段结果与 CSV](full_delivery_v5/kimi-k3-original-node-failure-20260909/README.zh.md)。K3 已闭合为 697 项完成、8 项节点故障；报告及分析后独立复核可直接查看。完整 dump 发布与远端恢复仍在进行，GLM 尚未闭合；这不是双模型最终验收。
 
 2026-09-09 追加：[旧运行与 v5 smoke 完整归档](closed_history_v5_20260909/README.zh.md)已发布，并通过[GitHub 重新下载与全原件恢复验收](updates/closed-history-v5-remote-verification/README.zh.md)。这不是新版正式性能结论；双模型正式全量与分析另行交付。以下保留原初始检查点说明。

@@ -1,0 +1,171 @@
+--- publication/k3_formal_original_delivery_candidate_v1/operator.py	2026-09-09 15:40:03.000000000 +0000
++++ publication/k3_formal_original_delivery_candidate_v2/operator.py	2026-09-09 15:48:43.000000000 +0000
+@@ -178,11 +178,105 @@
+     return go, batches, refs, output
+ 
+ 
++def natural_wait(child, state):
++    """At most two blocking waits, then one poll; never infer a missing exit code."""
++    pending = None
++    for _ in range(2):
++        state["wait_attempts"] += 1
++        try:
++            code = child.wait()
++            c.need(type(code) is int, "invalid_child_exit_status")
++            state.update(confirmed_reaped=True, exit_code=code, closure_evidence="wait")
++            return pending
++        except BaseException as error:
++            state["wait_had_exception"] = True
++            if pending is None or isinstance(error, (KeyboardInterrupt, SystemExit)):
++                pending = error
++    state["poll_attempted"] = True
++    try:
++        code = child.poll()
++        if type(code) is int:
++            state.update(confirmed_reaped=True, exit_code=code, closure_evidence="final_poll")
++    except BaseException as error:
++        if isinstance(error, (KeyboardInterrupt, SystemExit)):
++            pending = error
++    return pending
++
++
++def safe_invoke(argv, stage, work, helper, children):
++    """Keep logs open until bounded natural wait even if started metadata fails."""
++    began, clock = helper.utc(), helper.time.perf_counter()
++    state, pending, layer = None, None, "open_logs"
++    stdout, stderr = work / (stage + ".stdout.json"), work / (stage + ".stderr.log")
++    result = {}
++    try:
++        with stdout.open("xb") as out, stderr.open("xb") as err:
++            layer = "popen"
++            env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", TMPDIR=str(helper.ROOT / "scratch"))
++            child = helper.subprocess.Popen(argv, stdout=out, stderr=err, stdin=helper.subprocess.DEVNULL, env=env)
++            state = {"pid": child.pid, "stage": stage, "work": str(work), "confirmed_reaped": False,
++                "exit_code": None, "closure_evidence": None, "wait_attempts": 0, "poll_attempted": False,
++                "wait_had_exception": False, "failure_layers": []}
++            children.append(state)
++            try:
++                layer = "started_receipt"
++                helper.write_new(work / (stage + ".started.json"), {"pid": child.pid, "started_utc": began,
++                    "stage": stage, "core_dump_limit": list(resource.getrlimit(resource.RLIMIT_CORE)), "argv": argv})
++            except BaseException as error:
++                pending = error
++                state["failure_layers"].append(layer)
++            finally:
++                waited_error = natural_wait(child, state)
++                if waited_error is not None:
++                    state["failure_layers"].append("wait_exception")
++                    if pending is None or isinstance(waited_error, (KeyboardInterrupt, SystemExit)):
++                        pending = waited_error
++            layer = "close_logs"
++        layer = "log_refs"
++        result.update(stdout_ref=helper.observed(stdout), stderr_ref=helper.observed(stderr))
++    except BaseException as error:
++        if pending is None or isinstance(error, (KeyboardInterrupt, SystemExit)):
++            pending = error
++        if state is not None:
++            state["failure_layers"].append(layer)
++    if state is None:
++        raise pending
++    result.update(stage=stage, pid=state["pid"], exit_code=state["exit_code"], started_utc=began,
++        finished_utc=helper.utc(), elapsed_seconds=helper.time.perf_counter() - clock,
++        wait_returned=state["closure_evidence"] == "wait", confirmed_reaped=state["confirmed_reaped"],
++        closure_evidence=state["closure_evidence"], failure_layers=list(state["failure_layers"]))
++    try:
++        helper.write_new(work / (stage + ".exit.json"), result)
++    except BaseException as error:
++        state["failure_layers"].append("exit_receipt")
++        if pending is None or isinstance(error, (KeyboardInterrupt, SystemExit)):
++            pending = error
++    if not state["confirmed_reaped"]:
++        helper.STOP.set()
++        state["failure_layers"].append("closure_unknown")
++        if not isinstance(pending, (KeyboardInterrupt, SystemExit)):
++            pending = c.DeliveryError("child_closure_unknown_no_retry")
++    if pending is not None:
++        helper.STOP.set()
++        raise pending
++    try:
++        helper.require(state["exit_code"] == 0, stage + "_nonzero_exit")
++        body = json.loads(stdout.read_bytes())
++        helper.require(body.get("passed") is True and body.get("publication_performed") is False, stage + "_not_passed")
++        return body, result
++    except BaseException:
++        state["failure_layers"].append("nonzero_or_stdout_validation")
++        helper.STOP.set()
++        raise
++
++
+ def execute(go_ref, secret_files):
+     resource.setrlimit(resource.RLIMIT_CORE, (0, 0)); os.umask(0o077)
+     go, batches, refs, output = preflight(go_ref, secret_files)
+     helper = load_helper("batch")
+     helper.ROOT, helper.STOP = output, threading.Event()
++    children = []
++    helper.invoke = lambda argv, stage, work: safe_invoke(argv, stage, work, helper, children)
+     output.mkdir(mode=0o700)
+     for name in ("batches", "scratch"):
+         (output / name).mkdir(mode=0o700)
+@@ -191,10 +285,16 @@
+         "old_go_or_payload_read": False, "helper_sha256": HELPERS["batch"][1], "secret_values_read_by_operator": False}))
+     c.write_new(output / "STARTED.json", c.encoded({"pid": os.getpid(), "started_utc": helper.utc(), "core_dump_limit": 0,
+         "max_parallel_batches": 1, "go_ref": go_ref, "operator_sha256": go["driver_sha256"], "publication_performed": False}))
+-    results = []
++    results, interruption = [], None
+     for batch in batches:
+         d.check_keys(secret_files)
+-        result = helper.batch_run(go, batch, c)  # Frozen invoke waits every child; no detached worker.
++        try:
++            result = helper.batch_run(go, batch, c)  # Only invoke is replaced; pack/restore logic unchanged.
++        except BaseException as error:
++            interruption = error
++            helper.STOP.set()
++            result = {"batch_id": batch["batch_id"], "passed": False, "failure_layer": "batch_interrupted",
++                      "publication_performed": False, "remote_restore_performed": False}
+         result["retained_child_exit_refs"] = [helper.observed(p) for p in (
+             output / "batches" / batch["batch_id"] / "pack.exit.json",
+             output / "batches" / batch["batch_id"] / "restore.exit.json") if p.exists()]
+@@ -206,7 +306,8 @@
+         recheck(refs)
+     except Exception:
+         stable = False
+-    passed = len(results) == len(batches) and all(x["passed"] for x in results) and stable
++    unresolved = [x["pid"] for x in children if not x["confirmed_reaped"]]
++    passed = len(results) == len(batches) and all(x["passed"] for x in results) and stable and not unresolved
+     if passed:
+         try:
+             # Final cross-batch source/restore recheck, not merely earlier per-batch success.
+@@ -226,16 +327,19 @@
+         recheck(refs)
+     except Exception:
+         stable = passed = False
+-    summary = {"schema_version": "k3-original-local-delivery-operator-v1", "passed": passed, "batches": results,
++    summary = {"schema_version": "k3-original-local-delivery-operator-v2", "passed": passed, "batches": results,
+         "expected_totals": EXPECTED, "finished_batches": len(results), "unstarted_batch_ids": [b["batch_id"] for b in batches[len(results):]],
+         "file_count": sum(x.get("file_count", 0) for x in results), "original_bytes": sum(x.get("original_bytes", 0) for x in results),
+         "compressed_bytes": sum(x.get("compressed_bytes", 0) for x in results), "shards": sum(x.get("shards", 0) for x in results),
+         "metadata_after_unchanged": stable, "whole_final_source_restore_path_bytes_sha_complete": passed,
+-        "original_execution_complete": False, "original_score_complete": False, "local_workers": 0,
++        "original_execution_complete": False, "original_score_complete": False, "local_workers": None if unresolved else 0,
++        "children": children, "unresolved_started_pids": unresolved, "all_started_children_reaped": not unresolved,
+         "stop_new_join_policy": True, "implicit_retry_performed": False, "posix_metadata_preserved": False,
+         "network_performed": False, "publication_performed": False, "remote_restore_performed": False,
+         "full_project_complete": False, "finished_utc": helper.utc()}
+     c.write_new(output / "SUMMARY.json", c.encoded(summary)); c.sync_directory(output)
++    if interruption is not None:
++        raise interruption
+     return summary
+ 
+ 
+@@ -251,9 +355,9 @@
+         result = execute({"path": args.go, "sha256": args.go_sha256}, args.secret_file)
+         print(json.dumps({k: result[k] for k in ("passed", "finished_batches", "publication_performed")}))
+         return 0 if result["passed"] else 2
+-    except Exception:
++    except BaseException as error:
+         print(json.dumps({"passed": False, "rule": "k3_original_delivery_failed_no_retry", "publication_performed": False}))
+-        return 2
++        return 130 if isinstance(error, KeyboardInterrupt) else 2
+ 
+ 
+ if __name__ == "__main__":
