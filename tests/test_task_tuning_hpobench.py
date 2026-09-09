@@ -74,7 +74,8 @@ class TestHPOBenchTasks(unittest.TestCase):
     def test_nasbench101_hints_describe_distinct_encodings(self) -> None:
         hints = {v: _task_hints("hpobench:nasbench101:" + v) for v in "ABC"}
         for variant, hint in hints.items():
-            self.assertIn("NASBench101-" + variant, hint)
+            self.assertNotIn("NASBench", hint)
+            self.assertIn("neural architecture search task", hint)
             self.assertIn("7-node directed acyclic graph", hint)
             self.assertIn("AT MOST 9", hint)
             self.assertIn("will always score 0", hint)

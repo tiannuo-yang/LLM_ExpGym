@@ -334,6 +334,8 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
     score_source = result.get("answer_score_source")
     if score_source == "offline_final_answer":
         score_cost_basis = "offline_final_answer"
+    elif score_source == "offline_empty_prediction":
+        score_cost_basis = "total_simulated_cost"
     elif score_source == "answer_evaluator":
         score_cost_basis = "total_simulated_cost"
     else:
@@ -363,6 +365,12 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
     for optional in ("tool_protocol", "tuning_final_policy", "protocol_failures", "protocol_retries", "agent_steps", "http_request_attempts"):
         if optional in result:
             outcome[optional] = copy.deepcopy(result[optional])
+    if result.get("missing_final_policy") == "task-abstention-v1":
+        for field in ("missing_final_policy", "terminal_origin", "terminal_scenario", "scoring_input", "score_status", "terminal_status"):
+            outcome[field] = copy.deepcopy(result[field])
+        if result["terminal_status"]["score_complete"] is False:
+            outcome["validation"]["method"] = "explicit_model_terminal_unscored"
+            outcome["score_cost_basis"] = "unscored_terminal"
     if answer_source == "best_evaluated_fallback":
         outcome["answer_override"] = result.get("answer")
 
@@ -377,7 +385,7 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
     task["limits"] = runtime.get("limits") or {}
 
     trace: Dict[str, object] = {
-        "schema": {"name": TRACE_SCHEMA_NAME, "version": TRACE_SCHEMA_VERSION},
+        "schema": {"name": TRACE_SCHEMA_NAME, "version": "2.1.0" if result.get("missing_final_policy") == "task-abstention-v1" else TRACE_SCHEMA_VERSION},
         "trace_id": str(uuid4()),
         "provenance": {
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -574,6 +582,36 @@ def validate_trace_v2(trace: Dict[str, object]) -> None:
     if outcome.get("answer_score_source") == "offline_final_answer" and outcome.get("score_cost_basis") == "matching_tool_call":
         errors.append("offline final answer must not claim matching_tool_call score cost basis")
     score = outcome["score"]
+    policy_fields = {"missing_final_policy", "terminal_origin", "terminal_scenario", "scoring_input", "score_status", "terminal_status"}
+    if trace["schema"]["version"] == "2.1.0":
+        from expgym.missing_final import POLICY, terminal_publishable
+        if not policy_fields.issubset(outcome) or outcome.get("terminal_scenario") != trace["task"].get("scenario"):
+            errors.append("Explicit terminal trace requires policy fields and matching scenario")
+        else:
+            view = {key: copy.deepcopy(outcome[key]) for key in policy_fields}
+            view.update(answer=outcome.get("answer"), answer_perf=(score["metrics"].get(score.get("primary_metric"))
+                if isinstance(score.get("metrics"), dict) else score.get("value")), answer_metrics=score.get("metrics"))
+            check = {"ok": outcome["validation"]["passed"]}
+            if check["ok"] is False:
+                check.update(reason="unscorable_missing_configuration", score_complete=False, policy_version=POLICY)
+                if outcome["validation"]["method"] != "explicit_model_terminal_unscored":
+                    errors.append("Unknown task score must not claim repository score acceptance")
+                if outcome.get("score_cost_basis") != "unscored_terminal":
+                    errors.append("Unknown task score requires unscored_terminal cost basis")
+            elif outcome["validation"]["method"] != "repository_score_recompute":
+                errors.append("Scored terminal requires repository recompute validation")
+            if not terminal_publishable(view, check):
+                errors.append("Terminal execution/score status is inconsistent")
+            if outcome.get("answer") is None and check["ok"] is True and (
+                    outcome.get("terminal_scenario") not in {"restricted_search", "evidence_audit"}
+                    or outcome.get("scoring_input") != "" or outcome.get("score_status") != "scored_empty_prediction"
+                    or outcome.get("answer_score_source") != "offline_empty_prediction"):
+                errors.append("Missing final score requires explicit empty prediction policy")
+    elif (policy_fields.intersection(outcome) or outcome["validation"]["passed"] is not True
+          or outcome["validation"]["method"] != "repository_score_recompute"
+          or outcome.get("answer_score_source") == "offline_empty_prediction"
+          or outcome.get("score_cost_basis") == "unscored_terminal"):
+        errors.append("Legacy v2.0 requires complete independent score acceptance and no new terminal policy")
     if "metrics" in score and (score["primary_metric"] not in score["metrics"] or score["metrics"][score["primary_metric"]] is None):
         errors.append("outcome primary_metric must identify a numeric score")
     if errors:
@@ -652,8 +690,10 @@ def result_for_score_check(trace: Dict[str, object]) -> Dict[str, Any]:
         "answer_source": outcome["answer_source"], "answer_score_source": outcome.get("answer_score_source"),
         "messages": [materialize_message(trace, message["id"]) for message in trace["messages"] if not message.get("request_only")],
     }
-    if "tuning_final_policy" in outcome:
-        result["tuning_final_policy"] = outcome["tuning_final_policy"]
+    for field in ("tuning_final_policy", "missing_final_policy", "terminal_origin", "terminal_scenario",
+                  "scoring_input", "score_status", "terminal_status"):
+        if field in outcome:
+            result[field] = copy.deepcopy(outcome[field])
     return result
 
 

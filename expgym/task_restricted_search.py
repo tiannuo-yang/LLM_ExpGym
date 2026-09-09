@@ -342,7 +342,6 @@ def build_context(
             f"for data_source={data_source}"
         )
     question = qa_rows[row_index]["question"]
-    n_gold = len(qa_rows[row_index]["answer"])
 
     lines = [
         "You are answering a question by searching a wiki of fictional characters.",
@@ -363,7 +362,7 @@ def build_context(
         "Action format:" if tool_protocol == "text" else "Native tool invocation:",
         ('  Action: search {"query": "Person Name"}' if tool_protocol == "text" else
          '  Call the search function with arguments {"query": "Person Name"} using a native tool call.'),
-        f"  Answer: Name1, Name2, ...  (there may be 1 to {n_gold} correct answers)",
+        "  Answer: Name1, Name2, ...",
         "",
         f"Question: {question}",
     ]

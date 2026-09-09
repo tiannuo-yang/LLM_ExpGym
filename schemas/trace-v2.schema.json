@@ -18,7 +18,7 @@
   ],
   "properties": {
     "schema": {
-      "const": {"name": "expgym.trace", "version": "2.0.0"}
+      "enum": [{"name": "expgym.trace", "version": "2.0.0"}, {"name": "expgym.trace", "version": "2.1.0"}]
     },
     "trace_id": {"type": "string", "minLength": 1},
     "provenance": {
@@ -95,8 +95,25 @@
         "answer_overhead": {"type": ["number", "null"], "minimum": 0},
         "answer_override": {"type": ["string", "null"]},
         "answer_message_id": {"type": ["string", "null"]},
-        "answer_score_source": {"enum": ["offline_final_answer", "answer_evaluator", "matching_tool_call", "best_evaluated_fallback", "unscored", null]},
-        "score_cost_basis": {"enum": ["total_simulated_cost", "matching_tool_call", "offline_final_answer"]},
+        "answer_score_source": {"enum": ["offline_final_answer", "offline_empty_prediction", "answer_evaluator", "matching_tool_call", "best_evaluated_fallback", "unscored", null]},
+        "missing_final_policy": {"const": "task-abstention-v1"},
+        "terminal_origin": {"const": "normal_loop_return"},
+        "terminal_scenario": {"enum": ["tuning", "restricted_search", "evidence_audit"]},
+        "scoring_input": {"type": ["string", "null"]},
+        "score_status": {"enum": ["scored_final_answer", "scored_empty_prediction", "unscorable_missing_configuration"]},
+        "terminal_status": {
+          "type": "object", "additionalProperties": false,
+          "required": ["schema_version", "policy_version", "execution_complete", "score_complete", "terminal_classification", "model_no_answer_count", "expected_model_terminals", "reported_model_terminals"],
+          "properties": {
+            "schema_version": {"const": "expgym.execution-terminal.v1"},
+            "policy_version": {"const": "task-abstention-v1"},
+            "execution_complete": {"const": true}, "score_complete": {"type": "boolean"},
+            "terminal_classification": {"enum": ["completed_scored", "model_no_answer"]},
+            "model_no_answer_count": {"type": "integer", "minimum": 0, "maximum": 1},
+            "expected_model_terminals": {"const": 1}, "reported_model_terminals": {"const": 1}
+          }
+        },
+        "score_cost_basis": {"enum": ["total_simulated_cost", "matching_tool_call", "offline_final_answer", "unscored_terminal"]},
         "tool_protocol": {"enum": ["native", "text"]},
         "tuning_final_policy": {"enum": ["submitted", "legacy"]},
         "protocol_failures": {"type": "array", "items": {
@@ -125,7 +142,7 @@
         },
         "validation": {
           "type": "object", "required": ["passed", "method"],
-          "properties": {"passed": {"type": "boolean", "const": true}, "method": {"const": "repository_score_recompute"}}
+          "properties": {"passed": {"type": "boolean"}, "method": {"enum": ["repository_score_recompute", "explicit_model_terminal_unscored"]}}
         }
       }
     },

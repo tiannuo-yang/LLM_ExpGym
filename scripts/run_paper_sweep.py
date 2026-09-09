@@ -47,6 +47,11 @@ from demo_experiment import (  # noqa: E402
 )
 from expgym.react_loop import _parse_tool_return, build_system_prompt, run_react_loop  # noqa: E402
 from expgym.task_tuning import InvalidConfigurationError  # noqa: E402
+from expgym.terminal_evidence import TerminalEvidence  # noqa: E402
+from expgym.missing_final import (  # noqa: E402
+    POLICY as MISSING_FINAL_POLICY, mark_loop_return, is_policy_missing, score_missing,
+    finish_score, terminal_publishable,
+)
 from expgym.evaluation_identity import bind_evaluation_identity, evaluation_identity  # noqa: E402
 from expgym.trace_v2 import (  # noqa: E402
     build_trace_v2,
@@ -165,6 +170,7 @@ def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object
             "max_evaluations": args.max_evals,
         },
         "protocol": _loop_options(args),
+        "missing_final_policy": getattr(args, "missing_final_policy", "error"),
     }
     canonical = json.dumps(
         identity,
@@ -419,7 +425,7 @@ def _format_result_summary(result: Dict[str, Any], path: Path) -> str:
         f"model={job.get('model_id', 'unknown')}",
         f"cost_regime={job.get('cost_regime', 'unknown')}",
         f"answer_perf={_format_number(result.get('answer_perf'))}",
-        f"score_check={'ok' if (result.get('score_check') or {}).get('ok') else 'failed'}",
+        f"score_check={'ok' if (result.get('score_check') or {}).get('ok') else 'unknown' if (result.get('terminal_status') or {}).get('execution_complete') else 'failed'}",
         f"evaluations={result.get('evaluations')}",
         f"api_calls={result.get('api_calls')}",
         f"cached_prompt_tokens={result.get('cached_prompt_tokens', 0)}",
@@ -457,6 +463,7 @@ def _namespace_for_job(
     ns.top_k = getattr(args, "top_k", None)
     ns.chat_template_kwargs = getattr(args, "chat_template_kwargs", None)
     ns.reasoning_effort = getattr(args, "reasoning_effort", None)
+    ns.missing_final_policy = getattr(args, "missing_final_policy", "error")
     for name, value in _loop_options(args).items():
         setattr(ns, name, value)
     ns._api_dump_context = {
@@ -559,25 +566,49 @@ def _resume_trace_is_valid(path: Path, args: argparse.Namespace, job: Job) -> bo
                 result.get("job") == asdict(job)
                 and result.get("evaluation_identity") == identity
                 and result.get("_resume_key") == _resume_key(args, job, evaluation=identity)
-                and isinstance(check, dict) and check.get("ok") is True
+                and isinstance(check, dict) and terminal_publishable(result)
             ):
                 return False
         ns = _namespace_for_job(args, job, None)
+        if result.get("missing_final_policy", "error") != getattr(ns, "missing_final_policy", "error"):
+            return False
         if result.get("tuning_final_policy") != ns.tuning_final_policy:
             return False
         bind_evaluation_identity(identity)
         scenario = _SCENARIOS[job.scenario]
         tools = _resolve_tools(scenario, ns)
         evaluator = _resolve_answer_evaluator(scenario, ns)
-        return _score_check(result, tools, evaluator).get("ok") is True
+        return terminal_publishable(result, _score_check(result, tools, evaluator))
     except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
+
+
+def _job_evidence_root(args: argparse.Namespace, job: Job) -> Path:
+    path = _trace_path(args.output_dir, job, getattr(args, "trace_format", "v1"))
+    explicit = getattr(args, "terminal_evidence_dir", None)
+    if explicit is not None:
+        return Path(explicit) / path.relative_to(args.output_dir)
+    return path.parent / "_terminal_evidence" / path.name
 
 
 def _run_job(
     args: argparse.Namespace,
     job: Job,
     api_key: Optional[str],
+) -> Dict[str, Any]:
+    with TerminalEvidence(
+        _job_evidence_root(args, job) / "execution",
+        owner={"runner": "expgym", "scope": "loop_score", "job": asdict(job)},
+        source_root=REPO_ROOT,
+    ) as evidence:
+        return _run_job_with_evidence(args, job, api_key, evidence)
+
+
+def _run_job_with_evidence(
+    args: argparse.Namespace,
+    job: Job,
+    api_key: Optional[str],
+    evidence: TerminalEvidence,
 ) -> Dict[str, Any]:
     ns = _namespace_for_job(args, job, api_key)
     input_identity = evaluation_identity(ns, REPO_ROOT)
@@ -604,7 +635,8 @@ def _run_job(
         scenario["build_instruction_notes"], include_overhead, ns
     )
     answer_evaluator = _resolve_answer_evaluator(scenario, ns)
-    result = run_react_loop(
+    result = evidence.loop(
+        run_react_loop,
         llm=llm,
         tools=tools,
         time_budget=time_budget,
@@ -629,7 +661,8 @@ def _run_job(
         "c_base": c_base,
         "time_budget": time_budget,
     }
-    result["score_check"] = _score_result(result, tools, answer_evaluator)
+    mark_loop_return(result, job.scenario, getattr(ns, "missing_final_policy", "error"))
+    result["score_check"] = evidence.score(_score_result, result, tools, answer_evaluator)
     if evaluation_identity(ns, REPO_ROOT) != input_identity:
         raise RuntimeError("Evaluation inputs/dependencies changed during the run; refusing to publish a score")
     if ns.trace_format == "v2":
@@ -702,6 +735,9 @@ def _score_check(
     tools: Dict[str, Callable[[str], Any]],
     answer_evaluator: Optional[Callable[..., Any]],
 ) -> Dict[str, Any]:
+    if is_policy_missing(result):
+        return score_missing(result, answer_evaluator, commit=False,
+                             float_close=_float_close, metrics_close=_metrics_close)
     answer = result.get("answer")
     if not answer:
         return {"ok": False, "reason": "missing answer"}
@@ -778,7 +814,7 @@ def _score_check(
     }
 
 
-def _score_result(
+def _legacy_score_result(
     result: Dict[str, Any],
     tools: Dict[str, Callable[[str], Any]],
     answer_evaluator: Optional[Callable[..., Any]],
@@ -807,6 +843,34 @@ def _score_result(
         result["answer_score_source"] = "offline_final_answer"
         check = _score_check(result, tools, answer_evaluator)
     return check
+
+
+def _score_result(result, tools, answer_evaluator):
+    if is_policy_missing(result):
+        score_missing(result, answer_evaluator, commit=True,
+                      float_close=_float_close, metrics_close=_metrics_close)
+        # Independent second evaluation; the model interaction has finished.
+        check = _score_check(result, tools, answer_evaluator)
+    else:
+        check = _legacy_score_result(result, tools, answer_evaluator)
+    return finish_score(result, check)
+
+
+def validate_terminal_result(result, tools, answer_evaluator, *, scenario, missing_final_policy=MISSING_FINAL_POLICY):
+    """Independent task recheck; no model call or result mutation.
+
+    Caller still verifies source/config/data/raw/artifact identities separately.
+    An evaluator/tool exception propagates; unknown tuning invokes neither.
+    """
+    identity_ok = (type(result) is dict and result.get("missing_final_policy", "error") == missing_final_policy
+                   and (missing_final_policy == "error" or result.get("terminal_scenario") == scenario))
+    check = _score_check(result, tools, answer_evaluator) if identity_ok else {"ok": False, "reason": "terminal_policy_or_scenario_mismatch"}
+    complete = identity_ok and terminal_publishable(result, check)
+    return {"schema_version": "expgym.independent-terminal-check.v1", "execution_complete": bool(complete),
+            "score_complete": bool(complete and check.get("ok") is True), "score_check": check,
+            "terminal_classification": (result.get("terminal_status", {}).get("terminal_classification", "completed_scored")
+                                        if complete else "integrity_failure"),
+            "raw_and_artifact_integrity_checked": False}
 
 
 def _float_close(actual: Any, expected: Any) -> bool:
@@ -931,6 +995,8 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     _add_generation_arguments(parser)
+    parser.add_argument("--terminal-evidence-dir", type=Path, default=None,
+                        help="Optional separate evidence root, preserving each job trace's relative path.")
     parser.add_argument(
         "--backend",
         choices=["fake", "openai", "openrouter", "sub2api"],
@@ -1081,24 +1147,32 @@ def main() -> int:
             if _resume_trace_is_valid(path, args, job):
                 print(f"[{idx}/{len(jobs)}] skip verified {path}")
                 continue
+            if args.missing_final_policy == MISSING_FINAL_POLICY:
+                raise RuntimeError("Existing terminal artifact failed exact resume validation; refusing model resampling")
             print(f"[{idx}/{len(jobs)}] rerun stale/invalid {path}")
         print(f"[{idx}/{len(jobs)}] run {job.scenario} {job.model_alias} {job.cost_regime}")
         start = time.time()
         try:
-            result = _run_job(args, job, api_key)
-            result["wall_time_seconds"] = time.time() - start
-            if not result["score_check"].get("ok"):
-                raise RuntimeError(f"score check failed: {result['score_check']}")
-            if args.trace_format == "v2":
-                artifact = build_trace_v2(result, repo_root=REPO_ROOT)
-                write_trace_v2(path, artifact)
-            else:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(
-                    json.dumps(result, indent=2, default=str), encoding="utf-8"
-                )
-            print(f"  wrote {path} score_check=ok")
-            print(f"  {_format_result_summary(result, path)}")
+            with TerminalEvidence(
+                _job_evidence_root(args, job) / "runner",
+                owner={"runner": "expgym", "scope": "finalize", "job": asdict(job)},
+                source_root=REPO_ROOT, stage="runner_finalize",
+            ):
+                result = _run_job(args, job, api_key)
+                result["wall_time_seconds"] = time.time() - start
+                if not terminal_publishable(result):
+                    raise RuntimeError(f"score check failed: {result['score_check']}")
+                if args.trace_format == "v2":
+                    artifact = build_trace_v2(result, repo_root=REPO_ROOT)
+                    write_trace_v2(path, artifact)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(
+                        json.dumps(result, indent=2, default=str), encoding="utf-8"
+                    )
+                print(f"  wrote {path} score_check={'ok' if result['score_check'].get('ok') else 'unknown'} "
+                      f"execution_complete=true score_complete={result['score_check'].get('ok') is True}")
+                print(f"  {_format_result_summary(result, path)}")
         except Exception as exc:
             failures.append((job, str(exc)))
             print(f"  ERROR: {exc}", file=sys.stderr)

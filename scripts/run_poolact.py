@@ -39,16 +39,48 @@ from expgym.extras.parallel_cache import (  # noqa: E402
 from expgym.poolact import (  # noqa: E402
     POOLACT_PROTOCOL_VERSION,
     PoolActCoordinator,
-    aggregate_results,
+    aggregate_results as _original_aggregate_results,
     run_agents_parallel,
 )
 from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
 from scripts.run_paper_sweep import _score_check, _score_result  # noqa: E402
 from expgym.evaluation_identity import bind_evaluation_identity, evaluation_identity  # noqa: E402
 from expgym.trace_v2 import source_tree_sha256  # noqa: E402
+from expgym.terminal_evidence import TerminalEvidence  # noqa: E402
+from expgym.missing_final import (  # noqa: E402
+    mark_loop_return, terminal_publishable, aggregate_terminal, aggregate_publishable, canonical as _terminal_canonical,
+)
 
 
 STRATEGIES = ("naive", "cached", "poolact")
+
+
+def aggregate_results(scenario, results, *, answer_evaluator=None):
+    return aggregate_terminal(scenario, results, answer_evaluator=answer_evaluator,
+                              original_aggregate=_original_aggregate_results)
+
+
+def validate_terminal_pool(result, tools, answer_evaluator, *, scenario, expected_agents):
+    """Independent per-agent score and whole-pool aggregation recheck only."""
+    from scripts.run_paper_sweep import validate_terminal_result
+    agents = result.get("agent_results") if type(result) is dict else None
+    if (type(expected_agents) is not int or expected_agents < 1 or type(agents) is not list
+            or len(agents) != expected_agents or any(type(v) is not dict or type(v.get("agent_id")) is not int for v in agents)
+            or [v["agent_id"] for v in agents] != list(range(expected_agents))):
+        return {"schema_version": "expgym.independent-pool-terminal-check.v1", "execution_complete": False,
+                "score_complete": False, "terminal_classification": "integrity_failure", "reason": "incomplete_expected_agents"}
+    checks = [validate_terminal_result(agent, tools, answer_evaluator, scenario=scenario) for agent in agents]
+    if not all(check["execution_complete"] for check in checks):
+        return {"schema_version": "expgym.independent-pool-terminal-check.v1", "execution_complete": False,
+                "score_complete": False, "terminal_classification": "integrity_failure", "agent_checks": checks}
+    aggregate = aggregate_results(scenario, agents, answer_evaluator=answer_evaluator)
+    complete = (_terminal_canonical(aggregate) == _terminal_canonical(result.get("aggregate"))
+                and _terminal_canonical(result.get("terminal_status")) == _terminal_canonical(aggregate.get("terminal_status"))
+                and _shared_state_is_complete(result.get("shared_state")))
+    return {"schema_version": "expgym.independent-pool-terminal-check.v1", "execution_complete": bool(complete),
+            "score_complete": bool(complete and aggregate["terminal_status"]["score_complete"]),
+            "terminal_classification": aggregate["terminal_status"]["terminal_classification"] if complete else "integrity_failure",
+            "agent_checks": checks, "recomputed_aggregate": aggregate, "raw_and_artifact_integrity_checked": False}
 
 
 def _split_strategies(value: str) -> List[str]:
@@ -233,6 +265,7 @@ def _resolved_config(
 ) -> Dict[str, Any]:
     return {
         "poolact_protocol": POOLACT_PROTOCOL_VERSION,
+        "missing_final_policy": getattr(args, "missing_final_policy", "error"),
         "backend": args.backend,
         "model": args.model,
         "scenario": args.scenario,
@@ -285,18 +318,30 @@ def _batch_strategy_metrics(
 ) -> Dict[str, Dict[str, Any]]:
     metrics: Dict[str, Dict[str, Any]] = {}
     for strategy in strategies:
-        scores = [
-            item[strategy].get("answer_perf")
-            for item in items.values()
-            if strategy in item
-        ]
+        aggregates = [item[strategy] for item in items.values() if strategy in item]
+        policies = set()
+        for aggregate in aggregates:
+            status = aggregate.get("terminal_status", {})
+            if not isinstance(status, dict):
+                raise ValueError("Invalid aggregate terminal_status in batch metrics")
+            policy = status.get("policy_version")
+            if policy not in (None, "error", "task-abstention-v1"):
+                raise ValueError("Unknown missing-final policy in batch metrics")
+            policies.add("error" if policy is None else policy)
+        if len(policies) > 1:
+            raise ValueError("Mixed missing-final policies in batch metrics")
+        strict_complete = policies == {"task-abstention-v1"}
+        scores = [aggregate.get("answer_perf") for aggregate in aggregates]
         numeric_scores = [float(score) for score in scores if _is_finite_number(score)]
         metrics[strategy] = {
             "completed_items": len(scores),
             "scored_items": len(numeric_scores),
             "mean_answer_perf": (
-                sum(numeric_scores) / len(numeric_scores) if numeric_scores else None
+                sum(numeric_scores) / len(numeric_scores)
+                if numeric_scores and (not strict_complete or len(numeric_scores) == len(scores)) else None
             ),
+            "known_subset_mean_answer_perf_descriptive": (sum(numeric_scores) / len(numeric_scores) if numeric_scores else None),
+            "unscored_items": len(scores) - len(numeric_scores),
         }
     return metrics
 
@@ -319,6 +364,8 @@ def _shared_state_is_complete(state: Any) -> bool:
         isinstance(graph, dict)
         and graph.get("pending_claims", 0) == 0
         and state.get("pending_claims", 0) == 0
+        and type(graph.get("pending_claims", 0)) is int
+        and type(state.get("pending_claims", 0)) is int
     )
 
 
@@ -353,13 +400,17 @@ def _load_resumable_result(
             return None
         if not all(isinstance(agent, dict) for agent in embedded_agents):
             return None
+        if any(type(agent.get("agent_id")) is not int for agent in embedded_agents) or [agent["agent_id"] for agent in embedded_agents] != list(range(agents)):
+            return None
         by_id = {agent.get("agent_id"): agent for agent in embedded_agents}
         if set(by_id) != set(range(agents)):
             return None
         for agent_id in range(agents):
             agent = by_id[agent_id]
             score_check = agent.get("score_check")
-            if not isinstance(score_check, dict) or score_check.get("ok") is not True:
+            if not isinstance(score_check, dict) or not terminal_publishable(agent):
+                return None
+            if agent.get("missing_final_policy", "error") != config.get("missing_final_policy", "error"):
                 return None
             if "tuning_final_policy" in config and agent.get("tuning_final_policy") != config["tuning_final_policy"]:
                 return None
@@ -368,21 +419,32 @@ def _load_resumable_result(
             )
             if json.loads(agent_path.read_text(encoding="utf-8")) != agent:
                 return None
-            if _score_check(agent, score_tools or {}, answer_evaluator).get("ok") is not True:
+            if not terminal_publishable(agent, _score_check(agent, score_tools or {}, answer_evaluator)):
                 return None
         aggregate = existing.get("aggregate")
-        if not isinstance(aggregate, dict) or not _is_finite_number(aggregate.get("answer_perf")):
+        if not isinstance(aggregate, dict) or not aggregate_publishable(aggregate):
             return None
         recomputed_aggregate = aggregate_results(
             str(config["scenario"]),
             embedded_agents,
             answer_evaluator=answer_evaluator,
         )
-        if aggregate != recomputed_aggregate:
+        if _terminal_canonical(aggregate) != _terminal_canonical(recomputed_aggregate):
+            return None
+        if _terminal_canonical(existing.get("terminal_status")) != _terminal_canonical(aggregate.get("terminal_status")):
             return None
         return existing
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
+
+
+def _terminal_evidence_root(args: argparse.Namespace) -> Path:
+    explicit = getattr(args, "terminal_evidence_dir", None)
+    if explicit is None:
+        return args.output_dir / "_terminal_evidence"
+    question = getattr(args, "question_index", None)
+    return (Path(explicit) / ("repeat_%d" % getattr(args, "repeat_index", 0))
+            / ("item_%s" % (question if question is not None else "batch")))
 
 
 def _run_strategy(
@@ -399,7 +461,7 @@ def _run_strategy(
     )
     runtimes: Dict[int, Any] = {}
 
-    def execute_agent(agent_id: int) -> Dict[str, Any]:
+    def execute_agent(agent_id: int, evidence: TerminalEvidence) -> Dict[str, Any]:
         namespace = _agent_namespace(args, strategy, agent_id, api_key)
         tools = _resolve_tools(scenario, namespace)
         direct_tools = tools
@@ -455,7 +517,8 @@ def _run_strategy(
         context = _resolve_context(scenario, include_overhead, namespace, llm)
         answer_evaluator = _resolve_answer_evaluator(scenario, namespace)
         started = time.perf_counter()
-        result = run_react_loop(
+        result = evidence.loop(
+            run_react_loop,
             llm=llm,
             tools=tools,
             time_budget=time_budget,
@@ -483,7 +546,9 @@ def _run_strategy(
         result["seed"] = namespace.seed
         result["repeat_index"] = getattr(args, "repeat_index", 0)
         result["strategy"] = strategy
-        result["score_check"] = _score_result(
+        mark_loop_return(result, args.scenario, getattr(args, "missing_final_policy", "error"))
+        result["score_check"] = evidence.score(
+            _score_result,
             result,
             direct_tools,
             answer_evaluator,
@@ -493,20 +558,30 @@ def _run_strategy(
         return result
 
     def run_agent(agent_id: int) -> Dict[str, Any]:
-        try:
-            return execute_agent(agent_id)
-        finally:
-            runtime = runtimes.get(agent_id)
-            if runtime is not None:
-                coordinator.graph.complete_agent_claims(
-                    agent_id, completion_time=runtime.clock.now,
-                )
+        evidence = TerminalEvidence(
+            _terminal_evidence_root(args) / strategy / ("agent_%d" % agent_id),
+            owner={"runner": "poolact", "scope": "agent", "strategy": strategy,
+                   "agent_id": agent_id, "seed": args.seed + agent_id,
+                   "question_index": args.question_index,
+                   "repeat_index": getattr(args, "repeat_index", 0)},
+            source_root=REPO_ROOT,
+        )
+        # Scope exit flushes only AFTER original graph/claim cleanup.
+        with evidence:
+            try:
+                return execute_agent(agent_id, evidence)
+            finally:
+                runtime = runtimes.get(agent_id)
+                if runtime is not None:
+                    coordinator.graph.complete_agent_claims(
+                        agent_id, completion_time=runtime.clock.now,
+                    )
 
     agent_results = run_agents_parallel(args.agents, run_agent)
     failed_agents = [
         result["agent_id"]
         for result in agent_results
-        if not (result.get("score_check") or {}).get("ok")
+        if not terminal_publishable(result)
     ]
     if failed_agents:
         raise RuntimeError(f"score check failed for agents: {failed_agents}")
@@ -516,7 +591,7 @@ def _run_strategy(
         agent_results,
         answer_evaluator=aggregate_evaluator,
     )
-    if not _is_finite_number(aggregate.get("answer_perf")):
+    if not aggregate_publishable(aggregate):
         raise RuntimeError("aggregate answer could not be scored")
     state: Optional[Dict[str, Any]] = None
     if cache is not None:
@@ -525,18 +600,23 @@ def _run_strategy(
         state = coordinator.stats()
     if not _shared_state_is_complete(state):
         raise RuntimeError("shared state contains unfinished pending claims")
-    return {
+    response = {
         "strategy": strategy,
         "agents": args.agents,
         "aggregate": aggregate,
         "shared_state": state,
         "agent_results": agent_results,
     }
+    if "terminal_status" in aggregate:
+        response["terminal_status"] = dict(aggregate["terminal_status"])
+    return response
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     _add_generation_arguments(parser)
+    parser.add_argument("--terminal-evidence-dir", type=Path, default=None,
+                        help="Optional separate evidence root; default: output-dir/_terminal_evidence.")
     parser.add_argument(
         "--backend",
         choices=["fake", "openai", "gemini", "openrouter", "sub2api", "vllm"],
@@ -688,22 +768,44 @@ def main() -> int:
                 for item, strategies in summary["items"].items()
             })
     if args.repeats > 1:
-        _atomic_json(args.output_dir / "summary.json", {
-            "config": {
-                **_resolved_config(args, time_budget),
-                "question_indices": question_indices,
-            },
-            "implementation_sha256": implementation,
-            "repeats": repetitions,
-            "strategy_metrics": _batch_strategy_metrics(observations, args.strategies),
-            "aggregation_unit": "item_by_independent_pool_repeat; agents are never pooled across repeats",
-            "item_strategy_runs": len(observations) * len(args.strategies),
-            "agent_traces": len(observations) * len(args.strategies) * args.agents,
-        })
+        with TerminalEvidence(
+            _terminal_evidence_root(args) / "repeat_summary",
+            owner={"runner": "poolact", "scope": "repeat_summary", "seed": args.seed},
+            source_root=REPO_ROOT, stage="runner_finalize",
+        ):
+            _atomic_json(args.output_dir / "summary.json", {
+                "config": {
+                    **_resolved_config(args, time_budget),
+                    "question_indices": question_indices,
+                },
+                "implementation_sha256": implementation,
+                "repeats": repetitions,
+                "strategy_metrics": _batch_strategy_metrics(observations, args.strategies),
+                "aggregation_unit": "item_by_independent_pool_repeat; agents are never pooled across repeats",
+                "item_strategy_runs": len(observations) * len(args.strategies),
+                "agent_traces": len(observations) * len(args.strategies) * args.agents,
+            })
     return 0
 
 
 def _run_items(
+    args: argparse.Namespace,
+    question_indices: List[int],
+    api_key: Optional[str],
+    time_budget: Optional[float],
+    mode: str,
+    implementation: Dict[str, str],
+) -> Dict[str, Any]:
+    with TerminalEvidence(
+        _terminal_evidence_root(args) / "invocation",
+        owner={"runner": "poolact", "scope": "invocation", "question_indices": list(question_indices),
+               "strategies": list(args.strategies), "seed": args.seed},
+        source_root=REPO_ROOT, stage="run_items",
+    ):
+        return _run_items_with_evidence(args, question_indices, api_key, time_budget, mode, implementation)
+
+
+def _run_items_with_evidence(
     args: argparse.Namespace,
     question_indices: List[int],
     api_key: Optional[str],
@@ -735,7 +837,7 @@ def _run_items(
         completed: Dict[str, Any] = {}
         for strategy in args.strategies:
             result_path = item_output_dir / strategy / "result.json"
-            if args.resume and result_path.is_file():
+            if args.resume and result_path.exists():
                 existing = _load_resumable_result(
                     result_path,
                     item_output_dir=item_output_dir,
@@ -750,6 +852,8 @@ def _run_items(
                     completed[strategy] = existing
                     print(f"[resume] item={question_index} strategy={strategy}: {result_path}")
                     continue
+                if getattr(args, "missing_final_policy", "error") == "task-abstention-v1":
+                    raise RuntimeError("Existing terminal artifact failed exact resume validation; refusing model resampling")
                 print(
                     f"[resume] item={question_index} strategy={strategy}: "
                     "run snapshot changed or incomplete; rerunning"

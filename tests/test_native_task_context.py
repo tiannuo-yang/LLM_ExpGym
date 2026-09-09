@@ -1,7 +1,9 @@
 """CPU-only task-context and real-client mock-wire protocol integration tests.
 
-Golden hashes were generated from the accepted v2 archive, not the patched
-builders. HPO context tests retain all nine real hint branches while replacing
+Golden hashes retain the accepted archive except for the explicitly reviewed
+v5 Search gold-count removal and NAS identity-name removal. These eight entries
+were updated for the user-authorized prompt revision; all other entries stay
+unchanged. HPO context tests retain all nine real hint branches while replacing
 only the external benchmark loader with a small in-memory configuration space.
 No test invokes an HTTP transport or a benchmark service.
 """
@@ -36,8 +38,8 @@ LABELS = {"nda-11": {"short_description": "fixture", "hypothesis": LITERAL}}
 DOCUMENT = audit.Document(0, "fixture.txt", [{"span_index": 0, "text": LITERAL}],
                           {"nda-11": {"choice": "NotMentioned", "spans": []}})
 GOLDEN_TEXT_SHA256 = {
-    "search:False": "055a7587329cfa6f7b43cebe3ac9a8a726629de0fff5c76817f4e1225f056664",
-    "search:True": "055a7587329cfa6f7b43cebe3ac9a8a726629de0fff5c76817f4e1225f056664",
+    "search:False": "25d4a8dffa6cc7a323779eaeba4fa185e7d4f47ec99b4c191437f32c7a223a53",
+    "search:True": "25d4a8dffa6cc7a323779eaeba4fa185e7d4f47ec99b4c191437f32c7a223a53",
     "audit:False": "41330e0c80dfe31e9ee985ee225cdba2de3c5067841ea8ba88556a5e5fc2d8e0",
     "audit:True": "41330e0c80dfe31e9ee985ee225cdba2de3c5067841ea8ba88556a5e5fc2d8e0",
     "builtin:False": "34960742302a78e919a5289c728a28c41567f9ad42622ec0c326c236c19d8d4f",
@@ -48,12 +50,12 @@ GOLDEN_TEXT_SHA256 = {
     "hpobench:paramnet:higgs:steps:True": "6aa55c4b5df7de9c56e69e595834090fa63cdbc87e227e25dd5749b09016f1ea",
     "hpobench:paramnet:letter:steps:False": "88b311c3988a9a05073c1b3d011bd8db4c569d0951116d0bad06746479ffaff0",
     "hpobench:paramnet:letter:steps:True": "6aa55c4b5df7de9c56e69e595834090fa63cdbc87e227e25dd5749b09016f1ea",
-    "hpobench:nasbench101:A:False": "01dcbb36549217d32b72f28c889f488af24d1b8324439b5a0fcf13cf33093665",
-    "hpobench:nasbench101:A:True": "360521126fdb288b17a28c8fbef03260de91160ab4f7a3465961c978a6806e87",
-    "hpobench:nasbench101:B:False": "2bfc886eae5732a38a40bf78ab2be88ab3b74325305e55c9dabefd5023a91d2e",
-    "hpobench:nasbench101:B:True": "c71ec08eaaabcecee3605283015a4690fbaf06d493530e642cf249ea3ed2b068",
-    "hpobench:nasbench101:C:False": "0624b32adb1c0c82dddb1cf09abd6df8c2041f4b83d819426971d22c60d4262e",
-    "hpobench:nasbench101:C:True": "bd972e30477abe82e6281767697a53c77a7e3235179cbd525acb60381fcb1a08",
+    "hpobench:nasbench101:A:False": "c15458dcda597424307f6bd66a9f7e6d6423fdb4dd8c519939ee0b0637a3e542",
+    "hpobench:nasbench101:A:True": "b903405f8d2c7ea070151ed0841ea5680c6aa95d42fb4e92c2d400e3aec74291",
+    "hpobench:nasbench101:B:False": "00c2b5531df6beb158369d302a4ded7a17d4ed18952f70d6cd22b4b09a3dc56e",
+    "hpobench:nasbench101:B:True": "5918e69e8bdb29c7ab814ae54b0cfae171ca391ccf58c7d23df1c14470b3db73",
+    "hpobench:nasbench101:C:False": "925179772b49dd2f49f42051fd7c760487a06298bc7904d2ebd0f011b262ef08",
+    "hpobench:nasbench101:C:True": "18f43748169f475bfd9c769d55f1648caded6ca27cfa597c6add187814f15352",
     "hpobench:nasbench201:cifar10-valid:False": "ef196256a086d1db41636ea1d571f1b65d1629312053e8b8717c989abc12f68a",
     "hpobench:nasbench201:cifar10-valid:True": "6bb4bae216a433c9170141b00bbe751820053881b0c1cfb23b1bc32f4906fc49",
     "hpobench:nasbench201:cifar100:False": "ef196256a086d1db41636ea1d571f1b65d1629312053e8b8717c989abc12f68a",
@@ -93,7 +95,7 @@ def context_cases():
 
 
 class NativeTaskContextTest(unittest.TestCase):
-    def test_default_and_explicit_text_match_frozen_v2_bytes(self):
+    def test_default_and_explicit_text_match_declared_prompt_version_bytes(self):
         self.assertEqual(len(GOLDEN_TEXT_SHA256), 24)
         with fixture_data():
             for name, builder, kwargs in context_cases():

@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from expgym.react_loop import FakeLLM, LLMBackend, build_system_prompt, run_react_loop
@@ -13,6 +14,8 @@ from expgym.task_tuning import SCENARIO as TUNING_SCENARIO
 from expgym.task_restricted_search import SCENARIO as RESTRICTED_SEARCH_SCENARIO
 from expgym.task_evidence_audit import SCENARIO as EVIDENCE_AUDIT_SCENARIO
 from expgym.tool_protocol import resolve_tool_protocol
+from expgym.terminal_evidence import TerminalEvidence
+from expgym.missing_final import mark_loop_return, terminal_publishable
 
 Scenario = Dict[str, object]
 _SCENARIOS: Dict[str, Scenario] = {
@@ -221,6 +224,8 @@ def _loop_options(args: argparse.Namespace) -> Dict[str, object]:
 
 
 def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--missing-final-policy", choices=["error", "task-abstention-v1"], default="error",
+                        help="Explicit post-loop missing-answer policy; does not change model requests or budgets.")
     def positive_integer(value: str) -> int:
         try:
             parsed = int(value)
@@ -453,6 +458,8 @@ def parse_args() -> argparse.Namespace:
         choices=["cc-small", "cc-medium", "cc-large"],
         help="Evidence audit hypothesis subset size.",
     )
+    parser.add_argument("--terminal-evidence-dir", type=Path, default=None,
+                        help="Opt-in local terminal evidence; not a result completion marker.")
     return parser.parse_args()
 
 
@@ -476,42 +483,50 @@ def main() -> None:
     _print_regime_banner(args, c_base, time_budget)
 
     for mode in baselines:
-        tools = _resolve_tools(scenario, args)
-        include_overhead = mode == "time_focus"
-        include_cost = mode == "time_aware"
-        system_prompt = _resolve_system_prompt(scenario, include_overhead, args)
-        llm = build_llm(
-            args.backend, fake_plan, args, system_prompt=system_prompt
-        )
-        context = _resolve_context(scenario, include_overhead, args, llm)
-        instruction_notes = _call_scenario(
-            scenario["build_instruction_notes"], include_overhead, args
-        )
-        answer_evaluator = _resolve_answer_evaluator(scenario, args)
-        result = run_react_loop(
-            llm=llm,
-            tools=tools,
-            time_budget=time_budget,
-            max_steps=args.max_steps,
-            max_evals=args.max_evals,
-            context=context,
-            instruction_notes=instruction_notes,
-            system_prompt=system_prompt,
-            include_overhead_in_observation=include_overhead,
-            include_cost_in_observation=include_cost,
-            answer_evaluator=answer_evaluator,
-            **_loop_options(args),
-        )
-        # Import lazily: the sweep imports this module's scenario/client helpers.
-        from scripts.run_paper_sweep import _score_result
+        with TerminalEvidence(
+            args.terminal_evidence_dir / mode if args.terminal_evidence_dir is not None else None,
+            owner={"runner": "demo", "scope": "baseline", "mode": mode,
+                   "scenario": args.scenario, "seed": args.seed},
+            source_root=Path(__file__).resolve().parent, stage="demo_run",
+        ) as evidence:
+            tools = _resolve_tools(scenario, args)
+            include_overhead = mode == "time_focus"
+            include_cost = mode == "time_aware"
+            system_prompt = _resolve_system_prompt(scenario, include_overhead, args)
+            llm = build_llm(
+                args.backend, fake_plan, args, system_prompt=system_prompt
+            )
+            context = _resolve_context(scenario, include_overhead, args, llm)
+            instruction_notes = _call_scenario(
+                scenario["build_instruction_notes"], include_overhead, args
+            )
+            answer_evaluator = _resolve_answer_evaluator(scenario, args)
+            result = evidence.loop(
+                run_react_loop,
+                llm=llm,
+                tools=tools,
+                time_budget=time_budget,
+                max_steps=args.max_steps,
+                max_evals=args.max_evals,
+                context=context,
+                instruction_notes=instruction_notes,
+                system_prompt=system_prompt,
+                include_overhead_in_observation=include_overhead,
+                include_cost_in_observation=include_cost,
+                answer_evaluator=answer_evaluator,
+                **_loop_options(args),
+            )
+            # Import lazily: the sweep imports this module's scenario/client helpers.
+            from scripts.run_paper_sweep import _score_result
 
-        result["score_check"] = _score_result(result, tools, answer_evaluator)
-        if not result["score_check"].get("ok"):
-            raise RuntimeError(f"score check failed: {result['score_check']}")
+            mark_loop_return(result, args.scenario, args.missing_final_policy)
+            result["score_check"] = evidence.score(_score_result, result, tools, answer_evaluator)
+            if not terminal_publishable(result):
+                raise RuntimeError(f"score check failed: {result['score_check']}")
 
-        _print_result(mode, result)
-        _print_metrics(result)
-        print("")
+            _print_result(mode, result)
+            _print_metrics(result)
+            print("")
 
 
 def _print_regime_banner(

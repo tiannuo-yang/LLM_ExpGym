@@ -311,7 +311,7 @@ def _task_hints(task_name: str) -> Optional[str]:
         if variant not in {"A", "B", "C"}:
             raise ValueError("NASBench101 variant must be A, B, or C.")
         common = (
-            f"Note: NASBench101-{variant} is a neural architecture search task on a "
+            "Note: This is a neural architecture search task on a "
             "7-node directed acyclic graph (DAG). Node 0 is the input and node 6 "
             "is the output; op_node_0 through op_node_4 specify operations on "
             "nodes 1 through 5. The decoded graph must have AT MOST 9 edges "
@@ -939,7 +939,7 @@ def build_tools(*, tuning_task: str = "neural_network_training") -> Dict[str, Ca
 
         parameters = _config_space_schema(task.config_space)
         description = (
-            f"Evaluate a complete flat configuration for {tuning_task}. "
+            "Evaluate a complete flat configuration for the described system. "
             "Return performance and simulated evaluation cost; fidelity is fixed "
             f"at {json.dumps(task.fidelity, sort_keys=True)} and is not an input field."
         )
