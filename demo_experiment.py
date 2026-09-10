@@ -115,6 +115,7 @@ def build_llm(
     system_prompt: str | None = None,
 ) -> LLMBackend:
     prompt_cache_key = getattr(args, "prompt_cache_key", None)
+    prompt_cache_key_field = getattr(args, "prompt_cache_key_field", "prompt_cache_key")
     if backend == "fake":
         final_answer = plan[-1][1] if plan else None
         return FakeLLM(plan=plan, final_answer=final_answer)
@@ -129,6 +130,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -143,6 +145,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -159,6 +162,7 @@ def build_llm(
             referer=args.openrouter_referer,
             title=args.openrouter_title,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -173,6 +177,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -187,6 +192,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -224,6 +230,11 @@ def _loop_options(args: argparse.Namespace) -> Dict[str, object]:
 
 
 def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--prompt-cache-key-field", choices=["prompt_cache_key", "cache_salt"],
+        default="prompt_cache_key",
+        help="Explicit provider field for the existing prompt-cache namespace; cache_salt for compatible SGLang servers. Never inferred from model name.",
+    )
     parser.add_argument("--missing-final-policy", choices=["error", "task-abstention-v1"], default="error",
                         help="Explicit post-loop missing-answer policy; does not change model requests or budgets.")
     def positive_integer(value: str) -> int:

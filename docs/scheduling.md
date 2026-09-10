@@ -125,6 +125,21 @@ not evidence that historical observation caches or answers were contaminated.
 Fake has no server/cache payload and explicitly disables ExpGym's effective API
 cache field while retaining unique queue identity.
 
+Use `--prompt-cache-key-field cache_salt` explicitly for compatible SGLang
+servers. The default `prompt_cache_key` preserves the original API payload;
+the client sends only the selected field, and only when a namespace is enabled.
+This option changes neither the existing namespace derivation nor task caches,
+prompts, seeds or scoring. It is recorded in client configuration, traces and
+resume/queue identities, so changing it requires a new accepted plan. No model
+name inference or automatic fallback is used. In SGLang 0.5.17, `cache_salt`
+feeds the prefix-cache `extra_key`; `prompt_cache_key` is not a recognized chat
+request field. Check the actual provider version and execution path before
+claiming prefix-cache separation; a field alone does not prove physical GPU
+memory isolation or sampling independence.
+For SGLang 0.5.17 this isolation claim is limited to the verified Python radix /
+Unified paths: the experimental C++ radix wrapper drops `extra_key`. Exclude
+`SGLANG_EXPERIMENTAL_CPP_RADIX_TREE=1` and record the actual cache backend.
+
 ## Completion, errors, and resume
 
 Every session writes `events.jsonl` with queue/start/end timestamps, job IDs,

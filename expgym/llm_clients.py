@@ -160,6 +160,7 @@ class OpenAIConfig:
     retry_max_seconds: float = 120.0
     retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES
     reasoning_effort: Optional[str] = None
+    prompt_cache_key_field: str = "prompt_cache_key"
 
 
 class OpenAICompatibleLLM(LLMBackend):
@@ -195,10 +196,13 @@ class OpenAICompatibleLLM(LLMBackend):
         retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES,
         dump_context: Optional[Dict[str, object]] = None,
         reasoning_effort: Optional[str] = None,
+        prompt_cache_key_field: str = "prompt_cache_key",
     ) -> None:
         key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not key:
             raise ValueError("An API key is required for OpenAICompatibleLLM")
+        if prompt_cache_key_field not in ("prompt_cache_key", "cache_salt"):
+            raise ValueError("prompt_cache_key_field must be prompt_cache_key or cache_salt")
         if (isinstance(top_p, bool) or not isinstance(top_p, (int, float))
                 or not 0.0 < top_p <= 1.0 or not math.isfinite(top_p)):
             raise ValueError("top_p must be a finite number in (0, 1]")
@@ -250,6 +254,7 @@ class OpenAICompatibleLLM(LLMBackend):
             retry_max_seconds=retry_max_seconds,
             retry_http_statuses=tuple(retry_http_statuses),
             reasoning_effort=reasoning_effort,
+            prompt_cache_key_field=prompt_cache_key_field,
         )
         self._transport = transport
         dump_directory = os.getenv("EXPGYM_API_DUMP_DIR")
@@ -646,7 +651,7 @@ class OpenAICompatibleLLM(LLMBackend):
         if self.config.chat_template_kwargs:
             payload["chat_template_kwargs"] = self.config.chat_template_kwargs
         if self.config.prompt_cache_key is not None:
-            payload["prompt_cache_key"] = self.config.prompt_cache_key
+            payload[self.config.prompt_cache_key_field] = self.config.prompt_cache_key
         if tools is not None:
             payload["tools"] = copy.deepcopy(tools)
             payload["tool_choice"] = copy.deepcopy(tool_choice) if tool_choice is not None else "auto"

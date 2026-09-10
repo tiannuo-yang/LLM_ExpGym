@@ -474,6 +474,7 @@ def _namespace_for_job(
     ns.base_url = args.base_url
     ns.prompt_cache = _prompt_cache_config(args, job)
     ns.prompt_cache_key = ns.prompt_cache["key"]
+    ns.prompt_cache_key_field = getattr(args, "prompt_cache_key_field", "prompt_cache_key")
     ns.trace_format = getattr(args, "trace_format", "v1")
     ns.probes = 4
     ns.max_steps = args.max_steps
@@ -526,6 +527,7 @@ def _resume_key(
         "protocol": _loop_options(args),
         "evaluation_identity": evaluation if evaluation is not None else _job_evaluation_identity(args, job),
         "prompt_cache": _prompt_cache_config(args, job),
+        "prompt_cache_key_field": getattr(args, "prompt_cache_key_field", "prompt_cache_key"),
         "transport": {
             "timeout": getattr(args, "request_timeout", 600.0),
             "max_retries": getattr(args, "max_retries", 10),
@@ -671,9 +673,13 @@ def _run_job_with_evidence(
         model = config.pop("model", ns.model)
         base_url = config.pop("base_url", ns.base_url)
         prompt_cache_key = config.pop("prompt_cache_key", None)
+        prompt_cache_key_field = config.pop("prompt_cache_key_field", ns.prompt_cache_key_field)
         prompt_cache = dict(ns.prompt_cache)
         if prompt_cache.get("key") != prompt_cache_key:
             raise RuntimeError("effective prompt cache key metadata mismatch")
+        if prompt_cache_key_field != ns.prompt_cache_key_field:
+            raise RuntimeError("effective prompt cache field metadata mismatch")
+        prompt_cache["key_field"] = prompt_cache_key_field
         timeout = config.pop("timeout", None)
         config.pop("system_prompt", None)
         extra_headers = config.pop("extra_headers", {}) or {}

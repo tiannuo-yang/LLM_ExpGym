@@ -239,11 +239,22 @@ class PaperSweepMatrixTest(unittest.TestCase):
         )
 
     def test_namespace_for_job_passes_effective_derived_key_to_client(self):
-        args = _args(prompt_cache_key="paper-v1", backend="sub2api")
+        args = _args(prompt_cache_key="paper-v1", backend="sub2api", prompt_cache_key_field="cache_salt")
         job = run_paper_sweep._build_jobs(args)[0]
         namespace = run_paper_sweep._namespace_for_job(args, job, "secret")
         self.assertEqual(namespace.prompt_cache_key, namespace.prompt_cache["key"])
         self.assertEqual(namespace.prompt_cache["scope"], "job")
+        self.assertEqual(namespace.prompt_cache_key_field, "cache_salt")
+
+    @mock.patch.object(run_paper_sweep, "source_tree_sha256", return_value="fixed-source")
+    def test_cache_field_changes_resume_identity_not_existing_namespace(self, _source):
+        original = _args(prompt_cache_key="same-study", prompt_cache_key_field="prompt_cache_key")
+        changed = _args(prompt_cache_key="same-study", prompt_cache_key_field="cache_salt")
+        job = run_paper_sweep._build_jobs(original)[0]
+        self.assertEqual(run_paper_sweep._prompt_cache_config(original, job),
+                         run_paper_sweep._prompt_cache_config(changed, job))
+        self.assertNotEqual(run_paper_sweep._resume_key(original, job, evaluation={}),
+                            run_paper_sweep._resume_key(changed, job, evaluation={}))
 
     def test_namespace_for_job_preserves_generation_options(self):
         for options in (
@@ -545,7 +556,8 @@ class PaperSweepMatrixTest(unittest.TestCase):
                 self.assertEqual(run_paper_sweep._resume_trace_is_valid(Path("fixture"), args, job), accepted)
 
     def test_native_submitted_v2_roundtrip_and_independent_resume_recheck(self):
-        args = _args(backend="fake", models="fake", cost_regimes="cost_free", tool_protocol="native", tuning_final_policy="submitted")
+        args = _args(backend="fake", models="fake", cost_regimes="cost_free", tool_protocol="native",
+                     tuning_final_policy="submitted", prompt_cache_key_field="cache_salt")
         job = run_paper_sweep._build_jobs(args)[0]
         ns = run_paper_sweep._namespace_for_job(args, job, None)
         tools = run_paper_sweep._resolve_tools(run_paper_sweep._SCENARIOS["tuning"], ns)
@@ -582,6 +594,7 @@ class PaperSweepMatrixTest(unittest.TestCase):
         self.assertEqual(trace["outcome"]["score_cost_basis"], "offline_final_answer")
         self.assertEqual(trace["outcome"]["answer_score_source"], "offline_final_answer")
         self.assertEqual(trace["run"]["evaluation_identity"], result["evaluation_identity"])
+        self.assertEqual(trace["run"]["prompt_cache"]["key_field"], "cache_salt")
         for index, saved_call in enumerate(trace["llm_calls"]):
             self.assertEqual(materialize_llm_input(trace, saved_call["id"]), replay.requests[index])
         original_read = Path.read_text

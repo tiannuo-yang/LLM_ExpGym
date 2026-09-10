@@ -342,6 +342,7 @@ def _resolved_config(
         "probes": args.probes,
         "base_url": args.base_url,
         "prompt_cache_key": args.prompt_cache_key,
+        "prompt_cache_key_field": getattr(args, "prompt_cache_key_field", "prompt_cache_key"),
         "vllm_disable_thinking": args.vllm_disable_thinking,
         "request_timeout": args.request_timeout,
         "max_retries": args.max_retries,
