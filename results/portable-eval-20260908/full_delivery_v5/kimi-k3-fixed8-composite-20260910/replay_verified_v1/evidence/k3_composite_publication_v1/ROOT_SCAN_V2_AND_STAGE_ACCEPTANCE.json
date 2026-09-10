@@ -1,0 +1,41 @@
+{
+  "schema": "root-k3-outgoing-v2-scan-and-stage-acceptance",
+  "issuer": "ROOT",
+  "accepted": true,
+  "scan": {
+    "command": "/usr/bin/prlimit --core=0:0 -- /usr/bin/python3 -B /lustrefs/users/chufan.shi/codex_space_tn/publication/validate_bundle_v2.py --spec /lustrefs/users/chufan.shi/codex_space_tn/publication/k3_composite_publication_v1/ROOT_OUTGOING_SPEC_V2.json --workspace /lustrefs/users/chufan.shi/codex_space_tn --output-dir /lustrefs/users/chufan.shi/codex_space_tn/publication/k3_composite_publication_v1/outgoing_scan_v2 --secret-file '/lustrefs/users/chufan.shi/codex_space_tn/portable_eval_20260908/serving/phase_candidates/dual_glm_v1/runs/1203652/glm_formal/private/router_api_key' --secret-file '/lustrefs/users/chufan.shi/codex_space_tn/portable_eval_20260908/serving/phase_candidates/dual_k3_v1/runs/1203653/k3_formal/private/router_api_key' --secret-file '/lustrefs/users/chufan.shi/codex_space_tn/portable_eval_20260908/serving/phase_candidates/gumbel_midpoint_v3/runs/1203577/k3_formal/private/router_api_key' --secret-file '/lustrefs/users/chufan.shi/codex_space_tn/portable_eval_20260908/serving/phase_candidates/k3_infra_recovery_v1/runs/1203933/k3_formal/private/router_api_key'",
+    "start": {
+      "chunk_id": "3be0ae",
+      "wall_time_seconds": 1.001509177,
+      "session_id": 62368,
+      "original_token_count": 0,
+      "output": ""
+    },
+    "exit": {
+      "chunk_id": "61b275",
+      "wall_time_seconds": 0.000002972,
+      "exit_code": 0,
+      "original_token_count": 31,
+      "output": "{\"safe_to_stage\": true, \"complete_project_publishable\": true, \"files\": 219, \"findings\": 0, \"publication_performed\": false}\n"
+    }
+  },
+  "gate_and_stage": {
+    "command": "/usr/bin/python3 -B - <<'PY'\nfrom pathlib import Path\nimport json,hashlib,subprocess,stat\nW=Path(\"/lustrefs/users/chufan.shi/codex_space_tn\");R=Path(\"/lustrefs/users/chufan.shi/codex_space_tn/publication/restart_v5_remote_base.oDCT5P/repo\");D=Path(\"/lustrefs/users/chufan.shi/codex_space_tn/publication/k3_composite_publication_v1\"); sp=D/'ROOT_OUTGOING_SPEC_V2.json'; sb=sp.read_bytes();assert hashlib.sha256(sb).hexdigest()=='9195bf92255726c8cec9f323da26cfb9c6b5a2e975aadd12e27b267dc6907079';s=json.loads(sb)\nmp=D/'outgoing_scan_v2/manifest.json'; mb=mp.read_bytes();m=json.loads(mb);lb=(D/'outgoing_scan_v2/lock.json').read_bytes();lock=json.loads(lb)\nassert m['safe_to_stage'] is True and m['complete_project_publishable'] is True and m['all_required_stages_present'] is True and not m['findings'] and not m['advisories'] and m['secret_sources_checked']==4 and lock==s\nassert m['validator_sha256']=='aea61a9309cb6069240b90e0ca706403b0f21b3e7f77a2f88d462e6ba8734116'\nbyid={r['artifact_id']:r for r in m['files']};assert len(byid)==len(s['artifacts'])==219\nmembers={}; originals=set(); expanded=0\nfor r in m['archive_members']: members.setdefault(r['artifact_id'],[]).append({k:r[k] for k in ['path','bytes','sha256']})\nfor a in s['artifacts']:\n p=W/a['source'];z=byid[a['id']];row=a['files'][0]\n assert z==dict(artifact_id=a['id'],source=a['source'],target=a['target'],**row)\n st=p.stat(); b=p.read_bytes();assert stat.S_ISREG(st.st_mode) and not p.is_symlink() and len(b)==row['bytes'] and hashlib.sha256(b).hexdigest()==row['sha256'] and st==p.stat()\n if a['kind']=='source_archive':\n  page=p.parent.parent/'indexes'/p.name.replace('.tar.gz','.json');pb=page.read_bytes(); rows=json.loads(pb)['files']\n  expected=[{'path':'FILES.json','bytes':len(pb),'sha256':hashlib.sha256(pb).hexdigest()}]+[dict(r,path='data/'+r['path']) for r in rows]\n  assert sorted(members[a['id']],key=lambda x:x['path'])==sorted(expected,key=lambda x:x['path'])\n  for r in rows: assert r['path'] not in originals; originals.add(r['path'])\n  expanded+=sum(r['bytes'] for r in expected)\nassert (len(members),len(originals),sum(map(len,members.values())))==(7,1538,1545)\npaths=sorted(a['target'] for a in s['artifacts']); assert len(set(paths))==219\nassert subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip()=='09ced6f12c5de3a19b01b2f0fc606b7fccd4e8f9'; assert not subprocess.check_output(['git','diff','--cached','--name-only'],cwd=R,text=True)\ncurrent=set(subprocess.check_output(['git','ls-files','--others','--exclude-standard','-z'],cwd=R).decode().rstrip('\\0').split('\\0'))|set(subprocess.check_output(['git','diff','--name-only','-z'],cwd=R).decode().rstrip('\\0').split('\\0'));assert current==set(paths)\nsubprocess.run(['git','add','--pathspec-from-file=-','--pathspec-file-nul'],cwd=R,input=('\\0'.join(paths)+'\\0').encode(),check=True)\nassert set(subprocess.check_output(['git','diff','--cached','--name-only','-z'],cwd=R).decode().rstrip('\\0').split('\\0'))==set(paths)\nstaged={}\nfor entry in subprocess.check_output(['git','ls-files','--stage','-z'],cwd=R).split(b'\\0'):\n if entry:\n  head,name=entry.split(b'\\t',1);mode,oid,stage=head.decode().split();assert stage=='0';staged[name.decode()]=(mode,oid)\np=subprocess.Popen(['git','cat-file','--batch'],cwd=R,stdin=subprocess.PIPE,stdout=subprocess.PIPE)\nfor a in s['artifacts']:\n mode,oid=staged[a['target']];q=R/a['target'];r=a['files'][0];expectedmode='100755' if q.stat().st_mode&0o111 else '100644';assert mode==expectedmode\n p.stdin.write((oid+'\\n').encode());p.stdin.flush();h=p.stdout.readline().decode().split();assert h[:2]==[oid,'blob'];b=p.stdout.read(int(h[2]));assert p.stdout.read(1)==b'\\n';assert len(b)==r['bytes'] and hashlib.sha256(b).hexdigest()==r['sha256'] and b==q.read_bytes()\np.stdin.close();assert p.wait()==0\nassert not subprocess.check_output(['git','diff','--name-only'],cwd=R,text=True)\nprint(json.dumps({'passed':True,'scan_manifest_sha256':hashlib.sha256(mb).hexdigest(),'lock_sha256':hashlib.sha256(lb).hexdigest(),'files':219,'bytes':m['total_bytes'],'source_archives':7,'verified_archive_members':1545,'verified_original_members':1538,'expanded_bytes_including_FILES_json':expanded,'known_secret_sources':4,'findings':0,'advisories':0,'stage_files':219,'all_staged_blobs_modes_and_working_bytes_exact':True,'commit_and_push_performed':False},sort_keys=True))\nPY",
+    "start": {
+      "chunk_id": "cf73d9",
+      "wall_time_seconds": 1.001188256,
+      "session_id": 36286,
+      "original_token_count": 0,
+      "output": ""
+    },
+    "exit": {
+      "chunk_id": "f7c9be",
+      "wall_time_seconds": 0.000011734,
+      "exit_code": 0,
+      "original_token_count": 135,
+      "output": "{\"advisories\": 0, \"all_staged_blobs_modes_and_working_bytes_exact\": true, \"bytes\": 159675947, \"commit_and_push_performed\": false, \"expanded_bytes_including_FILES_json\": 230071153, \"files\": 219, \"findings\": 0, \"known_secret_sources\": 4, \"lock_sha256\": \"9195bf92255726c8cec9f323da26cfb9c6b5a2e975aadd12e27b267dc6907079\", \"passed\": true, \"scan_manifest_sha256\": \"1bcf32bb9122d9549e4f1ef5574866b82a48c9290e0e6e1da6a0810f5cb95443\", \"source_archives\": 7, \"stage_files\": 219, \"verified_archive_members\": 1545, \"verified_original_members\": 1538}\n"
+    }
+  },
+  "first_failed_scan_preserved": true,
+  "root_scope": "219 whole outgoing files, 7 complete archive contents, exact1538 originals+7 FILES.json; staged Git blobs and working bytes/modes exact; four secret values RAM only original validator under prlimit."
+}
