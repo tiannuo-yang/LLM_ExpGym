@@ -1,0 +1,36 @@
+{
+  "schema": "root-k3-union-post-verifier-candidate-admission-v2",
+  "issuer": "ROOT",
+  "accepted_bounded_candidate": true,
+  "candidate_sha256": "80f35ba87e127d13a73daf958f7fc3d44f0f07a34aab2c512eaedd485b14866e",
+  "candidate_index_sha256": "e795537aff81ff94b1106b663edea323c76fed75f64d4e8b69e5c8fc227e2182",
+  "peer_index_sha256": "5da78723aa1a27ad8a4b7dc6c8abcd3ad4baa84ecff1561ab86daf4f83684de1",
+  "root_check": {
+    "command": "/usr/bin/python3 -B - <<'PY'\nfrom pathlib import Path\nimport hashlib,json\nP=Path(\"/lustrefs/users/chufan.shi/codex_space_tn/publication\")\nfor folder,sha in [('k3_union_remote_restore_candidate_v2','e795537aff81ff94b1106b663edea323c76fed75f64d4e8b69e5c8fc227e2182'),('k3_union_remote_restore_peer_v2','5da78723aa1a27ad8a4b7dc6c8abcd3ad4baa84ecff1561ab86daf4f83684de1')]:\n p=P/folder/'INDEX.json'; b=p.read_bytes(); assert hashlib.sha256(b).hexdigest()==sha; d=json.loads(b)\n rows=d['files'] if type(d['files']) is list else [dict(r,path=str(P/folder/name)) for name,r in d['files'].items()]\n for r in rows:\n  q=Path(r['path']); s=q.stat(); z=q.read_bytes(); assert len(z)==r['bytes'] and hashlib.sha256(z).hexdigest()==r['sha256'] and s==q.stat()\n assert {x.name for x in (P/folder).iterdir()}=={'INDEX.json',*(Path(r['path']).name for r in rows)}\nprint(json.dumps({'passed':True,'candidate6_and_peer4_full_hash':True,'root_full_source_read':['5fdede','8551cd'],'root_full_peer_read':'99e01a','candidate_scope':[36,66643,1751137861],'actual_restore_verifier_not_run':True}))\nPY",
+    "result": {
+      "chunk_id": "cdfb2f",
+      "wall_time_seconds": 0.000005382,
+      "exit_code": 0,
+      "original_token_count": 56,
+      "output": "{\"passed\": true, \"candidate6_and_peer4_full_hash\": true, \"root_full_source_read\": [\"5fdede\", \"8551cd\"], \"root_full_peer_read\": \"99e01a\", \"candidate_scope\": [36, 66643, 1751137861], \"actual_restore_verifier_not_run\": true}\n"
+    }
+  },
+  "prior_read_only_probe_failure": {
+    "chunk": "b96f40",
+    "exit_code": 1,
+    "cause": "Peer INDEX.files is a dict, not a list. Corrected only ROOT metadata enumeration; no file or tool was altered or actual validation executed."
+  },
+  "owner_tests": "21 passed on each CPython3.10/3.11",
+  "peer_tests": "3 focused passed natural exit0 3345a6",
+  "scope": {
+    "bundles": 36,
+    "files": 66643,
+    "original_bytes": 1751137861,
+    "collection_sha256": "a462bde564618f52b46b863095bfed5d2a97eb9c3ce4c730a34ac6fdad91a0f7"
+  },
+  "limitations": [
+    "Requires completed no-writer restored directory, not an atomic tree snapshot.",
+    "ROOT must bind actual fresh GitHub proof and true restore exit before CLI.",
+    "This is not an actual restore, scientific rescore or AN2 replay."
+  ]
+}

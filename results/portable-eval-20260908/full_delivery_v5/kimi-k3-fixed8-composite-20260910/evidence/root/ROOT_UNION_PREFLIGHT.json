@@ -1,0 +1,28 @@
+{
+  "schema": "root-k3-union-preflight-v1",
+  "issuer": "ROOT",
+  "command": "/usr/bin/python3 -B - <<'PY'\nimport importlib.util,json,hashlib\nfrom pathlib import Path\nP=Path(\"/lustrefs/users/chufan.shi/codex_space_tn/publication\"); R=Path(\"/lustrefs/users/chufan.shi/codex_space_tn/publication/restart_v5_remote_base.oDCT5P/repo\")/'results/portable-eval-20260908/full_delivery_v5'; p=P/'collection_restore_candidate_v2/restore_collection.py'\nassert hashlib.sha256(p.read_bytes()).hexdigest()=='24a2ff6da7521c7920ce50ea7491aa682310e78874ba2d552649e9d2d88bb6b2'\ns=importlib.util.spec_from_file_location('root_collection_preflight',p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)\nc,unused=m.frozen_tools(); collection,raw,prepared,metadata=m.preflight(R/'INDEX.kimi-k3-composite-v1.json','a462bde564618f52b46b863095bfed5d2a97eb9c3ce4c730a34ac6fdad91a0f7',c)\nold=R/'kimi-k3-original-node-failure-20260909/payload/collection/INDEX.json'\nold_raw=old.read_bytes(); assert hashlib.sha256(old_raw).hexdigest()=='a78227369423e71e8c4380e46416b8a4ed88464f3e8a502fe1747e7e703103f5'\no=json.loads(old_raw); assert len(o['bundles'])==34\nexpected=[dict(r,index='kimi-k3-original-node-failure-20260909/payload/collection/'+r['index']) for r in o['bundles']]\nassert collection['bundles'][:34]==expected\narchive_count=compressed=0; owners={}\nfor item in prepared:\n idx=json.loads(item['path'].read_bytes())\n for part in idx['shards']:\n  ap=item['path'].parent/part['archive']; b=ap.read_bytes(); assert len(b)==part['bytes'] and hashlib.sha256(b).hexdigest()==part['sha256']; archive_count+=1; compressed+=len(b)\n  page=json.loads((item['path'].parent/part['index']).read_bytes())\n  for row in page['files']: assert row['path'] not in owners; owners[row['path']]=item['row']['bundle_id']\nexcluded='portable_eval_20260908/source_cohorts/v4/portable_eval_20260908/operations/restart_user_20260909/k3_eight_infra_recovery_candidate_v1/test_legacy_helpers_CPU.json'\nassert excluded not in owners\nassert (len(owners),archive_count,compressed)==(66643,268,305870108)\nprint(json.dumps({'passed':True,'collection_sha256':hashlib.sha256(raw).hexdigest(),'bundles':36,'original_files':len(owners),'original_bytes':collection['original_bytes'],'old34_all_six_fields_equal_after_index_only_rebase':True,'all_original_paths_unique_and_no_prefix_conflicts':True,'metadata_refs_checked':len(metadata),'archive_full_sha_checked':archive_count,'compressed_bytes':compressed,'excluded_nonexperimental_1292B_absent':True,'expected_physical_restored_files':66986,'restore_executed':False},sort_keys=True))\nPY",
+  "start": {
+    "chunk_id": "b535ab",
+    "wall_time_seconds": 1.001362844,
+    "session_id": 85892,
+    "original_token_count": 0,
+    "output": ""
+  },
+  "exit": {
+    "chunk_id": "f148f7",
+    "exit_code": 0,
+    "output": {
+      "all_original_paths_unique_and_no_prefix_conflicts": true,
+      "archive_full_sha_checked": 268,
+      "bundles": 36,
+      "collection_sha256": "a462bde564618f52b46b863095bfed5d2a97eb9c3ce4c730a34ac6fdad91a0f7",
+      "compressed_bytes": 305870108,
+      "original_bytes": 1751137861,
+      "original_files": 66643,
+      "passed": true,
+      "restore_executed": false
+    }
+  },
+  "scope": "Read-only original preflight + 268 complete compressed SHA checks; not a restore or scientific rescore."
+}
