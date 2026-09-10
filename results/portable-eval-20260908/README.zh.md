@@ -1,5 +1,7 @@
 # ExpGym / PoolAct 可迁移性修补：阶段性检查点
 
+2026-09-10 全设置报告：[ExpGym Free / Moderate / Tight 与 N=4 naive / cached / poolact 完整分析](full_matrix_report_v1/README.zh.md)；[原始 dump + 聚合比较完整存档索引](full_matrix_report_v1/ARCHIVE_INDEX.md)（73 包 / 556 tar 分片）。基于已发布最终数据重新组织全部设置、逐任务和 seed-block 结果；未新增模型实验。以下历史说明保持对应时点含义。
+
 2026-09-10 更新：[Kimi-K3 固定8项恢复后的最终双模型结果、完整CSV与独立终稿复核](full_delivery_v5/kimi-k3-fixed8-composite-20260910/README.zh.md)。两模型各705 invocation /783 logical /1881 agents，六主方向相符但完整保留49行负性能比较与所有失败成本；不是普遍稳定优胜或论文精确复现。另见[GLM完整公共恢复与十输出字节重放已验收](full_delivery_v5/glm-5.3-original-completed-20260909/replay_verified_v2/REPLAY_VERIFIED.zh.md)。K3新联合包的公共恢复/重放凭据将在实际完成后追加；以下旧说明保留各自冻结时点状态。
 
 2026-09-09 追加：[GLM-5.3 完整正式数据：37 包及恢复命令](full_delivery_v5/glm-5.3-original-completed-20260909/FULL_DELIVERY.zh.md)。全部 70,520 个实验文件及 1,114 个公开附属文件已完成本地归档、恢复和组装核验；GitHub 新副本完整恢复及异地分析复跑待后续实际证明。已有报告与历史失败记录保持不变。
