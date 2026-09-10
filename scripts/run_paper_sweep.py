@@ -992,7 +992,7 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
         print(json.dumps(preview, sort_keys=True))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     _add_generation_arguments(parser)
     parser.add_argument("--terminal-evidence-dir", type=Path, default=None,
@@ -1093,11 +1093,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--shuffle", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(args=None, *, selected_job=None) -> int:
+    """Run the CLI matrix, or one frozen Job selected by the study queue."""
+    args = parse_args() if args is None else args
     if not args.models.strip():
         args.models = _backend_model(args.backend)
     if args.base_url is None:
@@ -1120,7 +1121,7 @@ def main() -> int:
         if getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be at least 1")
     try:
-        jobs = _build_jobs(args)
+        jobs = _build_jobs(args) if selected_job is None else [selected_job]
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     if args.dry_run:

@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | 1 | Bug 通用性复盘、必要的兼容修补、更新 skill | 核对与上游差异；区分框架错误、显式 provider adapter、科学设置；陌生模型 ID 与协议形状回归；不改历史结果；独立复核后提交并推送 | 已验收；见本分支第一项提交 |
 | 2 | 精简数据整理、分析、发布流程及可用工具 | 单一清单、流式打包/检查、分析所需文件按需恢复；拒绝篡改/重复/越界/链接与未审公开；保留原安全扫描规则；小 fixture 完整往返和故障测试，不重复处理旧全量数据 | 已验收；见本分支第二项提交 |
-| 3 | 动态队列与 4 节点双 TP16 默认部署 | 重复/任务/策略状态和输出隔离；慢任务不阻塞后续类别补位；有界并发、失败停止新增并排空、严格 resume；配置为每模型 4×8 GPU、两组 2 节点 TP16、账户 k2p；plan-only 和无模型集成测试 | 进行中 |
+| 3 | 动态队列与 4 节点双 TP16 默认部署 | 重复/任务/策略状态和输出隔离；慢任务不阻塞后续类别补位；有界并发、失败停止新增并排空、严格 resume；配置为每模型 4×8 GPU、两组 2 节点 TP16、账户 k2p；plan-only 和无模型集成测试 | 已验收；见本分支第三项提交 |
 
 每项形成独立提交并推送到 `fix/portable-eval-followup-20260910` 后，单独通知用户；不把工作分支推送称为已合入 `main`。保留当前原工作目录的未提交改动。三个任务可并行开发，按以上顺序验收和交付。
 
@@ -37,3 +37,17 @@ Skill 改为按任务与改动范围验证：文档改动不重跑实验，合�
 新增 `scripts/package_run.py`：按显式文件清单自动分片（默认 64 MiB/2000 files），单一 manifest；一次原件内容读取完成原安全扫描、SHA 和压缩。远端一次流校验全部分片/成员，默认不落地 raw，仅恢复显式分析输入。保留旧扫描器原字节和硬限制、所有失败/缺答/负向结果，不重打包历史研究。新工具不自动运行分析或推送，避免把安全校验当科学验收。
 
 27 项合成数据测试在 Python 3.10/3.11 通过；独立复核发现的 gzip footer/CRC 和隐藏尾随归档检查漏洞已修复，原反例再次被拒绝。小 `/tmp` 示例只证明工作量减少，不报告未经测量的历史全量加速倍数。流程、命令、安全边界和实测小样本详见 `docs/efficient-delivery.md`；skill 已新增相应路由。最终组合回归在第三项完成后执行，第二项不重复已验证的无关模型路径。
+
+## 第三项交付记录
+
+`run_study_queue.py` 从原 runner selectors 冻结扁平计划；每独立 invocation 一个进程和输出/dump/run ID，跨 stage/repeat `FIRST_COMPLETED` 动态补位。PoolAct 原 pool 内协调锁、工具并发和预算语义不变，补全 prompt-cache namespace 的模型/任务/seed 等身份。明确 namespace 不保证服务商物理 KV 隔离或统计独立，也不是历史答案污染证据。
+
+首个已观察失败停止新增并自然排空；完成 job 的 resume 先验证全体原件哈希与原 runner 的身份/评分，不回落模型重试；未开始 job 可以首次执行。独立复核发现跨 stage 总 `repeats` 不同会重复安排同一 pool，已将总 selector 排除于科学 job 去重身份，实际 repeat/seed/N 和执行元数据保持；新增反例回归。
+
+`serve_slurm.py` 与 `configs/serving/slurm_tp16.json` 默认每模型独占 4×8 GPU，两组 2 节点 TP16，账户 k2p；默认只计划，显式提交且确认可信私网才申请资源。两个 endpoint 按在途 invocation 数补位，整池固定 endpoint；默认队列并发 8 不是吞吐实测或满卡保证。9 项 serving mock 测试和 23 项队列/namespace 测试在 Python 3.10/3.11 均通过；原 runner fake 集成包含 2 ExpGym + 6 PoolAct jobs、跨批补位与严格 resume。新拓扑真实加载/native smoke 未执行，不能声称已硬件验收。已同步 README 和 runner skill。
+
+## 最终组合验收与停止条件
+
+2026-09-10，既有 CPython 3.11.15 环境执行 `EXPGYM_VENV=/lustrefs/users/chufan.shi/codex_space_tn/LLM_ExpGym/.venv bash scripts/check.sh`：**675 项测试，642 通过、33 条件跳过，exit 0**；跳过项依赖未准备的外部数据或隔离 legacy 环境。编译、shell 语法、ExpGym fake 与 PoolAct 三策略 fake 均通过。skill 格式校验和 serving CLI 的显式 plan-only 检查通过。独立复核原调度重叠反例已拒绝、repeat 元数据保留，未再增加审查层级。
+
+本轮三项代码/文档验收完成，Git 推送通过 `github-tn` 到此工作分支，不表示合并 `main`。没有新 GPU allocation、模型请求、历史 raw 重封装或历史分数修改。今后新拓扑的真实加载、原生协议和吞吐须先获授权实测；本轮不以再次启动模型延长代码交付。

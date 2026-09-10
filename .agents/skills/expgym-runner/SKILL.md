@@ -18,6 +18,9 @@ Label work as **Static/fake validation**, **Real smoke validation**, **Current r
 - For scientific endpoints, study registration and descriptive analysis, read `docs/portable-study.md`. It does not implement confirmatory inference.
 - For normal missing answers versus execution failures, read `docs/task-abstention-v5.md`; for explicit provider aborts, read `docs/provider-abort-v4.md`.
 - For analysis packaging, Git publication or restoration, read `docs/efficient-delivery.md`. Use explicit input inventories and `scripts/package_run.py`; stream-verify archives and restore only needed inputs. Local-only sealing is not public clearance. Reuse unchanged archive identities and scan the actual publication delta.
+- For new concurrent/HPC runs, read `docs/scheduling.md` and `docs/serving.md`. Prefer the flat `run_study_queue.py` queue; independent invocations use separate processes/output/dump/cache namespaces, without stage/repeat barriers. `run_full.sh` remains the older sequential wrapper.
+
+The serving default is **per model 4 nodes × 8 GPUs, two TP16 replicas, account k2p**. Model checkpoint/runtime/parser and generation settings remain explicit. `serve_slurm.py` is plan-only unless `--submit` is requested; a written deployment file is not proof of readiness. Queue concurrency defaults to 8 invocations per queue, not 8 requests or guaranteed GPU saturation. Keep each PoolAct pool on one replica. Queue resume only verifies already-complete jobs but can first-execute unstarted jobs; it is not a global read-only command. Failed begun jobs require explicit recovery, never silent resampling.
 
 A status question needs current process/artifact evidence and an answer, not a restart of the entire validation ladder.
 

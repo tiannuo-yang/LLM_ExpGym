@@ -182,6 +182,59 @@ def _agent_cache_key(base: Optional[str], strategy: str, agent_id: int) -> Optio
     return prefix[: 64 - len(suffix)] + suffix
 
 
+def _pool_cache_namespace(args: argparse.Namespace) -> Optional[str]:
+    """Bind an optional routing namespace to one independent pool invocation.
+
+    These are provider prompt-cache routing keys, not the observation cache.
+    A provider may ignore them; this does not promise physical KV-cache isolation.
+    Keep the identity allowlisted so credentials and arbitrary Namespace fields
+    never enter the serialized input, and keep output paths out for relocation.
+    """
+    base = getattr(args, "prompt_cache_key", None)
+    if not base:
+        return None
+    evaluation = getattr(args, "_evaluation_identity", None)
+    identity = {
+        "derivation": "expgym.pool-invocation.v1",
+        "namespace": base,
+        "backend": args.backend,
+        "model": args.model,
+        "task": {
+            "scenario": args.scenario,
+            "tuning_task": args.tuning_task,
+            "question_index": args.question_index,
+            "data_source": args.data_source,
+            "cc_split": args.cc_split,
+            "cost_regime": args.cost_regime,
+            "evaluation_sha256": evaluation.get("sha256") if isinstance(evaluation, dict) else None,
+        },
+        "pool": {
+            "agents": args.agents,
+            "seed": args.seed,
+            "base_seed": getattr(args, "base_seed", args.seed),
+            "repeat_index": getattr(args, "repeat_index", 0),
+        },
+        "generation": {
+            "temperature": args.temperature,
+            "max_steps": args.max_steps,
+            "max_evaluations": args.max_evals,
+            "max_context_tokens": args.max_context_tokens,
+            "probes": args.probes,
+            **_generation_options(args),
+        },
+        "protocol": {
+            "poolact": POOLACT_PROTOCOL_VERSION,
+            "missing_final_policy": getattr(args, "missing_final_policy", "error"),
+            **_loop_options(args),
+        },
+    }
+    canonical = json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "pool-" + hashlib.sha256(canonical).hexdigest()
+
+
 def _agent_namespace(
     args: argparse.Namespace,
     strategy: str,
@@ -191,11 +244,8 @@ def _agent_namespace(
     namespace = argparse.Namespace(**vars(args))
     namespace.seed = args.seed + agent_id
     namespace.api_key = api_key
-    cache_namespace = args.prompt_cache_key
-    if cache_namespace and getattr(args, "repeats", 1) > 1:
-        cache_namespace = f"{cache_namespace}:repeat={getattr(args, 'repeat_index', 0)}"
     namespace.prompt_cache_key = _agent_cache_key(
-        cache_namespace,
+        _pool_cache_namespace(args),
         strategy,
         agent_id,
     )
@@ -612,7 +662,7 @@ def _run_strategy(
     return response
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     _add_generation_arguments(parser)
     parser.add_argument("--terminal-evidence-dir", type=Path, default=None,
@@ -676,11 +726,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("runs/poolact"))
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(args=None, *, selected_repeat=None) -> int:
+    """Run the CLI matrix, or one independent repeat selected by the queue."""
+    args = parse_args() if args is None else args
     if not args.model:
         args.model = _backend_model(args.backend)
     if args.base_url is None:
@@ -693,6 +744,9 @@ def main() -> int:
         raise SystemExit("--agents must be at least 1")
     if args.repeats < 1:
         raise SystemExit("--repeats must be at least 1")
+    if selected_repeat is not None and (type(selected_repeat) is not int
+                                       or not 0 <= selected_repeat < args.repeats):
+        raise SystemExit("selected_repeat must identify an existing repeat")
     if args.max_steps < 1:
         raise SystemExit("--max-steps must be at least 1")
     if args.max_evals < 1:
@@ -754,7 +808,7 @@ def main() -> int:
     implementation = _implementation_manifest()
     repetitions: Dict[str, Dict[str, Any]] = {}
     observations: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for repeat_index in range(args.repeats):
+    for repeat_index in (range(args.repeats) if selected_repeat is None else [selected_repeat]):
         repeat_args = _repeat_namespace(args, repeat_index)
         summary = _run_items(
             repeat_args, question_indices, api_key, time_budget, mode, implementation,
@@ -767,7 +821,7 @@ def main() -> int:
                 f"repeat_{repeat_index}/item_{item}": strategies
                 for item, strategies in summary["items"].items()
             })
-    if args.repeats > 1:
+    if args.repeats > 1 and selected_repeat is None:
         with TerminalEvidence(
             _terminal_evidence_root(args) / "repeat_summary",
             owner={"runner": "poolact", "scope": "repeat_summary", "seed": args.seed},

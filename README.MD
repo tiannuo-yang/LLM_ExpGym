@@ -85,6 +85,15 @@ the request guarantees replay. See [portable-study.md](docs/portable-study.md).
 
 ## Full experiment
 
+For a new concurrent self-served study, use the
+[dynamic queue](docs/scheduling.md): freeze existing runner selectors with
+`scripts/run_study_queue.py plan`, then execute the flat queue with `run`.
+Independent invocations refill available slots across stage/repeat boundaries;
+PoolAct agents still share only their own pool. The
+[serving template](docs/serving.md) defaults to **4 nodes × 8 GPUs per model,
+two TP16 replicas**, account `k2p`; planning does not submit GPU jobs.
+The commands below retain the older sequential setup/Docker workflow.
+
 Preview the entire one-model plan without API, data, or Docker calls:
 
 ```bash
