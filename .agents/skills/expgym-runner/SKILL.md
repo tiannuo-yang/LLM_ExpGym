@@ -1,6 +1,6 @@
 ---
 name: expgym-runner
-description: Run, debug, validate, or adapt ExpGym and PoolAct experiments, including OpenAI-compatible self-serving, native tool protocols, HPOBench runtimes, repeat isolation, and reproducible result delivery.
+description: Run, debug, validate, or adapt ExpGym and PoolAct experiments, including self-serving and tool/runtime compatibility; turn frozen results into full-setting reports with reproducible tables and archive indexes.
 ---
 
 # ExpGym Runner
@@ -16,6 +16,7 @@ Label work as **Static/fake validation**, **Real smoke validation**, **Current r
 - For paper claims or matrix design, read [experiment-matrix.md](references/experiment-matrix.md) and confirm the actual paper version. `run_full.sh` is a superset, not automatically paper-exact.
 - For setup, provider transport, HPO runtimes, CLI examples or failure diagnosis, read the relevant sections of [runbook.md](references/runbook.md).
 - For scientific endpoints, study registration and descriptive analysis, read `docs/portable-study.md`. It does not implement confirmatory inference.
+- For a completed study's full-setting report or archive index, read [the report workflow](../../../docs/full-setting-report.md). Use frozen exports; a request to locate or explain results does not itself request a rewrite or publication.
 - For normal missing answers versus execution failures, read `docs/task-abstention-v5.md`; for explicit provider aborts, read `docs/provider-abort-v4.md`.
 - For analysis packaging, Git publication or restoration, read `docs/efficient-delivery.md`. Use explicit input inventories and `scripts/package_run.py`; stream-verify archives and restore only needed inputs. Local-only sealing is not public clearance. Reuse unchanged archive identities and scan the actual publication delta.
 - For new concurrent/HPC runs, read `docs/scheduling.md` and `docs/serving.md`. Prefer the flat `run_study_queue.py` queue; independent invocations use separate processes/output/dump/cache namespaces, without stage/repeat barriers. `run_full.sh` remains the older sequential wrapper.
@@ -57,9 +58,21 @@ Separate `execution_complete`, `score_complete` and task performance.
 
 Use identity-checked resume. An integrity-only check must forbid model calls rather than silently rerun a stale result. A hash-bound receipt is evidence for its stated scope, not independent proof of scientific truth.
 
+## Report a completed study
+
+When asked to produce a full report, use this sequence with the actual study settings:
+
+1. Bind the existing data/source/config identities, explicit analysis inputs and actual matrix; do not confuse a retrospective run manifest with preregistration.
+2. Generate all-setting absolute scores, clearly oriented comparisons and relevant repeat/task tables. Preserve item/pool/order units, denominators, unknowns and all positive/negative values; do not inherit case-study model names, counts or repeats.
+3. Organize the report around the user's questions: budget degradation, cache/coordination gains where relevant, and actual resource tradeoffs. Keep material limitations near the claims they affect; an anomaly list is not a substitute for the main report.
+4. Include the complete raw-dump and analysis index in the report: fixed links, source/member/shard mapping, existing hash/size evidence, all-attempt costs and restoration entry points. Distinguish metadata checks from new content verification.
+5. Perform one post-draft independent numerical/logical review, correct affected parts, and publish only the scanned delta if authorized. Stop at the agreed report/index acceptance; no implicit model reruns, rescoring, full raw restoration or repeated audit ladders.
+
+Keep detailed acceptance and artifact-layout guidance in the linked workflow. Its historical generators are study-specific examples, not general CLIs for arbitrary models or matrices.
+
 ## Validate proportionately and stop
 
-During development, run focused tests for changed behavior. Run the full no-cost suite and fake runner integration once per coherent code revision before delivery; reuse its result for unchanged code. Documentation-only changes need link/schema review, not a new model run.
+During development, run focused tests for changed behavior. For runner/execution changes, run the full no-cost suite and fake runner integration once per coherent revision before delivery; reuse its result for unchanged code. Report-only adapters/generators need schema/aggregation fixtures, deterministic recomputation and the post-draft numerical review, not the full runner suite unless an execution dependency changed. Documentation-only changes need link/schema review, not a new model run.
 
 Use the recorded interpreter for an existing study; never reinstall a frozen environment to make a check pass. `scripts/check.sh` bootstraps a missing environment, so verify `EXPGYM_VENV/bin/python` exists before invoking it. ParamNet requires the verified legacy environment; fake or skipped tests do not establish that real path.
 

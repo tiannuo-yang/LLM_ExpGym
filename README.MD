@@ -153,6 +153,12 @@ distinguishes generic correctness fixes, provider adapters and study settings.
 The [follow-up plan](docs/maintenance-20260910.md) records acceptance and delivery;
 published historical runs remain frozen under their original source identities.
 
+For completed studies, use the [full-setting report workflow](docs/full-setting-report.md):
+frozen inputs, complete regime/strategy tables, claim-focused analysis, an embedded
+raw-dump/aggregate archive index, one post-draft independent check and authorized
+delta-only publication. It includes the published Kimi-K3/GLM example without
+making that study's model names, counts or repeats universal defaults.
+
 For new deliveries, follow [efficient delivery](docs/efficient-delivery.md):
 `scripts/package_run.py` automatically shards an explicit file inventory, combines
 hashing/scanning/packing, and stream-verifies all contents without restoring the
