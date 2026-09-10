@@ -17,6 +17,7 @@ Label work as **Static/fake validation**, **Real smoke validation**, **Current r
 - For setup, provider transport, HPO runtimes, CLI examples or failure diagnosis, read the relevant sections of [runbook.md](references/runbook.md).
 - For scientific endpoints, study registration and descriptive analysis, read `docs/portable-study.md`. It does not implement confirmatory inference.
 - For normal missing answers versus execution failures, read `docs/task-abstention-v5.md`; for explicit provider aborts, read `docs/provider-abort-v4.md`.
+- For analysis packaging, Git publication or restoration, read `docs/efficient-delivery.md`. Use explicit input inventories and `scripts/package_run.py`; stream-verify archives and restore only needed inputs. Local-only sealing is not public clearance. Reuse unchanged archive identities and scan the actual publication delta.
 
 A status question needs current process/artifact evidence and an answer, not a restart of the entire validation ladder.
 
