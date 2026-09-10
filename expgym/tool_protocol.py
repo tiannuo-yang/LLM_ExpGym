@@ -262,6 +262,24 @@ def extract_text_answer(text: str) -> Optional[str]:
     return structured_final_answer(text)
 
 
+def unlabelled_final_answer(text: str) -> Optional[str]:
+    """Accept ordinary answer text, not a rejected protocol/reasoning example.
+
+    Native responses and the historical forced-final path permit bare prose.
+    They must not use that permission to bypass the explicit-answer parser's
+    rejection of quoted directives, examples or incomplete reasoning regions.
+    Call this only after explicit/structured final parsing; an answer containing
+    literal protocol labels can still be submitted with an explicit Answer label.
+    Tagged reasoning plus a final also requires that explicit final delimiter.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if (_protocol_view(text) is None or _LABEL.search(text)
+            or _REASONING_TAG.search(text)):
+        return None
+    return text.strip()
+
+
 class _TextAction(NamedTuple):
     name: str
     payload: str

@@ -188,6 +188,7 @@ class PoolActCliTest(unittest.TestCase):
             with mock.patch.object(run_poolact, "_implementation_manifest", return_value={"source_tree": "fixed"}), \
                  mock.patch.object(run_poolact, "evaluation_identity", return_value={"files": {}, "dependencies": {}, "sha256": "fixed-inputs"}), \
                  mock.patch.object(run_poolact, "_resolve_answer_evaluator", return_value=evaluator), \
+                 mock.patch.object(run_poolact, "_resolve_tools", return_value={}), \
                  mock.patch.object(run_poolact, "_run_strategy", side_effect=fake_strategy) as run, \
                  mock.patch.object(sys, "stdout", io.StringIO()), \
                  mock.patch.dict(os.environ, {}, clear=True):

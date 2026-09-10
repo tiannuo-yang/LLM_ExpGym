@@ -138,3 +138,8 @@ Advanced CLI options:
 
 See [docs/poolact.md](docs/poolact.md) for the PoolAct algorithm-to-code mapping,
 concurrency contract, and output schema.
+
+The [2026-09-10 bug-fix retrospective](docs/bug-fix-retrospective-20260910.md)
+distinguishes generic correctness fixes, provider adapters and study settings.
+The [follow-up plan](docs/maintenance-20260910.md) records acceptance and delivery;
+published historical runs remain frozen under their original source identities.

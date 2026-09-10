@@ -537,8 +537,11 @@ class OpenAICompatibleLLM(LLMBackend):
         elif isinstance(content, list):
             text_parts = []
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    part_text = part.get("text", "")
+                if (not isinstance(part, dict) or not isinstance(part.get("type"), str)
+                        or not part["type"].strip()):
+                    raise ValueError("API content parts must be objects with non-empty type strings")
+                if part["type"] == "text":
+                    part_text = part.get("text")
                     if not isinstance(part_text, str):
                         raise ValueError("API text content parts must contain strings")
                     text_parts.append(part_text)

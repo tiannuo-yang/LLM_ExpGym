@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from expgym.errors import ToolInputError
 from expgym.execution_contract import validate_execution_contracts
-from expgym.tool_protocol import native_system_prompt, native_tool_schemas, resolve_tool_protocol, structured_final_answer
+from expgym.tool_protocol import native_system_prompt, native_tool_schemas, resolve_tool_protocol, structured_final_answer, unlabelled_final_answer
 
 logger = logging.getLogger("expgym")
 
@@ -391,7 +391,9 @@ def run_react_loop(
                 if _extract_action(text) is not None:
                     protocol_error = "Text Action is not a native function call"
                 elif text:
-                    answer = _extract_answer(text) or structured_final_answer(text) or text
+                    answer = _extract_answer(text) or structured_final_answer(text) or unlabelled_final_answer(text)
+                    if answer is None:
+                        protocol_error = "No final answer outside reasoning or protocol examples"
                 else:
                     protocol_error = "LLM returned empty response"
             else:
@@ -515,8 +517,12 @@ def run_react_loop(
                     if _extract_action(forced_text) is not None:
                         reject_decision(forced, "Action received during forced final", forced=True)
                     else:
-                        answer = _extract_answer(forced_text) or structured_final_answer(forced_text) or forced_text
-                        answer_source = "forced_model_answer"
+                        answer = (_extract_answer(forced_text) or structured_final_answer(forced_text)
+                                  or unlabelled_final_answer(forced_text))
+                        if answer is None:
+                            reject_decision(forced, "Forced final contains only reasoning or protocol examples", forced=True)
+                        else:
+                            answer_source = "forced_model_answer"
                 else:
                     reject_decision(forced, "Forced final returned empty response", forced=True)
 

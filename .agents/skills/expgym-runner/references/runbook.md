@@ -33,7 +33,7 @@ set +a
 test -n "${SUB2API_API_KEY:-}" && test -n "${SUB2API_BASE_URL:-}"
 ```
 
-Do not run `env`, `set`, `printenv`, shell tracing, or commands that print the key. A locally tested stable model is `gpt-5.3-codex-spark`, but availability is account-specific. Exact-model preflight is mandatory; `gpt-5.4` has returned `upstream_400_codex_plan_gated_model` on one local subscription.
+Do not run `env`, `set`, `printenv`, shell tracing, or commands that print the key. Use the user's explicit model ID; the example names below are not a current availability guarantee. Provider access is account-specific. A real smoke for the intended model is needed before a large new run, not before documentation or offline artifact work.
 
 ## Small real validation
 
@@ -54,7 +54,7 @@ bash scripts/eval_poolact.sh \
   --output-dir runs/real_smoke/poolact_search
 ```
 
-For a complete path smoke, repeat the sequential command for `tuning`, `restricted_search`, and `evidence_audit` under all three regimes. Repeat PoolAct for all three scenarios under Tight and Moderate, the regimes used by the main PoolAct table. Use a compact NASBench task for the tuning smoke.
+Cover changed protocol/task/scoring paths with the smallest explicitly planned pilot. Include native tool delivery and forced final when those paths change, and a budget boundary when budget logic changes. Do not automatically multiply every smoke across all regimes and strategies when the same implementation is already covered by tests and an unchanged real smoke. Use a compact NASBench task when that is the relevant tuning path. Retain normal early answers instead of resampling until a desired path appears.
 
 Small limits validate plumbing, not paper statistics. A zero F1 with valid `score_check` is a semantic failure by the sampled model, not a broken runner.
 
