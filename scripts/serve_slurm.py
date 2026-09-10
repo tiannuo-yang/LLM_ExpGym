@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan two independent TP16 SGLang replicas; only --submit invokes sbatch.
+"""Plan explicit SGLang replica topology; only --submit invokes sbatch.
 
 No model import, checkpoint loading, health request, or credential handling is
 performed by the planning path. This is a launcher, not a science/smoke gate.
@@ -21,10 +21,14 @@ import sys
 import time
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs/serving/slurm_tp16.json"
-# These options occur in the previously exercised SGLang launch profiles. Keep
-# architecture-specific choices explicit, rather than guessing from model names.
+# These options occur in the previously exercised launch profiles or reviewed
+# SGLang recipes. Keep them opt-in, never guessed from model names. New runtime
+# options still need validation with the selected frozen SGLang executable.
 BACKEND_VALUE_FLAGS = {"--moe-runner-backend", "--attention-backend", "--sampling-backend",
-                       "--quantization", "--random-seed"}
+                       "--quantization", "--random-seed", "--dist-timeout",
+                       "--linear-attn-prefill-backend", "--linear-attn-decode-backend",
+                       "--mamba-full-memory-ratio", "--mamba-ssm-dtype",
+                       "--max-prefill-tokens", "--page-size"}
 BACKEND_SWITCH_FLAGS = {"--enable-deterministic-inference", "--enable-symm-mem"}
 
 
@@ -46,23 +50,31 @@ def absolute_path(value, label):
 def validate_config(config):
     require(type(config) is dict and set(config) == {"schema_version", "slurm", "topology", "dispatch", "sglang"},
             "unexpected config fields")
-    require(type(config["schema_version"]) is int and config["schema_version"] == 1, "unknown schema")
+    require(type(config["schema_version"]) is int and config["schema_version"] in (1, 2), "unknown schema")
     slurm, topology = config["slurm"], config["topology"]
     require(type(slurm) is dict and set(slurm) == {"account", "partition", "nodes", "gpus_per_node", "cpus_per_task", "time_limit"}, "invalid Slurm config")
-    require(type(topology) is dict and set(topology) == {"replicas", "nodes_per_replica", "tp_size", "http_port_base", "dist_port_base"}, "invalid topology")
+    topology_fields = {"replicas", "nodes_per_replica", "tp_size", "http_port_base", "dist_port_base"}
+    if config["schema_version"] == 2:
+        topology_fields.add("pp_size")
+    require(type(topology) is dict and set(topology) == topology_fields, "invalid topology")
     for field in ("nodes", "gpus_per_node", "cpus_per_task"):
         positive_int(slurm[field], field)
     for field, value in topology.items():
         positive_int(value, field)
     require(slurm["nodes"] == topology["replicas"] * topology["nodes_per_replica"], "replica node total mismatch")
-    require(topology["tp_size"] == topology["nodes_per_replica"] * slurm["gpus_per_node"], "TP/GPU total mismatch")
-    require((slurm["nodes"], slurm["gpus_per_node"], topology["replicas"], topology["nodes_per_replica"], topology["tp_size"]) == (4, 8, 2, 2, 16), "this profile requires 4 nodes, 8 GPUs/node, two TP16 replicas")
+    pp_size = topology.get("pp_size", 1)
+    require(topology["tp_size"] * pp_size == topology["nodes_per_replica"] * slurm["gpus_per_node"], "TP*PP/GPU total mismatch")
+    shape = (slurm["nodes"], slurm["gpus_per_node"], topology["replicas"], topology["nodes_per_replica"], topology["tp_size"], pp_size)
+    if config["schema_version"] == 1:
+        require(shape == (4, 8, 2, 2, 16, 1), "schema 1 requires 4 nodes, 8 GPUs/node, two TP16 replicas")
+    else:
+        require(shape == (4, 8, 1, 4, 8, 4), "schema 2 requires 4 nodes, 8 GPUs/node, one TP8*PP4 replica")
     for field in ("account", "partition"):
         require(isinstance(slurm[field], str) and re.fullmatch(r"[A-Za-z0-9_.-]+", slurm[field]), "invalid " + field)
     require(slurm["account"] == "k2p", "this profile requires account k2p")
     require(isinstance(slurm["time_limit"], str) and re.fullmatch(r"(?:\d+-)?\d{1,2}:\d{2}:\d{2}", slurm["time_limit"]), "invalid time limit")
-    ports = [topology[name] + replica for name in ("http_port_base", "dist_port_base") for replica in range(2)]
-    require(all(1024 <= port <= 65535 for port in ports) and len(set(ports)) == 4, "invalid/overlapping ports")
+    ports = [topology[name] + replica for name in ("http_port_base", "dist_port_base") for replica in range(topology["replicas"])]
+    require(all(1024 <= port <= 65535 for port in ports) and len(set(ports)) == 2 * topology["replicas"], "invalid/overlapping ports")
     require(type(config["dispatch"]) is dict and set(config["dispatch"]) == {"max_workers"}, "invalid dispatch config")
     positive_int(config["dispatch"]["max_workers"], "max_workers")
     require(type(config["sglang"]) is dict and set(config["sglang"]) == {"max_running_requests", "cuda_graph_max_bs_decode"}, "invalid SGLang config")
@@ -99,17 +111,17 @@ def build_plan(config, *, checkpoint, sglang_bin, model, context_length, mem_fra
     require(isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", model), "invalid served model name")
     positive_int(context_length, "context_length")
     positive_int(ep_size, "ep_size")
-    require(16 % ep_size == 0, "ep_size must divide TP16")
+    require(config["topology"]["tp_size"] % ep_size == 0, "ep_size must divide tp_size")
     require(type(mem_fraction_static) in (int, float) and math.isfinite(mem_fraction_static) and 0 < mem_fraction_static < 1, "invalid memory fraction")
     for value in (reasoning_parser, tool_call_parser):
         require(value is None or (isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value)), "invalid parser name")
     mounts = container_mounts or []
     require(type(mounts) is list and all(type(value) is str and value and "\n" not in value for value in mounts), "invalid container mounts")
     require(not mounts or container_image is not None, "mounts require a container image")
-    return {"schema_version": 1, "config": config, "checkpoint": checkpoint, "sglang_bin": sglang_bin,
+    return {"schema_version": config["schema_version"], "config": config, "checkpoint": checkpoint, "sglang_bin": sglang_bin,
             "model": model, "context_length": context_length, "mem_fraction_static": mem_fraction_static,
             "ep_size": ep_size, "reasoning_parser": reasoning_parser, "tool_call_parser": tool_call_parser,
-            "server_args": backend_args(server_args or []), "runtime_env": runtime_env,
+            "server_args": backend_args([] if server_args is None else server_args), "runtime_env": runtime_env,
             "container_image": container_image, "container_mounts": mounts,
             "trust_remote_code": bool(trust_remote_code), "generation_settings": "unchanged; supplied by experiment runner",
             "real_smoke_passed": False, "endpoint_authentication": "none; trusted private network required"}
@@ -119,20 +131,26 @@ def node_layout(plan, nodes):
     require(type(nodes) is list and len(nodes) == 4 and len(set(nodes)) == 4, "expected four distinct allocated nodes")
     require(all(type(node) is str and re.fullmatch(r"[A-Za-z0-9_.-]+", node) for node in nodes), "invalid allocated node name")
     topology = plan["config"]["topology"]
-    return [{"replica": replica, "nodes": nodes[2 * replica:2 * replica + 2], "tp_size": 16,
+    width = topology["nodes_per_replica"]
+    return [{"replica": replica, "nodes": nodes[width * replica:width * (replica + 1)], "tp_size": topology["tp_size"],
+             **({"pp_size": topology["pp_size"]} if "pp_size" in topology else {}),
              "http_port": topology["http_port_base"] + replica,
              "dist_port": topology["dist_port_base"] + replica,
-             "base_url": "http://%s:%d/v1" % (nodes[2 * replica], topology["http_port_base"] + replica)}
-            for replica in range(2)]
+             "base_url": "http://%s:%d/v1" % (nodes[width * replica], topology["http_port_base"] + replica)}
+            for replica in range(topology["replicas"])]
 
 
 def server_command(plan, replica, rank, head_ip):
-    require(type(rank) is int and rank in (0, 1), "invalid rank")
-    require(type(replica["replica"]) is int and replica["replica"] in (0, 1), "invalid replica")
+    topology = plan["config"]["topology"]
+    require(type(rank) is int and 0 <= rank < topology["nodes_per_replica"], "invalid rank")
+    require(type(replica["replica"]) is int and 0 <= replica["replica"] < topology["replicas"], "invalid replica")
     cfg = plan["config"]["sglang"]
+    parallel_args = ["--tp-size", str(topology["tp_size"])]
+    if "pp_size" in topology:
+        parallel_args += ["--pp-size", str(topology["pp_size"])]
     command = [plan["sglang_bin"], "serve", "--model-path", plan["checkpoint"],
-               "--served-model-name", plan["model"], "--tp-size", "16", "--ep-size", str(plan["ep_size"]),
-               "--nnodes", "2", "--node-rank", str(rank), "--dist-init-addr", "%s:%s" % (head_ip, replica["dist_port"]),
+               "--served-model-name", plan["model"], *parallel_args, "--ep-size", str(plan["ep_size"]),
+               "--nnodes", str(topology["nodes_per_replica"]), "--node-rank", str(rank), "--dist-init-addr", "%s:%s" % (head_ip, replica["dist_port"]),
                "--context-length", str(plan["context_length"]), "--mem-fraction-static", str(plan["mem_fraction_static"]),
                "--max-running-requests", str(cfg["max_running_requests"]),
                "--cuda-graph-max-bs-decode", str(cfg["cuda_graph_max_bs_decode"]),
@@ -164,10 +182,27 @@ def write_json(path, value):
         handle.write("\n")
 
 
+def validate_plan(plan):
+    """Apply the planning contract again before executing a saved plan.
+
+    A launcher hash alone does not validate editable plan fields. In particular,
+    server_args must not bypass topology/secret validation at allocation time.
+    """
+    require(type(plan) is dict, "invalid serving plan")
+    require(type(plan.get("schema_version")) is int, "invalid plan schema")
+    require(type(plan.get("trust_remote_code")) is bool, "invalid trust_remote_code")
+    parameters = ("checkpoint", "sglang_bin", "model", "context_length", "mem_fraction_static", "ep_size",
+                  "reasoning_parser", "tool_call_parser", "server_args", "runtime_env", "container_image",
+                  "container_mounts", "trust_remote_code")
+    checked = build_plan(plan["config"], **{name: plan[name] for name in parameters})
+    require({key: value for key, value in plan.items() if key != "launcher_sha256"} == checked,
+            "saved plan does not match planning contract")
+    return plan
+
+
 def run_allocation(plan_path):
     plan_path = Path(plan_path).resolve()
-    plan = json.loads(plan_path.read_text())
-    validate_config(plan["config"])
+    plan = validate_plan(json.loads(plan_path.read_text()))
     require(plan.get("launcher_sha256") == hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "launcher source changed")
     require(os.environ.get("SLURM_JOB_ID", "").isdigit(), "must run inside a Slurm allocation")
     require(os.environ.get("SLURM_JOB_ACCOUNT") == plan["config"]["slurm"]["account"], "allocation account mismatch")
@@ -191,7 +226,7 @@ def run_allocation(plan_path):
                         'shift 2; exec "$@"', "expgym-rank", plan["runtime_env"] or "", cache_tag,
                         *server_command(plan, replica, rank, head_ip)]
             commands.append({"replica": replica["replica"], "rank": rank, "node": node, "argv": command})
-    write_json(directory / "deployment.json", {"schema_version": 1, "job_id": os.environ["SLURM_JOB_ID"],
+    write_json(directory / "deployment.json", {"schema_version": plan["schema_version"], "job_id": os.environ["SLURM_JOB_ID"],
                "plan_sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(), "replicas": replicas,
                "endpoints": [replica["base_url"] for replica in replicas], "rank_commands": commands,
                "real_smoke_passed": False, "status": "launching; endpoint existence is not readiness"})

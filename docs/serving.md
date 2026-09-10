@@ -44,8 +44,10 @@ snapshot of the launcher.
 
 `--server-args-json` accepts only the reviewed backend knobs
 `--attention-backend`, `--moe-runner-backend`, `--sampling-backend`,
-`--quantization`, `--random-seed`, `--enable-deterministic-inference` and
-`--enable-symm-mem`. For example:
+`--quantization`, `--random-seed`, `--enable-deterministic-inference`,
+`--enable-symm-mem`, `--dist-timeout`, `--linear-attn-prefill-backend`,
+`--linear-attn-decode-backend`, `--mamba-full-memory-ratio`,
+`--mamba-ssm-dtype`, `--max-prefill-tokens` and `--page-size`. For example:
 
 ```text
 --server-args-json '["--attention-backend", "fa3", "--random-seed", "42"]'
@@ -58,6 +60,12 @@ explicit server initialization seed is shared by the two replicas; it is not a
 proof of request-seed control or statistically independent repetitions. If a
 study requires different initialization seeds per replica, that is a separate
 configuration change to implement and validate before the study.
+
+The additional pipeline/linear-attention knobs were reviewed against the
+[SGLang Qwen3.8 cookbook](https://docs.sglang.io/cookbook/autoregressive/Qwen/Qwen3.8).
+They are accepted as explicit values for any served model, not automatically
+enabled by its name or by the pipeline profile. Acceptance by this planner is
+not proof that the selected SGLang version/hardware supports a value.
 
 If shared-library setup is required, pass `--runtime-env /absolute/runtime.sh`.
 This script must contain only nonsecret runtime setup, not credential values.
@@ -106,10 +114,41 @@ that server requests drained. Before a planned `scancel JOB_ID`, stop new
 experiment dispatch and verify in-flight clients have completed. A forced stop
 is infrastructure failure evidence, not a reason to silently replace results.
 
+## Explicit single-replica TP8 × PP4 profile
+
+Keep the default schema-1 config unchanged for two TP16 replicas. To explicitly
+use the same **4 nodes × 8 GPUs** as one tensor/pipeline-parallel server, add:
+
+```text
+--config configs/serving/slurm_tp8_pp4.json
+```
+
+This schema-2 profile records `replicas=1`, `nodes_per_replica=4`, `tp_size=8`
+and `pp_size=4`. Validation requires **TP × PP = GPUs per replica**, the replica
+node total to match the allocation, and EP to divide the actual TP (so EP16 is
+invalid here). Schema 1 accepts only the existing two-TP16 layout; schema 2 adds
+only this reviewed single-TP8×PP4 layout, not arbitrary untested shapes. Neither
+configuration is selected from a model name.
+
+All four allocated nodes belong to replica 0, with node ranks 0/1/2/3,
+`--tp-size 8 --pp-size 4 --nnodes 4`, and one shared head-node rendezvous.
+`deployment.json` contains **one** HTTP endpoint on node 0; other ranks are not
+independent replicas. Port validation uses the configured replica count. No
+topology override, including `--pp-size`, can enter through extra server args.
+Saved plans are revalidated before allocation commands execute, so editing their
+fields cannot bypass the same argument checks. The launcher still cleans up
+only its owned rank processes and never submits or retries by default.
+
+Existing schema-1 plan/layout/rank commands/batch text remain unchanged (the
+launcher source/hash necessarily changes). Pipeline loading, backend support,
+capacity and throughput require a model/runtime-specific authorized smoke; this
+generic profile is CPU/mock-tested, not a memory-fit or performance guarantee.
+
 ## Connect the dynamic experiment queue
 
-After an authorized native multi-turn/tool/forced-final smoke through **both**
-replicas, supply `deployment.json` to the queue planner:
+After an authorized native multi-turn/tool/forced-final smoke through **every**
+replica (two by default, one in the explicit pipeline profile), supply
+`deployment.json` to the queue planner:
 
 ```bash
 python scripts/run_study_queue.py plan \
@@ -149,9 +188,10 @@ make utilization or elapsed time look better.
 python -m unittest discover -s tests -p test_serving_plan.py -v
 ```
 
-Tests cover 4×8 / 2×TP16 node and rank mapping, distinct endpoints, no default
+Tests cover 4×8 / 2×TP16 byte-compatible defaults and explicit 1×TP8×PP4 rank
+mapping, single/shared versus distinct endpoints, no default
 submission, fresh output protection, explicit submission acknowledgement,
-backend/topology override rejection, preserved generation settings and owned
+backend/topology override and saved-plan tamper rejection, preserved generation settings and owned
 rank cleanup on failure. Slurm and processes are mocked. New hardware/runtime
 loading, throughput, native parsing and task results remain **unverified** until
 an explicitly authorized real smoke and subsequent study.

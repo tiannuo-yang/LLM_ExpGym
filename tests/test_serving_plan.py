@@ -42,6 +42,164 @@ class ServingPlanTests(unittest.TestCase):
                 addresses.add(command[command.index("--dist-init-addr") + 1])
         self.assertEqual(addresses, {"n0:51240", "n2:51241"})
 
+    def test_schema1_rendered_defaults_are_byte_compatible(self):
+        # Captured before adding pipeline support: no pp_size=1 metadata/flag
+        # or other silent default change. Launcher-source hashes must change.
+        layout = serving.node_layout(self.plan, ["n0", "n1", "n2", "n3"])
+        commands = [serving.server_command(self.plan, replica, rank, replica["nodes"][0])
+                    for replica in layout for rank in range(2)]
+        values = {
+            "config": serving.DEFAULT_CONFIG.read_bytes(),
+            "plan": json.dumps(self.plan, indent=2, sort_keys=True, allow_nan=False).encode(),
+            "layout": json.dumps(layout, indent=2, sort_keys=True, allow_nan=False).encode(),
+            "commands": json.dumps(commands, indent=2, sort_keys=True, allow_nan=False).encode(),
+            "batch": serving.batch_script(self.plan, Path("/shared/plan"),
+                                          Path("/shared/plan/serve_slurm.py"), "/controller/bin/python").encode(),
+        }
+        expected = {
+            "config": "f6eccb4db5fe81572487bad118664348a42b17271b0d8ff68435e5613018f875",
+            "plan": "2c3a9aadf09d2050803780e63b452e9c0a6cb39a9ef96ea9f985b15386f11352",
+            "layout": "e37db42299908f92473927cd4e5295e55d1db432bb920d4fc6605704b2e77d6e",
+            "commands": "53a35118f93f43a045183a4a315d0169ca00503ab7934df2a943569ec454332c",
+            "batch": "a377a768a153d92073bb41a89812a0edeaf441c9ba394357caca8e3ba5c09ff8",
+        }
+        self.assertEqual({key: hashlib.sha256(value).hexdigest() for key, value in values.items()}, expected)
+
+    def pipeline_config(self):
+        return json.loads((serving.DEFAULT_CONFIG.parent / "slurm_tp8_pp4.json").read_text())
+
+    def test_pipeline_is_one_four_node_replica_with_one_endpoint(self):
+        for ep_size in (1, 2, 4, 8):
+            with self.subTest(ep_size=ep_size):
+                plan = serving.build_plan(self.pipeline_config(), **dict(self.arguments, model="model-cedar", ep_size=ep_size))
+                layout = serving.node_layout(plan, ["n0", "n1", "n2", "n3"])
+                self.assertEqual(plan["schema_version"], 2)
+                self.assertEqual(layout, [{"replica": 0, "nodes": ["n0", "n1", "n2", "n3"],
+                                          "tp_size": 8, "pp_size": 4, "http_port": 31240,
+                                          "dist_port": 51240, "base_url": "http://n0:31240/v1"}])
+                commands = [serving.server_command(plan, layout[0], rank, "10.0.0.1") for rank in range(4)]
+                for rank, command in enumerate(commands):
+                    for flag, value in (("--tp-size", "8"), ("--pp-size", "4"), ("--nnodes", "4"),
+                                        ("--node-rank", str(rank)), ("--dist-init-addr", "10.0.0.1:51240"),
+                                        ("--port", "31240"), ("--ep-size", str(ep_size)), ("--served-model-name", "model-cedar")):
+                        self.assertEqual(command.count(flag), 1)
+                        self.assertEqual(command[command.index(flag) + 1], value)
+                    self.assertNotIn("--temperature", command)
+                    self.assertNotIn("--max-tokens", command)
+                self.assertEqual(plan["server_args"], [])
+                self.assertFalse(plan["real_smoke_passed"])
+
+    def test_pipeline_invalid_topology_schema_ep_and_rank_fail_closed(self):
+        invalid = []
+        config = self.pipeline_config()
+        del config["topology"]["pp_size"]
+        invalid.append(config)
+        config = copy.deepcopy(self.config)
+        config["topology"]["pp_size"] = 1
+        invalid.append(config)
+        for section, field, value in (("topology", "pp_size", True), ("topology", "pp_size", 0),
+                                      ("topology", "pp_size", 2), ("topology", "tp_size", 16),
+                                      ("topology", "nodes_per_replica", 2), ("topology", "replicas", 2),
+                                      ("slurm", "nodes", 8), ("slurm", "gpus_per_node", 4)):
+            config = self.pipeline_config()
+            config[section][field] = value
+            invalid.append(config)
+        for config in invalid:
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                serving.validate_config(config)
+        for ep_size in (True, 0, 3, 16, 32):
+            with self.subTest(ep_size=ep_size), self.assertRaises(ValueError):
+                serving.build_plan(self.pipeline_config(), **dict(self.arguments, ep_size=ep_size))
+        plan = serving.build_plan(self.pipeline_config(), **self.arguments)
+        replica = serving.node_layout(plan, ["n0", "n1", "n2", "n3"])[0]
+        for rank in (-1, 4, True, "0"):
+            with self.subTest(rank=rank), self.assertRaises(ValueError):
+                serving.server_command(plan, replica, rank, "10.0.0.1")
+        for index in (-1, 1, True, "0"):
+            with self.subTest(replica=index), self.assertRaises(ValueError):
+                serving.server_command(plan, dict(replica, replica=index), 0, "10.0.0.1")
+
+    def test_pipeline_ports_use_actual_replica_count(self):
+        config = self.pipeline_config()
+        config["topology"].update(http_port_base=65535, dist_port_base=1024)
+        plan = serving.build_plan(config, **self.arguments)
+        layout = serving.node_layout(plan, ["n0", "n1", "n2", "n3"])
+        self.assertEqual(layout[0]["base_url"], "http://n0:65535/v1")
+        for http_port, dist_port in ((1023, 51240), (31240, 65536), (31240, 31240)):
+            config = self.pipeline_config()
+            config["topology"].update(http_port_base=http_port, dist_port_base=dist_port)
+            with self.subTest(http_port=http_port, dist_port=dist_port), self.assertRaises(ValueError):
+                serving.validate_config(config)
+
+    def test_reviewed_pipeline_backend_values_are_explicit_only(self):
+        extra = ["--dist-timeout", "1800", "--linear-attn-prefill-backend", "flashinfer",
+                 "--linear-attn-decode-backend", "flashinfer", "--mamba-full-memory-ratio", "0.95",
+                 "--mamba-ssm-dtype", "bfloat16", "--max-prefill-tokens", "8192", "--page-size", "64"]
+        plan = serving.build_plan(self.pipeline_config(), **dict(self.arguments, server_args=extra))
+        replica = serving.node_layout(plan, ["n0", "n1", "n2", "n3"])[0]
+        for rank in range(4):
+            command = serving.server_command(plan, replica, rank, "10.0.0.1")
+            self.assertEqual(command[-len(extra):], extra)
+        default = serving.server_command(self.plan, serving.node_layout(self.plan, ["n0", "n1", "n2", "n3"])[0], 0, "10.0.0.1")
+        for flag in extra[::2]:
+            self.assertNotIn(flag, default)
+            for malformed in ([flag], [flag, "--pp-size"], [flag, "x", flag, "y"]):
+                with self.subTest(malformed=malformed), self.assertRaises(ValueError):
+                    serving.backend_args(malformed)
+
+    def test_pipeline_and_security_overrides_cannot_enter_server_args(self):
+        for flag in ("--pp", "--pp-size", "--pipeline-parallel-size", "--tp", "--tp-size", "--ep-size",
+                     "--nnodes", "--node-rank", "--dist-init-addr", "--host", "--port", "--api-key",
+                     "--admin-api-key", "--config", "--config-file", "--model-path", "--max-running-requests"):
+            for values in ([flag, "placeholder"], [flag + "=placeholder"]):
+                with self.subTest(values=values), self.assertRaises(ValueError):
+                    serving.build_plan(self.pipeline_config(), **dict(self.arguments, server_args=values))
+        for value in ({}, "", 0, False):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                serving.build_plan(self.pipeline_config(), **dict(self.arguments, server_args=value))
+
+    def test_pipeline_dry_run_never_executes_subprocess(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()), \
+             patch.object(serving.subprocess, "run") as run, patch.object(serving.subprocess, "Popen") as popen, \
+             patch.object(serving.subprocess, "check_output") as check:
+            config_path = serving.DEFAULT_CONFIG.parent / "slurm_tp8_pp4.json"
+            directory = Path(temporary) / "pipeline"
+            self.assertEqual(serving.main(self.cli() + ["--config", str(config_path), "--dry-run", "--output-dir", str(directory)]), 0)
+            plan = json.loads((directory / "plan.json").read_text())
+            self.assertEqual(plan["config"], self.pipeline_config())
+            self.assertEqual(plan["schema_version"], 2)
+            self.assertFalse((directory / "submission.json").exists())
+            self.assertIn("#SBATCH --nodes=4\n", (directory / "serve.sbatch").read_text())
+            self.assertIn("#SBATCH --gres=gpu:8\n", (directory / "serve.sbatch").read_text())
+            with self.assertRaises(FileExistsError):
+                serving.main(self.cli() + ["--config", str(config_path), "--output-dir", str(directory)])
+            run.assert_not_called()
+            popen.assert_not_called()
+            check.assert_not_called()
+
+    def test_saved_plan_revalidates_before_any_slurm_or_rank_command(self):
+        plans = [self.plan, serving.build_plan(self.pipeline_config(), **self.arguments)]
+        for original in plans:
+            cases = [("server_args", ["--pp-size", "4"]), ("server_args", ["--api-key", "placeholder"]),
+                     ("server_args", {}), ("context_length", True), ("ep_size", 32), ("schema_version", 3),
+                     ("real_smoke_passed", True), ("trust_remote_code", "yes"), ("api_key", "placeholder")]
+            for field, value in cases:
+                with self.subTest(schema=original["schema_version"], field=field, value=value), tempfile.TemporaryDirectory() as temporary:
+                    plan = copy.deepcopy(original)
+                    plan[field] = value
+                    plan["launcher_sha256"] = hashlib.sha256(Path(serving.__file__).read_bytes()).hexdigest()
+                    path = Path(temporary) / "plan.json"
+                    serving.write_json(path, plan)
+                    with patch.dict(serving.os.environ, {"SLURM_JOB_ID": "12345", "SLURM_JOB_ACCOUNT": "k2p", "SLURM_JOB_NODELIST": "n[0-3]"}), \
+                         patch.object(serving.subprocess, "check_output") as check, \
+                         patch.object(serving.subprocess, "Popen") as popen, \
+                         patch.object(serving.subprocess, "run") as run, self.assertRaises(ValueError):
+                        serving.run_allocation(path)
+                    check.assert_not_called()
+                    popen.assert_not_called()
+                    run.assert_not_called()
+                    self.assertFalse((path.parent / "deployment.json").exists())
+
     def test_no_generation_rewrite_or_architecture_guess(self):
         command = serving.server_command(self.plan, serving.node_layout(self.plan, ["n0", "n1", "n2", "n3"])[0], 0, "10.0.0.1")
         for absent in ("--max-tokens", "--temperature", "--top-p", "--random-seed", "--reasoning-parser", "--trust-remote-code"):
@@ -152,6 +310,54 @@ class ServingPlanTests(unittest.TestCase):
             exit_receipt = json.loads((path.parent / "launcher_exit.json").read_text())
             self.assertFalse(exit_receipt["server_request_drain_verified"])
             self.assertEqual(exit_receipt["rank_exit_codes"], [2, -15, -15, -15])
+
+    def test_pipeline_rank_failure_cleans_owned_four_ranks_on_one_endpoint(self):
+        class Process:
+            def __init__(self, failed=False):
+                self.returncode = 2 if failed else None
+                self.terminated = False
+            def poll(self):
+                return self.returncode
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+            def wait(self, timeout):
+                return self.returncode
+        children = [Process(failed=index == 2) for index in range(4)]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "plan.json"
+            plan = serving.build_plan(self.pipeline_config(), **dict(self.arguments, model="model-cedar"))
+            serving.write_json(path, dict(plan, launcher_sha256=hashlib.sha256(Path(serving.__file__).read_bytes()).hexdigest()))
+            with patch.dict(serving.os.environ, {"SLURM_JOB_ID": "12345", "SLURM_JOB_ACCOUNT": "k2p", "SLURM_JOB_NODELIST": "n[0-3]"}), \
+                 patch.object(serving.subprocess, "check_output", return_value="n0\nn1\nn2\nn3\n"), \
+                 patch.object(serving.socket, "gethostbyname", return_value="10.0.0.1") as dns, \
+                 patch.object(serving.subprocess, "Popen", side_effect=children) as popen, \
+                 patch.object(serving.subprocess, "run") as run:
+                self.assertEqual(serving.run_allocation(path), 1)
+            run.assert_not_called()
+            dns.assert_called_once_with("n0")
+            self.assertEqual(popen.call_count, 4)
+            self.assertTrue(all(children[index].terminated for index in (0, 1, 3)))
+            self.assertFalse(children[2].terminated)
+            deployment = json.loads((path.parent / "deployment.json").read_text())
+            self.assertEqual(deployment["schema_version"], 2)
+            self.assertEqual(deployment["endpoints"], ["http://n0:31240/v1"])
+            self.assertEqual([(record["replica"], record["rank"], record["node"]) for record in deployment["rank_commands"]],
+                             [(0, rank, "n" + str(rank)) for rank in range(4)])
+            cache_dirs = set()
+            for rank, call in enumerate(popen.call_args_list):
+                command = call.args[0]
+                for flag, value in (("--pp-size", "4"), ("--nnodes", "4"), ("--node-rank", str(rank)),
+                                    ("--dist-init-addr", "10.0.0.1:51240")):
+                    self.assertEqual(command[command.index(flag) + 1], value)
+                self.assertIn("--nodelist=n" + str(rank), command)
+                self.assertIn("--gres=gpu:8", command)
+                cache_dirs.add(call.kwargs["env"]["TRITON_CACHE_DIR"])
+            self.assertEqual(len(cache_dirs), 4)
+            self.assertFalse(deployment["real_smoke_passed"])
+            exit_receipt = json.loads((path.parent / "launcher_exit.json").read_text())
+            self.assertEqual(exit_receipt["rank_exit_codes"], [-15, -15, 2, -15])
+            self.assertFalse(exit_receipt["server_request_drain_verified"])
 
 
 if __name__ == "__main__":
