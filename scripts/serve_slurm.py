@@ -50,11 +50,11 @@ def absolute_path(value, label):
 def validate_config(config):
     require(type(config) is dict and set(config) == {"schema_version", "slurm", "topology", "dispatch", "sglang"},
             "unexpected config fields")
-    require(type(config["schema_version"]) is int and config["schema_version"] in (1, 2), "unknown schema")
+    require(type(config["schema_version"]) is int and config["schema_version"] in (1, 2, 3), "unknown schema")
     slurm, topology = config["slurm"], config["topology"]
     require(type(slurm) is dict and set(slurm) == {"account", "partition", "nodes", "gpus_per_node", "cpus_per_task", "time_limit"}, "invalid Slurm config")
     topology_fields = {"replicas", "nodes_per_replica", "tp_size", "http_port_base", "dist_port_base"}
-    if config["schema_version"] == 2:
+    if config["schema_version"] in (2, 3):
         topology_fields.add("pp_size")
     require(type(topology) is dict and set(topology) == topology_fields, "invalid topology")
     for field in ("nodes", "gpus_per_node", "cpus_per_task"):
@@ -67,8 +67,10 @@ def validate_config(config):
     shape = (slurm["nodes"], slurm["gpus_per_node"], topology["replicas"], topology["nodes_per_replica"], topology["tp_size"], pp_size)
     if config["schema_version"] == 1:
         require(shape == (4, 8, 2, 2, 16, 1), "schema 1 requires 4 nodes, 8 GPUs/node, two TP16 replicas")
-    else:
+    elif config["schema_version"] == 2:
         require(shape == (4, 8, 1, 4, 8, 4), "schema 2 requires 4 nodes, 8 GPUs/node, one TP8*PP4 replica")
+    else:
+        require(shape == (4, 8, 4, 1, 8, 1), "schema 3 requires 4 nodes, 8 GPUs/node, four single-node TP8 replicas")
     for field in ("account", "partition"):
         require(isinstance(slurm[field], str) and re.fullmatch(r"[A-Za-z0-9_.-]+", slurm[field]), "invalid " + field)
     require(slurm["account"] == "k2p", "this profile requires account k2p")

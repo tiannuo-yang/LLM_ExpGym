@@ -56,7 +56,7 @@ snapshot of the launcher.
 These are opt-in architecture/runtime choices, not common defaults. Unsupported
 backend flags must be reviewed and added explicitly. Topology overrides, API
 secrets and generation defaults cannot be smuggled through this field. An
-explicit server initialization seed is shared by the two replicas; it is not a
+explicit server initialization seed is shared by all configured replicas; it is not a
 proof of request-seed control or statistically independent repetitions. If a
 study requires different initialization seeds per replica, that is a separate
 configuration change to implement and validate before the study.
@@ -144,10 +144,41 @@ launcher source/hash necessarily changes). Pipeline loading, backend support,
 capacity and throughput require a model/runtime-specific authorized smoke; this
 generic profile is CPU/mock-tested, not a memory-fit or performance guarantee.
 
+## Explicit four single-node TP8 replicas
+
+When a checkpoint/runtime supports TP8 and one eight-GPU node has sufficient
+capacity, the same **4 nodes × 8 GPUs** can instead run four independent servers:
+
+```text
+--config configs/serving/slurm_tp8_four_replicas.json --ep-size 1
+```
+
+This schema-3 profile accepts only `replicas=4`, `nodes_per_replica=1`,
+`tp_size=8`, `pp_size=1` and the same four-node/eight-GPU `k2p` allocation.
+It does not change either the default schema-1 two-TP16 profile or schema-2
+single-TP8×PP4 profile. This is an explicit topology choice, not a model-name
+adapter. EP remains an explicit launch argument that must divide TP8; the
+example uses EP1 and no automatic architecture inference is performed.
+
+Allocated node N owns replica N, each with `--tp-size 8 --pp-size 1 --nnodes 1
+--node-rank 0`. Each replica has its own head-node rendezvous and HTTP endpoint.
+The example config uses HTTP ports **32240–32243** and distributed ports
+**52240–52243**. Edit these bases in a new config before freezing the plan if
+needed; validation accounts for all four replicas and rejects overlapping or
+out-of-range port ranges. Distinct ports alone do not isolate studies: use a
+separate exclusive allocation, serving output directory, frozen experiment
+plan/output root and per-job dump/cache namespaces as well.
+
+`deployment.json` records four endpoints and four rank commands. The same saved
+plan revalidation, fresh-output protection and owned-rank cleanup apply; there
+is no automatic fallback, resubmission or failover. All four replicas need their
+own authorized native smoke before admission. Capacity, backend compatibility,
+throughput and request-seed behavior are not established by CPU/mock tests.
+
 ## Connect the dynamic experiment queue
 
 After an authorized native multi-turn/tool/forced-final smoke through **every**
-replica (two by default, one in the explicit pipeline profile), supply
+replica (two by default, one in the pipeline profile, four in the TP8 replica profile), supply
 `deployment.json` to the queue planner:
 
 ```bash
@@ -188,8 +219,8 @@ make utilization or elapsed time look better.
 python -m unittest discover -s tests -p test_serving_plan.py -v
 ```
 
-Tests cover 4×8 / 2×TP16 byte-compatible defaults and explicit 1×TP8×PP4 rank
-mapping, single/shared versus distinct endpoints, no default
+Tests cover byte-compatible defaults for 4×8 / 2×TP16 and 1×TP8×PP4, plus the
+explicit 4×TP8 single-node rank mapping, single/shared versus distinct endpoints, no default
 submission, fresh output protection, explicit submission acknowledgement,
 backend/topology override and saved-plan tamper rejection, preserved generation settings and owned
 rank cleanup on failure. Slurm and processes are mocked. New hardware/runtime
