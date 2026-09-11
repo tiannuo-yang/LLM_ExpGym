@@ -1,0 +1,744 @@
+# Kimi-K3、GLM-5.3、Qwen3.8 与 DeepSeek-V4-Flash-0731：ExpGym / PoolAct 全设置实验报告
+
+本报告回答两个问题：**反馈预算收紧时，单 agent 的任务表现如何变化？在相同预算档位、相同 N=4 条件下，缓存复用与 PoolAct 协调各带来多少收益？**
+
+实验类型为 Custom study：沿用论文的任务与机制比较思路，以实际冻结矩阵、生成设置和评分契约为准，不作为论文数值的逐项精确复现。本报告按照原 [Kimi-K3 / GLM-5.3 全设置报告](https://github.com/tiannuo-yang/LLM_ExpGym/blob/0ee6f4a2f69a463fdf98f8d787b4ce5662a5af91/results/portable-eval-20260908/full_matrix_report_v1/README.zh.md) 的八章结构，加入已经完成的 Qwen3.8 与 DeepSeek 结果；**仅合并、组织冻结导出，不新增模型调用、不重评分，不修改历史结果。**
+
+这里展示 ExpGym 的 **Free / Moderate / Tight**，以及多 agent 的 **naive / cached / poolact × Moderate / Tight**。四模型在 Search 和 Audit 证据指标上都观察到 Free→Tight 退化；PoolAct 的收益则有明确适用范围：Kimi、GLM、Qwen 的六组主要展示端点均优于 naive，DeepSeek 只在 Tight Search 观察到相应改善，其余结果不支持普适优势。
+
+**存档入口：** [原始 dump 与聚合比较完整索引](ARCHIVE_INDEX.md) · [机器可读索引](ARCHIVE_INDEX.json)。正文第 7 节给出四模型原报告、原件与成本的固定入口。
+
+## 1. 实验设置与覆盖
+
+### 1.1 四模型采用相同的科学矩阵
+
+| 系统 | 任务 | 实际项目数 | 成本档位 | 方法 / agent 数 | 重复设置 |
+| --- | --- | ---: | --- | --- | --- |
+| ExpGym | Search | 73 题：39 whois + 34 whatis | Free / Moderate / Tight | single，N=1 | 每题每设置 1 次 |
+| ExpGym | Evidence Audit | 13 文档，17 hypotheses | Free / Moderate / Tight | single，N=1 | 每文档 3 个固定 hypothesis 顺序，文档内平均一次 |
+| ExpGym | HPO / NAS | 9 任务 | Free / Moderate / Tight | single，N=1 | 每任务每设置 3 个 seed blocks |
+| 多 agent | Search | 39 道 whois | Moderate / Tight | naive / cached / poolact，均 N=4 | 每题每设置 1 个独立池 |
+| 多 agent | Evidence Audit | 13 文档 | Moderate / Tight | naive / cached / poolact，均 N=4 | 默认 hypothesis 顺序，每文档每设置 1 个独立池 |
+| 多 agent | NAS | NASBench101 A / B / C | Moderate / Tight | naive / cached / poolact，均 N=4 | 每任务每设置 3 个独立池 |
+
+9 个单 agent HPO / NAS 任务为 ParamNet adult、higgs、letter，NASBench101 A、B、C，以及 NASBench201 cifar10-valid、cifar100、imagenet16-120。Search 使用 PhantomWiki seed2 / seed3 两个固定 world；相同问题共享 world，不等于相同数量的独立语料。单 agent Search 的 73 题与 Pool 的 39 题、单 agent tuning 的 9 任务与 Pool 的 3 任务不是同一全集，不能直接拿两个系统的 `all` 计算胜负。
+
+每模型对应 **783 个顺序/重复/池级逻辑结果、1,881 个 agent 结果，以及折叠 Audit 顺序后的 705 个分析单元**。物理执行方式不同：Kimi / GLM 的 Audit 三顺序同属一次 invocation，因此每模型为 705 次 invocation；Qwen / DeepSeek 将三顺序拆为三个进程，因此每模型为 783 个执行槽位。不能把这个进程数差异当成增加了实验样本。Kimi 最终结果由原 697 个完成 invocation 与批准恢复的固定 8 项组成，失败尝试及其成本仍保留；其余三模型不以质量表现为理由增加重抽样。
+
+四模型的数据、任务身份和来源见 [输入清单](INPUTS.json) 及各原报告索引。此次核对已有元数据清单：Qwen 与 DeepSeek 的 249 个数据文件路径、大小和 SHA 声明相同；旧 Kimi manifest 的 19 项数据载荷/清单 SHA 与大小也能在新模型数据清单中对应。HPO oracle、任务配置与 Audit 顺序配置的冻结身份一致。这是已发布清单的比对，**不是本次重新读取数据 payload 或 raw 的完整性验证**。
+
+### 1.2 Free、Moderate、Tight 的具体含义
+
+| 档位 | 模拟反馈预算 B | 是否向 agent 展示成本 / 剩余预算 |
+| --- | --- | --- |
+| Free (`cost_free`) | 无有限预算上限 | 否 |
+| Moderate (`cost_moderate`) | 10 × c_base | 是 |
+| Tight (`cost_tight`) | 3 × c_base | 是 |
+
+Search / Audit 的 c_base=300 模拟秒，对应 Moderate 3000、Tight 900 模拟秒；HPO / NAS 使用同一冻结 oracle 的任务级 reference-best evaluation cost。Free 仍受 30 步 / 30 次评估及单次输出上限约束，不是无限生成。这里改变的是**工具反馈预算与成本可见性**，不是把 GPU 时间或 token 上限设为三档；Free 与受限档位的差异不能仅归因于预算数值，而忽略成本可见性。
+
+多 agent 三种方法均为 N=4，每个 agent 各有同一 B，不是整个池只共享一个 B。未运行多 agent Free，也未运行 Pool whatis、ParamNet 或 NASBench201；这些组合是未计划，不是零分或缺失实验。
+
+### 1.3 方法、生成配置与服务实现
+
+| 方法 | 实验含义 |
+| --- | --- |
+| naive | 四个 agent 独立探索，不共享观察缓存和探索图；结束后按原任务规则聚合。 |
+| cached | 共享已经完成、当前模拟时间可见的相同工具调用结果，避免重复支付该次反馈的模拟成本。 |
+| poolact | 在 cached 基础上提供共享探索图与协调决策；决策与动作 claim 使用 reasoning lock，工具执行在锁外。 |
+
+池内成员不是四次独立重复。PoolAct 的共享图注入、一次 LLM 决策和动作登记受同一推理锁保护，因而池内模型推理并发与 naive / cached 不同；全局队列并行的是独立 pool，不能以 `workers × N` 直接计算 PoolAct 的同时推理数。
+
+| 配置 | Kimi-K3 | GLM-5.3 | Qwen3.8-2.4T-A95B-FP8 | DeepSeek-V4-Flash-0731 |
+| --- | --- | --- | --- | --- |
+| 模型服务 | 自部署，SGLang / OpenAI-compatible native tools | 同左 | 同左 | 同左 |
+| Temperature / top-p | 1.0 / 1.0 | 1.0 / 0.95 | 1.0 / 0.95 | 1.0 / 0.95 |
+| top-k 请求 | 未显式发送 | 未显式发送 | 20 | 未显式发送 |
+| 单次 max_tokens | 32768 | 32768 | 32768 | 32768 |
+| reasoning_effort 请求 | `max` | `max` | `xhigh` | `max` |
+| chat_template_kwargs 请求 | `{"thinking":true,"thinking_effort":"max"}` | `{"clear_thinking":false,"reasoning_effort":"max"}` | `{"enable_thinking":true,"preserve_thinking":true}` | `{"thinking":true}` |
+| max_steps / max_evals | 30 / 30 | 30 / 30 | 30 / 30 | 30 / 30 |
+| 服务端 context | 524288 | 262144 | 262144 | 1048576 |
+| Pool 本地输入 cap | 131072 近似 tokens | 同左 | 同左 | 同左 |
+| HTTP timeout | 3600 s | 3600 s | 3600 s | 7200 s |
+| 本轮资源与拓扑 | 8 节点 × 8 GPU；4 个 TP16 / EP16 副本 | 8 节点 × 8 GPU；4 个 TP16 / EP1 副本 | 4 节点 × 8 GPU；1 个 TP8 × PP4 / EP1 副本 | 4 节点 × 8 GPU；4 个 TP8 / PP1 / EP1 副本 |
+| 实际正式队列 workers 上限 | 32 | 32 | 首 session 16；自然 drain 后以 6 续接 | 全程 32 |
+
+HPO seed blocks 为 2200 / 2204 / 2208；池内四成员使用 block 至 block+3。Search / Audit 使用首个 block，ExpGym Audit 三顺序为 2200 / 2201 / 2202。标签相同不证明采样逐 token 可重复，也不证明不同标签构成独立生成重复。原生工具协议最多一次 protocol repair，HTTP 重试上限 2；Pool 本地 context 是序列化字符及工具 schema 的近似 token 估计，不是服务端精确 tokenizer 计数。ExpGym 未另设本地 context cap。
+
+实际实验源码为 Kimi / GLM [`8dfea72`](https://github.com/tiannuo-yang/LLM_ExpGym/tree/8dfea72931d952ad90f1c722a83957ab23afc6bf)、Qwen [`21b4de9`](https://github.com/tiannuo-yang/LLM_ExpGym/tree/21b4de99b2a014874e3cec1595eaa40762b0c564)、DeepSeek [`5aabf7f`](https://github.com/tiannuo-yang/LLM_ExpGym/tree/5aabf7f6b568a1281fb677a94c19cfb2e8ce98b8)。科学矩阵和评分端点相同，不代表全部执行源码、采样器、模板和部署条件相同。
+
+Qwen 与 DeepSeek 均使用独立 uv 运行时：CPython 3.12.13、SGLang 0.5.17、Torch 2.11.0+cu129。Qwen 未修改 SGLang sampler/model 源码，采用 FP8 checkpoint、float32 SSM 与最终 page-size=1；模板不支持 `max`，使用其最高档 `xhigh`。DeepSeek 在同一 SGLang 基线上应用精确官方 [`0592695` effort 编码修复](https://github.com/sgl-project/sglang/commit/059269594c5f245f77dad711631843c299d7713f)，使0731的 `max` 真正对应最高档，而非旧 encoder 的 high 映射；FP4 experts / FP8 dense、Marlin W4A16 与 dsv4 attention 保持显式配置。最高 effort **不等于等量推理**，DeepSeek 的 32768 输出上限也不等于厂商推荐的 384K 长输出配置。
+
+两个后续模型显式使用 SGLang 消费的 `cache_salt`；旧客户端字段为 `prompt_cache_key`，不能将后续验证过的行为反写为旧服务已验证。这里的推理前缀缓存与 PoolAct 共享工具观察缓存是不同机制。forced-final 的 HTTP schema/history 保留也不代表模型模板相同：Qwen 模板会移除工具定义/说明、保留历史；DeepSeek encoder 仍保留工具定义及 reasoning/tool history。新两模型均完成对应原生工具验证，但这不消除模型间的模板与部署差异。
+
+可查原始固定设置：[Kimi / GLM 设置证据](https://github.com/tiannuo-yang/LLM_ExpGym/blob/6119f9d136c9ed1f06a7bedd7371be0deb9b5d59/results/portable-eval-20260908/full_delivery_v5/kimi-k3-fixed8-composite-20260910/analysis/claim_setting_preflight_v1/EVIDENCE.json)；[Qwen 输入身份](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ff8c572b6a00c33964a00a8fb991fd79dcf900e4/results/qwen38-20260910/study/RUN_INPUTS_launch02.json)、[服务计划](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ff8c572b6a00c33964a00a8fb991fd79dcf900e4/results/qwen38-20260910/serving/launch02/plan.json)；[DeepSeek 输入身份](https://github.com/tiannuo-yang/LLM_ExpGym/blob/8c79111de3398d12fb36ba349d8f4266f2330200/results/deepseek-flash-0731-20260911/study/formal_v1/RUN_INPUTS.json)、[服务计划](https://github.com/tiannuo-yang/LLM_ExpGym/blob/8c79111de3398d12fb36ba349d8f4266f2330200/results/deepseek-flash-0731-20260911/serving/launch02/plan.json)、[provider 契约](https://github.com/tiannuo-yang/LLM_ExpGym/blob/8c79111de3398d12fb36ba349d8f4266f2330200/results/deepseek-flash-0731-20260911/study/provider_contract.json)。预启动计划内的 readiness 标志不替代原研究完成后的验收记录。
+
+### 1.4 指标、完整分母与汇总口径
+
+- Search：集合 F1；Audit：EA 为精确证据集合准确率，LA 为标签准确率。F1 / EA / LA 为 0–1 分数；差值 0.01 是 1 个百分点。
+- HPO / NAS：Gap 是冻结 oracle 归一化后的效用，越高越好；raw performance 是原任务分数。采用冻结 `legacy` final policy，不把 Gap 当作越低越好的 regret，也不从汇总 raw 分数反推 Gap。成员先按 oracle 计算并截零，再算 MI；只设下界，不截到 100，超过参考最优时可以大于 100。
+- MI 为成员分数均值，MV 为原投票规则的结果，BoN 为四成员最佳分数。MI 与 MV / BoN 均为池级端点，不是四份独立样本。
+- 先在 item 内平均重复，再对 item 等权平均；ExpGym Audit 三顺序已经在文档内折叠一次，不再重复计权。三个 blocks 的 SD 是描述性变动，不是标准误或独立生成的证明；R1 不伪造重复 SD。
+- `task-abstention-v1` 下，正常 Search / Audit 空回答通过原 evaluator 得到空预测分数，原 null 仍保留；HPO 缺最终配置不可评分。完整均值或配对差只在计划分母全部已知时给出；unknown 不补零，known 子集另列，不能悄悄取交集或替换完整端点。
+
+本次不新增显著性检验或跨模型平均总分。文中“主要展示端点”指 ExpGym 的 F1 / EA / Gap，以及 Pool 的 F1-MV / EA-MV / Gap-MI；这是沿用报告结构的展示选择，不将回顾性矩阵包装成事前预注册。
+
+## 2. 主问题一：反馈预算收紧，ExpGym 是否退化？
+
+**Search 的预算退化在四模型上最一致，Audit 的证据指标也有相同总体方向。** Free / Moderate / Tight 完整列用于区分退化发生在哪一段，而不只是给出 Free−Tight 一次差值。Kimi、GLM、Qwen 的九任务 HPO 总体也观察到 Free→Tight Gap 下降；DeepSeek 的 HPO 完整端点不可评分，不能用于补成“四模型 HPO 结论一致”。
+
+### 2.1 Search / Audit
+
+| 切片 | 指标 | 预算 | 策略 | items | Kimi-K3 | GLM-5.3 | Qwen3.8 | DeepSeek-0731 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| all | f1 | free | single | 73 | 0.635911 | 0.651102 | 0.581486 | 0.438134 |
+| all | f1 | moderate | single | 73 | 0.496169 | 0.532761 | 0.509827 | 0.421117 |
+| all | f1 | tight | single | 73 | 0.157561 | 0.192341 | 0.184709 | 0.169184 |
+| whois | f1 | free | single | 39 | 0.658862 | 0.682651 | 0.641102 | 0.498341 |
+| whois | f1 | moderate | single | 39 | 0.573004 | 0.642842 | 0.611283 | 0.497486 |
+| whois | f1 | tight | single | 39 | 0.170136 | 0.230575 | 0.225691 | 0.177828 |
+| whatis | f1 | free | single | 34 | 0.609584 | 0.614914 | 0.513103 | 0.369073 |
+| whatis | f1 | moderate | single | 34 | 0.408034 | 0.406491 | 0.393451 | 0.333516 |
+| whatis | f1 | tight | single | 34 | 0.143137 | 0.148485 | 0.137701 | 0.159269 |
+| all | evidence_acc | free | single | 13 | 0.894419 | 0.684766 | 0.918552 | 0.639517 |
+| all | evidence_acc | moderate | single | 13 | 0.687783 | 0.678733 | 0.749623 | 0.586727 |
+| all | evidence_acc | tight | single | 13 | 0.515837 | 0.502262 | 0.583710 | 0.475113 |
+| all | label_acc | free | single | 13 | 0.926094 | 0.692308 | 0.947210 | 0.668175 |
+| all | label_acc | moderate | single | 13 | 0.853695 | 0.760181 | 0.882353 | 0.755656 |
+| all | label_acc | tight | single | 13 | 0.794872 | 0.736048 | 0.831071 | 0.702866 |
+
+
+Audit 的分析 R1 是已经平均三个固定顺序的文档级单元，并非只运行一个顺序。Search 表列出 whois / whatis；原逐题导出保留两个 world 的题目身份，不按结果方向挑选题目。本次不另算按 world 汇总。
+
+EA 与 LA 需分开解释：GLM、DeepSeek 的 Audit 标签准确率在 Moderate / Tight 均高于各自 Free，但精确证据集合准确率从 Free 到 Tight 下降。因此本轮稳定观察到的是**证据收集端点退化**，不能扩大为“Audit 的所有能力或所有指标同时退化”。
+
+### 2.2 HPO：全体、任务家族及九个任务
+
+| 切片 | 指标 | 预算 | 策略 | items | Kimi-K3 | GLM-5.3 | Qwen3.8 | DeepSeek-0731 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| all | gap | free | single | 9 | 98.512910 | 97.911143 | 97.465205 | unknown (20/27) |
+| all | gap | moderate | single | 9 | 94.230104 | 96.154560 | 95.133369 | unknown (25/27) |
+| all | gap | tight | single | 9 | 89.683717 | 86.066889 | 85.709990 | unknown (25/27) |
+| all | raw_perf | free | single | 9 | 0.830424 | 0.829110 | 0.828712 | unknown (20/27) |
+| all | raw_perf | moderate | single | 9 | 0.819970 | 0.824766 | 0.825155 | unknown (25/27) |
+| all | raw_perf | tight | single | 9 | 0.814494 | 0.801956 | 0.806783 | unknown (25/27) |
+| family=paramnet | gap | free | single | 3 | 97.075883 | 96.038788 | 95.282291 | unknown (5/9) |
+| family=paramnet | gap | moderate | single | 3 | 87.756501 | 94.240269 | 94.952694 | unknown (8/9) |
+| family=paramnet | gap | tight | single | 3 | 79.422483 | 79.401892 | 77.865845 | unknown (7/9) |
+| family=paramnet | raw_perf | free | single | 3 | 0.843288 | 0.839029 | 0.839365 | unknown (5/9) |
+| family=paramnet | raw_perf | moderate | single | 3 | 0.818739 | 0.835086 | 0.841848 | unknown (8/9) |
+| family=paramnet | raw_perf | tight | single | 3 | 0.823773 | 0.815296 | 0.817976 | unknown (7/9) |
+| family=nasbench101 | gap | free | single | 3 | 98.692013 | 99.057476 | 98.661766 | unknown (7/9) |
+| family=nasbench101 | gap | moderate | single | 3 | 97.857181 | 97.736559 | 96.510997 | 71.877135 |
+| family=nasbench101 | gap | tight | single | 3 | 94.968099 | 90.761443 | 93.815152 | 86.864351 |
+| family=nasbench101 | raw_perf | free | single | 3 | 0.941770 | 0.943450 | 0.942100 | unknown (7/9) |
+| family=nasbench101 | raw_perf | moderate | single | 3 | 0.937407 | 0.936239 | 0.933920 | 0.711108 |
+| family=nasbench101 | raw_perf | tight | single | 3 | 0.918447 | 0.898441 | 0.914118 | 0.883410 |
+| family=nasbench201 | gap | free | single | 3 | 99.770835 | 98.637164 | 98.451560 | unknown (8/9) |
+| family=nasbench201 | gap | moderate | single | 3 | 97.076629 | 96.486852 | 93.936417 | unknown (8/9) |
+| family=nasbench201 | gap | tight | single | 3 | 94.660569 | 88.037331 | 85.448973 | 76.621201 |
+| family=nasbench201 | raw_perf | free | single | 3 | 0.706212 | 0.704850 | 0.704670 | unknown (8/9) |
+| family=nasbench201 | raw_perf | moderate | single | 3 | 0.703764 | 0.702974 | 0.699696 | unknown (8/9) |
+| family=nasbench201 | raw_perf | tight | single | 3 | 0.701261 | 0.692131 | 0.688255 | 0.679044 |
+| task=hpobench:nasbench101:A | gap | free | single | 1 | 99.258011 | 99.579172 | 99.580753 | unknown (2/3) |
+| task=hpobench:nasbench101:A | gap | moderate | single | 1 | 98.079371 | 99.003299 | 98.190116 | 64.140107 |
+| task=hpobench:nasbench101:A | gap | tight | single | 1 | 90.517091 | 85.756650 | 89.675431 | 90.121573 |
+| task=hpobench:nasbench101:A | raw_perf | free | single | 1 | 0.940861 | 0.943120 | 0.943131 | unknown (2/3) |
+| task=hpobench:nasbench101:A | raw_perf | moderate | single | 1 | 0.932570 | 0.939069 | 0.933349 | 0.612947 |
+| task=hpobench:nasbench101:A | raw_perf | tight | single | 1 | 0.879374 | 0.845887 | 0.873453 | 0.876591 |
+| task=hpobench:nasbench101:B | gap | free | single | 1 | 97.454035 | 97.969343 | 97.113406 | 86.802912 |
+| task=hpobench:nasbench101:B | gap | moderate | single | 1 | 96.585000 | 97.467138 | 92.650329 | 57.666268 |
+| task=hpobench:nasbench101:B | gap | tight | single | 1 | 95.759638 | 89.995192 | 93.270448 | 85.178388 |
+| task=hpobench:nasbench101:B | raw_perf | free | single | 1 | 0.942463 | 0.943777 | 0.941595 | 0.915320 |
+| task=hpobench:nasbench101:B | raw_perf | moderate | single | 1 | 0.940249 | 0.942497 | 0.930222 | 0.609698 |
+| task=hpobench:nasbench101:B | raw_perf | tight | single | 1 | 0.938145 | 0.923455 | 0.931802 | 0.911180 |
+| task=hpobench:nasbench101:C | gap | free | single | 1 | 99.363994 | 99.623912 | 99.291139 | unknown (2/3) |
+| task=hpobench:nasbench101:C | gap | moderate | single | 1 | 98.907173 | 96.739239 | 98.692546 | 93.825030 |
+| task=hpobench:nasbench101:C | gap | tight | single | 1 | 98.627567 | 96.532487 | 98.499576 | 85.293093 |
+| task=hpobench:nasbench101:C | raw_perf | free | single | 1 | 0.941985 | 0.943454 | 0.941573 | unknown (2/3) |
+| task=hpobench:nasbench101:C | raw_perf | moderate | single | 1 | 0.939403 | 0.927150 | 0.938190 | 0.910679 |
+| task=hpobench:nasbench101:C | raw_perf | tight | single | 1 | 0.937823 | 0.925982 | 0.937099 | 0.862458 |
+| task=hpobench:nasbench201:cifar10-valid | gap | free | single | 1 | 100.000000 | 99.391401 | 99.302065 | unknown (2/3) |
+| task=hpobench:nasbench201:cifar10-valid | gap | moderate | single | 1 | 93.657170 | 93.880509 | 93.216075 | 86.130643 |
+| task=hpobench:nasbench201:cifar10-valid | gap | tight | single | 1 | 90.206581 | 93.657170 | 96.460076 | 82.311545 |
+| task=hpobench:nasbench201:cifar10-valid | raw_perf | free | single | 1 | 0.916067 | 0.915582 | 0.915511 | unknown (2/3) |
+| task=hpobench:nasbench201:cifar10-valid | raw_perf | moderate | single | 1 | 0.911018 | 0.911196 | 0.910667 | 0.905027 |
+| task=hpobench:nasbench201:cifar10-valid | raw_perf | tight | single | 1 | 0.908271 | 0.911018 | 0.913249 | 0.901987 |
+| task=hpobench:nasbench201:cifar100 | gap | free | single | 1 | 100.000000 | 99.171863 | 97.652095 | 94.248544 |
+| task=hpobench:nasbench201:cifar100 | gap | moderate | single | 1 | 100.000000 | 99.171863 | 100.000000 | 87.914661 |
+| task=hpobench:nasbench201:cifar100 | gap | tight | single | 1 | 97.479188 | 90.981498 | 90.080558 | 90.990598 |
+| task=hpobench:nasbench201:cifar100 | raw_perf | free | single | 1 | 0.735033 | 0.734022 | 0.732167 | 0.728011 |
+| task=hpobench:nasbench201:cifar100 | raw_perf | moderate | single | 1 | 0.735033 | 0.734022 | 0.735033 | 0.720278 |
+| task=hpobench:nasbench201:cifar100 | raw_perf | tight | single | 1 | 0.731956 | 0.724022 | 0.722922 | 0.724033 |
+| task=hpobench:nasbench201:imagenet16-120 | gap | free | single | 1 | 99.312504 | 97.348228 | 98.400519 | 89.841892 |
+| task=hpobench:nasbench201:imagenet16-120 | gap | moderate | single | 1 | 97.572717 | 96.408183 | 88.593174 | unknown (2/3) |
+| task=hpobench:nasbench201:imagenet16-120 | gap | tight | single | 1 | 96.295938 | 79.473326 | 69.806286 | 56.561461 |
+| task=hpobench:nasbench201:imagenet16-120 | raw_perf | free | single | 1 | 0.467537 | 0.464944 | 0.466333 | 0.455037 |
+| task=hpobench:nasbench201:imagenet16-120 | raw_perf | moderate | single | 1 | 0.465241 | 0.463704 | 0.453389 | unknown (2/3) |
+| task=hpobench:nasbench201:imagenet16-120 | raw_perf | tight | single | 1 | 0.463556 | 0.441352 | 0.428593 | 0.411111 |
+| task=hpobench:paramnet:adult:steps | gap | free | single | 1 | 97.856995 | 95.601586 | 94.590022 | unknown (2/3) |
+| task=hpobench:paramnet:adult:steps | gap | moderate | single | 1 | 87.329255 | 95.414265 | 91.982442 | 87.366726 |
+| task=hpobench:paramnet:adult:steps | gap | tight | single | 1 | 77.355993 | 72.013444 | 76.921396 | unknown (2/3) |
+| task=hpobench:paramnet:adult:steps | raw_perf | free | single | 1 | 0.852849 | 0.851920 | 0.851503 | unknown (2/3) |
+| task=hpobench:paramnet:adult:steps | raw_perf | moderate | single | 1 | 0.848512 | 0.851843 | 0.850429 | 0.848528 |
+| task=hpobench:paramnet:adult:steps | raw_perf | tight | single | 1 | 0.844404 | 0.842204 | 0.844225 | unknown (2/3) |
+| task=hpobench:paramnet:higgs:steps | gap | free | single | 1 | 94.148953 | 95.829008 | 93.995253 | unknown (2/3) |
+| task=hpobench:paramnet:higgs:steps | gap | moderate | single | 1 | 89.082285 | 92.269269 | 93.989956 | 92.657927 |
+| task=hpobench:paramnet:higgs:steps | gap | tight | single | 1 | 66.679766 | 78.314729 | 65.533231 | unknown (2/3) |
+| task=hpobench:paramnet:higgs:steps | raw_perf | free | single | 1 | 0.715973 | 0.717435 | 0.715839 | unknown (2/3) |
+| task=hpobench:paramnet:higgs:steps | raw_perf | moderate | single | 1 | 0.711564 | 0.714337 | 0.715835 | 0.714676 |
+| task=hpobench:paramnet:higgs:steps | raw_perf | tight | single | 1 | 0.692066 | 0.702193 | 0.691069 | unknown (2/3) |
+| task=hpobench:paramnet:letter:steps | gap | free | single | 1 | 99.221702 | 96.685771 | 97.261597 | unknown (1/3) |
+| task=hpobench:paramnet:letter:steps | gap | moderate | single | 1 | 86.857961 | 95.037272 | 98.885684 | unknown (2/3) |
+| task=hpobench:paramnet:letter:steps | gap | tight | single | 1 | 94.231691 | 87.877503 | 91.142909 | 82.366233 |
+| task=hpobench:paramnet:letter:steps | raw_perf | free | single | 1 | 0.961043 | 0.947731 | 0.950754 | unknown (1/3) |
+| task=hpobench:paramnet:letter:steps | raw_perf | moderate | single | 1 | 0.896141 | 0.939077 | 0.959279 | unknown (2/3) |
+| task=hpobench:paramnet:letter:steps | raw_perf | tight | single | 1 | 0.934848 | 0.901493 | 0.918634 | 0.872561 |
+
+
+此处完整呈现 ParamNet、NASBench101、NASBench201 及九个任务，不能用表现较好的 NAS 子集替代单 agent HPO 的 `all`。总体均值的下降也不代表每项任务、每次重复都下降。
+
+DeepSeek Exp tuning 共 70/81 个 agent 可评分：Free 为 20/27，Moderate / Tight 各为 25/27。因此三档九任务 `all` 的完整 Gap / raw 均值保持 unknown；已知子集的均值只用于展示已观察到的范围，不能拿不同可评分子集之差判定总体退化或改善。缺少的是最终配置，不是已证明此前没有任何可评分工具观察；不在报告阶段用历史 best-observed 替换冻结 missing-final 策略。
+
+### 2.3 HPO：三个 seed blocks
+
+| 模型 | 预算 | 策略 | 指标 | 2200 | 2204 | 2208 | 三块均值 | 描述 SD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Kimi-K3 | free | single | gap | 98.323337 | 98.022659 | 99.192735 | 98.512910 | 0.607637 |
+| Kimi-K3 | free | single | raw_perf | 0.830364 | 0.830405 | 0.830501 | 0.830424 | 0.000070 |
+| Kimi-K3 | moderate | single | gap | 91.888380 | 96.720920 | 94.081011 | 94.230104 | 2.419717 |
+| Kimi-K3 | moderate | single | raw_perf | 0.809523 | 0.829398 | 0.820988 | 0.819970 | 0.009977 |
+| Kimi-K3 | tight | single | gap | 94.484532 | 84.994278 | 89.572341 | 89.683717 | 4.746108 |
+| Kimi-K3 | tight | single | raw_perf | 0.815959 | 0.810399 | 0.817122 | 0.814494 | 0.003593 |
+| GLM-5.3 | free | single | gap | 97.433902 | 97.962348 | 98.337178 | 97.911143 | 0.453810 |
+| GLM-5.3 | free | single | raw_perf | 0.825708 | 0.830673 | 0.830947 | 0.829110 | 0.002949 |
+| GLM-5.3 | moderate | single | gap | 94.984465 | 98.060230 | 95.418984 | 96.154560 | 1.664598 |
+| GLM-5.3 | moderate | single | raw_perf | 0.823852 | 0.825649 | 0.824797 | 0.824766 | 0.000899 |
+| GLM-5.3 | tight | single | gap | 86.858680 | 88.946705 | 82.395281 | 86.066889 | 3.346713 |
+| GLM-5.3 | tight | single | raw_perf | 0.801129 | 0.807389 | 0.797350 | 0.801956 | 0.005070 |
+| Qwen3.8 | free | single | gap | 97.218451 | 97.423743 | 97.753422 | 97.465205 | 0.269885 |
+| Qwen3.8 | free | single | raw_perf | 0.829311 | 0.827017 | 0.829808 | 0.828712 | 0.001489 |
+| Qwen3.8 | moderate | single | gap | 96.950300 | 95.573292 | 92.876516 | 95.133369 | 2.072216 |
+| Qwen3.8 | moderate | single | raw_perf | 0.827805 | 0.825213 | 0.822446 | 0.825155 | 0.002680 |
+| Qwen3.8 | tight | single | gap | 86.407961 | 85.139476 | 85.582533 | 85.709990 | 0.643776 |
+| Qwen3.8 | tight | single | raw_perf | 0.813929 | 0.800823 | 0.805597 | 0.806783 | 0.006633 |
+| DeepSeek-0731 | free | single | gap | unknown (8/9) | unknown (7/9) | unknown (5/9) | unknown (20/27) | unknown |
+| DeepSeek-0731 | free | single | raw_perf | unknown (8/9) | unknown (7/9) | unknown (5/9) | unknown (20/27) | unknown |
+| DeepSeek-0731 | moderate | single | gap | 82.417808 | unknown (8/9) | unknown (8/9) | unknown (25/27) | unknown |
+| DeepSeek-0731 | moderate | single | raw_perf | 0.713211 | unknown (8/9) | unknown (8/9) | unknown (25/27) | unknown |
+| DeepSeek-0731 | tight | single | gap | 84.428658 | 82.732146 | unknown (7/9) | unknown (25/27) | unknown |
+| DeepSeek-0731 | tight | single | raw_perf | 0.798632 | 0.799665 | unknown (7/9) | unknown (25/27) | unknown |
+
+
+同一 block 标签跨任务形成一个描述性重复层；三个 blocks 不是九个全新任务，更不因为池中有四个成员就变成十二次独立重复。完整结果、unknown 与逐任务对应关系见 [REPEATS.md](REPEATS.md) 和 [by_outerseed.csv](by_outerseed.csv)。
+
+## 3. 主问题二：缓存复用与协调，分别改善了什么？
+
+这里比较同一模型、相同预算档位与 N=4 的三个方法。**cached−naive** 表示加入观察复用后的描述性差异；**poolact−cached** 表示进一步加入探索图/协调后的差异；**poolact−naive** 是整体策略比较。相同模拟反馈预算不等于相同 token、推理时间或 GPU 成本，两个独立 run 的差值也不是已隔离全部因素的因果估计。
+
+Kimi、GLM、Qwen 的 Search F1-MV、Audit EA-MV、NAS Gap-MI，在 Moderate / Tight 两档共六组主要展示端点上均有正的 poolact−naive 差值。这个跨三个模型的共同方向值得保留，但 DeepSeek 的结果说明它**不是四模型上的普适优势**：仅 Tight Search 主端点改善，Moderate Search 与两档 Audit 方向相反，NAS 完整比较未知。
+
+| 模型 | 预算 | 指标 | cached − naive | poolact − cached | poolact − naive |
+| --- | --- | --- | --- | --- | --- |
+| Kimi-K3 | moderate | f1_mv | -0.003885 | +0.025375 | +0.021490 |
+| Kimi-K3 | moderate | evidence_acc_mv | +0.027149 | +0.171946 | +0.199095 |
+| Kimi-K3 | moderate | label_acc_mv | +0.013575 | +0.036199 | +0.049774 |
+| Kimi-K3 | moderate | gap_mi | -0.077726 | +0.595188 | +0.517462 |
+| Kimi-K3 | moderate | gap_bon | -0.147632 | +0.031723 | -0.115908 |
+| Kimi-K3 | tight | f1_mv | -0.025641 | +0.117094 | +0.091453 |
+| Kimi-K3 | tight | evidence_acc_mv | -0.004525 | +0.081448 | +0.076923 |
+| Kimi-K3 | tight | label_acc_mv | -0.004525 | +0.036199 | +0.031674 |
+| Kimi-K3 | tight | gap_mi | -0.146798 | +1.940211 | +1.793413 |
+| Kimi-K3 | tight | gap_bon | +0.373105 | -0.001140 | +0.371965 |
+| GLM-5.3 | moderate | f1_mv | +0.036447 | +0.000694 | +0.037141 |
+| GLM-5.3 | moderate | evidence_acc_mv | +0.036199 | +0.131222 | +0.167421 |
+| GLM-5.3 | moderate | label_acc_mv | +0.009050 | +0.045249 | +0.054299 |
+| GLM-5.3 | moderate | gap_mi | +0.188003 | +0.904495 | +1.092498 |
+| GLM-5.3 | moderate | gap_bon | +0.108255 | +0.264798 | +0.373053 |
+| GLM-5.3 | tight | f1_mv | +0.000000 | +0.091453 | +0.091453 |
+| GLM-5.3 | tight | evidence_acc_mv | +0.013575 | +0.090498 | +0.104072 |
+| GLM-5.3 | tight | label_acc_mv | +0.022624 | +0.013575 | +0.036199 |
+| GLM-5.3 | tight | gap_mi | +2.222250 | +9.994021 | +12.216271 |
+| GLM-5.3 | tight | gap_bon | +0.739115 | +3.914245 | +4.653360 |
+| Qwen3.8 | moderate | f1_mv | -0.000407 | +0.023118 | +0.022711 |
+| Qwen3.8 | moderate | evidence_acc_mv | +0.058824 | +0.190045 | +0.248869 |
+| Qwen3.8 | moderate | label_acc_mv | -0.009050 | +0.067873 | +0.058824 |
+| Qwen3.8 | moderate | gap_mi | +0.800382 | +1.146151 | +1.946533 |
+| Qwen3.8 | moderate | gap_bon | +0.302657 | +0.144411 | +0.447068 |
+| Qwen3.8 | tight | f1_mv | +0.050183 | -0.026252 | +0.023932 |
+| Qwen3.8 | tight | evidence_acc_mv | +0.040724 | +0.036199 | +0.076923 |
+| Qwen3.8 | tight | label_acc_mv | +0.004525 | +0.018100 | +0.022624 |
+| Qwen3.8 | tight | gap_mi | +0.136512 | +5.513071 | +5.649583 |
+| Qwen3.8 | tight | gap_bon | -0.373878 | +0.140699 | -0.233179 |
+| DeepSeek-0731 | moderate | f1_mv | +0.038462 | -0.051282 | -0.012821 |
+| DeepSeek-0731 | moderate | evidence_acc_mv | -0.004525 | -0.253394 | -0.257919 |
+| DeepSeek-0731 | moderate | label_acc_mv | -0.049774 | -0.289593 | -0.339367 |
+| DeepSeek-0731 | moderate | gap_mi | unknown (1/9) | unknown (0/9) | unknown (0/9) |
+| DeepSeek-0731 | moderate | gap_bon | unknown (1/9) | unknown (0/9) | unknown (0/9) |
+| DeepSeek-0731 | tight | f1_mv | +0.017094 | +0.031674 | +0.048768 |
+| DeepSeek-0731 | tight | evidence_acc_mv | -0.126697 | -0.303167 | -0.429864 |
+| DeepSeek-0731 | tight | label_acc_mv | -0.190045 | -0.371041 | -0.561086 |
+| DeepSeek-0731 | tight | gap_mi | unknown (0/9) | unknown (0/9) | unknown (1/9) |
+| DeepSeek-0731 | tight | gap_bon | unknown (0/9) | unknown (0/9) | unknown (1/9) |
+
+
+### 3.1 Search：Tight 下出现四模型共同的 PoolAct−naive 改善
+
+| 切片 | 指标 | 预算 | 策略 | items | Kimi-K3 | GLM-5.3 | Qwen3.8 | DeepSeek-0731 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| all | f1_mi | moderate | naive | 39 | 0.623870 | 0.599406 | 0.588896 | 0.090769 |
+| all | f1_mi | moderate | cached | 39 | 0.632024 | 0.620111 | 0.590689 | 0.169872 |
+| all | f1_mi | moderate | poolact | 39 | 0.640914 | 0.659089 | 0.623277 | 0.079060 |
+| all | f1_mi | tight | naive | 39 | 0.201002 | 0.203255 | 0.185520 | 0.025641 |
+| all | f1_mi | tight | cached | 39 | 0.192511 | 0.203255 | 0.223102 | 0.047009 |
+| all | f1_mi | tight | poolact | 39 | 0.272395 | 0.247425 | 0.226900 | 0.054927 |
+| all | f1_mv | moderate | naive | 39 | 0.645919 | 0.620278 | 0.612138 | 0.132479 |
+| all | f1_mv | moderate | cached | 39 | 0.642034 | 0.656725 | 0.611731 | 0.170940 |
+| all | f1_mv | moderate | poolact | 39 | 0.667409 | 0.657419 | 0.634849 | 0.119658 |
+| all | f1_mv | tight | naive | 39 | 0.212871 | 0.208597 | 0.182956 | 0.025641 |
+| all | f1_mv | tight | cached | 39 | 0.187230 | 0.208597 | 0.233139 | 0.042735 |
+| all | f1_mv | tight | poolact | 39 | 0.304324 | 0.300050 | 0.206888 | 0.074409 |
+
+
+四模型的 Tight Search 投票 F1 均高于各自 naive。这是本次 PoolAct 结果中跨模型最一致的方向，但并不等价于 PoolAct 总是最优：Qwen Tight Search 的 F1-MV 仍低于 cached；DeepSeek Moderate Search 的 F1-MV 则低于 naive 和 cached。缓存与协调的差异必须保留三个方法才能看清，不能只展示一个 baseline。
+
+MI 与 MV 分别反映成员平均表现和最终投票质量，两者可不沿同一方向变化。不能在某个对照不利时把主要展示端点从 MV 换成 MI，或事后改成挑选最优成员答案。
+
+### 3.2 Audit：证据集合与标签投票分别报告
+
+| 切片 | 指标 | 预算 | 策略 | items | Kimi-K3 | GLM-5.3 | Qwen3.8 | DeepSeek-0731 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| all | evidence_acc_mi | moderate | naive | 13 | 0.702489 | 0.654977 | 0.676471 | 0.322398 |
+| all | evidence_acc_mi | moderate | cached | 13 | 0.670814 | 0.668552 | 0.712670 | 0.364253 |
+| all | evidence_acc_mi | moderate | poolact | 13 | 0.908371 | 0.802036 | 0.924208 | 0.109729 |
+| all | evidence_acc_mi | tight | naive | 13 | 0.545249 | 0.549774 | 0.552036 | 0.185520 |
+| all | evidence_acc_mi | tight | cached | 13 | 0.542986 | 0.585973 | 0.590498 | 0.128959 |
+| all | evidence_acc_mi | tight | poolact | 13 | 0.602941 | 0.607466 | 0.632353 | 0.016968 |
+| all | evidence_acc_mv | moderate | naive | 13 | 0.737557 | 0.809955 | 0.687783 | 0.592760 |
+| all | evidence_acc_mv | moderate | cached | 13 | 0.764706 | 0.846154 | 0.746606 | 0.588235 |
+| all | evidence_acc_mv | moderate | poolact | 13 | 0.936652 | 0.977376 | 0.936652 | 0.334842 |
+| all | evidence_acc_mv | tight | naive | 13 | 0.552036 | 0.588235 | 0.561086 | 0.497738 |
+| all | evidence_acc_mv | tight | cached | 13 | 0.547511 | 0.601810 | 0.601810 | 0.371041 |
+| all | evidence_acc_mv | tight | poolact | 13 | 0.628959 | 0.692308 | 0.638009 | 0.067873 |
+| all | label_acc_mi | moderate | naive | 13 | 0.894796 | 0.757919 | 0.890271 | 0.400452 |
+| all | label_acc_mi | moderate | cached | 13 | 0.840498 | 0.753394 | 0.891403 | 0.447964 |
+| all | label_acc_mi | moderate | poolact | 13 | 0.928733 | 0.808824 | 0.953620 | 0.149321 |
+| all | label_acc_mi | tight | naive | 13 | 0.822398 | 0.792986 | 0.816742 | 0.236425 |
+| all | label_acc_mi | tight | cached | 13 | 0.811086 | 0.869910 | 0.837104 | 0.171946 |
+| all | label_acc_mi | tight | poolact | 13 | 0.846154 | 0.798643 | 0.854072 | 0.032805 |
+| all | label_acc_mv | moderate | naive | 13 | 0.923077 | 0.927602 | 0.900452 | 0.787330 |
+| all | label_acc_mv | moderate | cached | 13 | 0.936652 | 0.936652 | 0.891403 | 0.737557 |
+| all | label_acc_mv | moderate | poolact | 13 | 0.972851 | 0.981900 | 0.959276 | 0.447964 |
+| all | label_acc_mv | tight | naive | 13 | 0.841629 | 0.868778 | 0.832579 | 0.692308 |
+| all | label_acc_mv | tight | cached | 13 | 0.837104 | 0.891403 | 0.837104 | 0.502262 |
+| all | label_acc_mv | tight | poolact | 13 | 0.873303 | 0.904977 | 0.855204 | 0.131222 |
+
+
+Kimi、GLM、Qwen 在两档 Audit 的 EA-MV 均有 poolact−naive 改善；DeepSeek 的 EA-MV 与 LA-MV 在两档都更低。故报告支持“协调收益依赖模型与任务交互”，而不是“同一图共享机制对所有模型都稳定有利”。EA、LA 的 MI 与 MV 同时保留，也不把标签正确误写成证据完整。
+
+### 3.3 NAS：成员平均效用与 best-of-4 分开看
+
+| 切片 | 指标 | 预算 | 策略 | items | Kimi-K3 | GLM-5.3 | Qwen3.8 | DeepSeek-0731 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| all | gap_mi | moderate | naive | 3 | 98.038866 | 97.873330 | 96.922951 | unknown (1/9) |
+| all | gap_mi | moderate | cached | 3 | 97.961140 | 98.061333 | 97.723333 | unknown (3/9) |
+| all | gap_mi | moderate | poolact | 3 | 98.556328 | 98.965828 | 98.869484 | unknown (1/9) |
+| all | gap_mi | tight | naive | 3 | 94.258262 | 83.960328 | 90.621090 | unknown (2/9) |
+| all | gap_mi | tight | cached | 3 | 94.111464 | 86.182578 | 90.757603 | unknown (1/9) |
+| all | gap_mi | tight | poolact | 3 | 96.051676 | 96.176599 | 96.270673 | unknown (2/9) |
+| all | gap_bon | moderate | naive | 3 | 98.986955 | 99.007686 | 98.700872 | unknown (1/9) |
+| all | gap_bon | moderate | cached | 3 | 98.839323 | 99.115941 | 99.003529 | unknown (3/9) |
+| all | gap_bon | moderate | poolact | 3 | 98.871046 | 99.380739 | 99.147940 | unknown (1/9) |
+| all | gap_bon | tight | naive | 3 | 97.993150 | 93.809666 | 98.524288 | unknown (2/9) |
+| all | gap_bon | tight | cached | 3 | 98.366255 | 94.548781 | 98.150410 | unknown (1/9) |
+| all | gap_bon | tight | poolact | 3 | 98.365115 | 98.463026 | 98.291108 | unknown (2/9) |
+| all | raw_perf_mi | moderate | naive | 3 | 0.938288 | 0.937173 | 0.933885 | unknown (1/9) |
+| all | raw_perf_mi | moderate | cached | 3 | 0.937575 | 0.938197 | 0.937188 | unknown (3/9) |
+| all | raw_perf_mi | moderate | poolact | 3 | 0.941256 | 0.942421 | 0.942661 | unknown (1/9) |
+| all | raw_perf_mi | tight | naive | 3 | 0.919430 | 0.880532 | 0.891752 | unknown (2/9) |
+| all | raw_perf_mi | tight | cached | 3 | 0.916669 | 0.888600 | 0.899698 | unknown (1/9) |
+| all | raw_perf_mi | tight | poolact | 3 | 0.929105 | 0.928628 | 0.930763 | unknown (2/9) |
+| all | raw_perf_bon | moderate | naive | 3 | 0.943153 | 0.942712 | 0.942059 | unknown (1/9) |
+| all | raw_perf_bon | moderate | cached | 3 | 0.942315 | 0.943324 | 0.942916 | unknown (3/9) |
+| all | raw_perf_bon | moderate | poolact | 3 | 0.942805 | 0.944478 | 0.943754 | unknown (1/9) |
+| all | raw_perf_bon | tight | naive | 3 | 0.938976 | 0.920903 | 0.941273 | unknown (2/9) |
+| all | raw_perf_bon | tight | cached | 3 | 0.940167 | 0.923040 | 0.937934 | unknown (1/9) |
+| all | raw_perf_bon | tight | poolact | 3 | 0.939919 | 0.941020 | 0.938869 | unknown (2/9) |
+| task=hpobench:nasbench101:A | gap_mi | moderate | naive | 1 | 98.287414 | 97.771660 | 97.396710 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_mi | moderate | cached | 1 | 97.813188 | 97.880822 | 98.339226 | unknown (2/3) |
+| task=hpobench:nasbench101:A | gap_mi | moderate | poolact | 1 | 99.263154 | 98.993806 | 99.282534 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_mi | tight | naive | 1 | 93.427698 | 88.907337 | 85.565821 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_mi | tight | cached | 1 | 91.237326 | 87.932388 | 86.153354 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_mi | tight | poolact | 1 | 95.504557 | 95.258942 | 96.669354 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_bon | moderate | naive | 1 | 99.319713 | 99.215297 | 99.267504 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_bon | moderate | cached | 1 | 99.134610 | 99.049178 | 99.356101 | unknown (2/3) |
+| task=hpobench:nasbench101:A | gap_bon | moderate | poolact | 1 | 99.621889 | 99.520635 | 99.433620 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_bon | tight | naive | 1 | 98.807122 | 94.397901 | 99.216879 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_bon | tight | cached | 1 | 98.864077 | 94.459601 | 97.753465 | unknown (1/3) |
+| task=hpobench:nasbench101:A | gap_bon | tight | poolact | 1 | 98.691632 | 99.224789 | 98.281876 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_mi | moderate | naive | 1 | 0.934033 | 0.930405 | 0.927768 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_mi | moderate | cached | 1 | 0.930697 | 0.931173 | 0.934398 | unknown (2/3) |
+| task=hpobench:nasbench101:A | raw_perf_mi | moderate | poolact | 1 | 0.940897 | 0.939002 | 0.941033 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_mi | tight | naive | 1 | 0.899848 | 0.868050 | 0.824324 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_mi | tight | cached | 1 | 0.884440 | 0.861192 | 0.848677 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_mi | tight | poolact | 1 | 0.914458 | 0.912730 | 0.922651 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_bon | moderate | naive | 1 | 0.941295 | 0.940560 | 0.940928 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_bon | moderate | cached | 1 | 0.939993 | 0.939392 | 0.941551 | unknown (2/3) |
+| task=hpobench:nasbench101:A | raw_perf_bon | moderate | poolact | 1 | 0.943421 | 0.942708 | 0.942096 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_bon | tight | naive | 1 | 0.937689 | 0.906673 | 0.940572 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_bon | tight | cached | 1 | 0.938090 | 0.907107 | 0.930277 | unknown (1/3) |
+| task=hpobench:nasbench101:A | raw_perf_bon | tight | poolact | 1 | 0.936877 | 0.940627 | 0.933994 | unknown (1/3) |
+| task=hpobench:nasbench101:B | gap_mi | moderate | naive | 1 | 96.818635 | 96.762956 | 94.581638 | unknown (0/3) |
+| task=hpobench:nasbench101:B | gap_mi | moderate | cached | 1 | 96.872130 | 96.848113 | 96.181054 | unknown (0/3) |
+| task=hpobench:nasbench101:B | gap_mi | moderate | poolact | 1 | 97.211667 | 98.202974 | 97.573035 | unknown (0/3) |
+| task=hpobench:nasbench101:B | gap_mi | tight | naive | 1 | 92.227822 | 71.553333 | 89.094498 | unknown (1/3) |
+| task=hpobench:nasbench101:B | gap_mi | tight | cached | 1 | 93.119782 | 75.460710 | 88.936192 | unknown (0/3) |
+| task=hpobench:nasbench101:B | gap_mi | tight | poolact | 1 | 93.599063 | 94.632951 | 93.711513 | unknown (1/3) |
+| task=hpobench:nasbench101:B | gap_bon | moderate | naive | 1 | 97.755357 | 98.248830 | 97.226954 | unknown (0/3) |
+| task=hpobench:nasbench101:B | gap_bon | moderate | cached | 1 | 97.676749 | 98.174594 | 98.091617 | unknown (0/3) |
+| task=hpobench:nasbench101:B | gap_bon | moderate | poolact | 1 | 97.593781 | 98.716097 | 98.104715 | unknown (0/3) |
+| task=hpobench:nasbench101:B | gap_bon | tight | naive | 1 | 96.135197 | 88.785528 | 96.999865 | unknown (1/3) |
+| task=hpobench:nasbench101:B | gap_bon | tight | cached | 1 | 97.047906 | 90.785619 | 97.532642 | unknown (0/3) |
+| task=hpobench:nasbench101:B | gap_bon | tight | poolact | 1 | 97.205119 | 96.912531 | 97.633082 | unknown (1/3) |
+| task=hpobench:nasbench101:B | raw_perf_mi | moderate | naive | 1 | 0.940844 | 0.940702 | 0.935143 | unknown (0/3) |
+| task=hpobench:nasbench101:B | raw_perf_mi | moderate | cached | 1 | 0.940981 | 0.940919 | 0.939219 | unknown (0/3) |
+| task=hpobench:nasbench101:B | raw_perf_mi | moderate | poolact | 1 | 0.941846 | 0.944372 | 0.942767 | unknown (0/3) |
+| task=hpobench:nasbench101:B | raw_perf_mi | tight | naive | 1 | 0.929145 | 0.876458 | 0.921160 | unknown (1/3) |
+| task=hpobench:nasbench101:B | raw_perf_mi | tight | cached | 1 | 0.931418 | 0.886415 | 0.920757 | unknown (0/3) |
+| task=hpobench:nasbench101:B | raw_perf_mi | tight | poolact | 1 | 0.932639 | 0.935274 | 0.932926 | unknown (1/3) |
+| task=hpobench:nasbench101:B | raw_perf_bon | moderate | naive | 1 | 0.943231 | 0.944489 | 0.941885 | unknown (0/3) |
+| task=hpobench:nasbench101:B | raw_perf_bon | moderate | cached | 1 | 0.943031 | 0.944300 | 0.944088 | unknown (0/3) |
+| task=hpobench:nasbench101:B | raw_perf_bon | moderate | poolact | 1 | 0.942820 | 0.945680 | 0.944122 | unknown (0/3) |
+| task=hpobench:nasbench101:B | raw_perf_bon | tight | naive | 1 | 0.939103 | 0.920373 | 0.941306 | unknown (1/3) |
+| task=hpobench:nasbench101:B | raw_perf_bon | tight | cached | 1 | 0.941429 | 0.925470 | 0.942664 | unknown (0/3) |
+| task=hpobench:nasbench101:B | raw_perf_bon | tight | poolact | 1 | 0.941829 | 0.941084 | 0.942920 | unknown (1/3) |
+| task=hpobench:nasbench101:C | gap_mi | moderate | naive | 1 | 99.010548 | 99.085373 | 98.790506 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_mi | moderate | cached | 1 | 99.198101 | 99.455064 | 98.649719 | unknown (1/3) |
+| task=hpobench:nasbench101:C | gap_mi | moderate | poolact | 1 | 99.194164 | 99.700703 | 99.752884 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_mi | tight | naive | 1 | 97.119267 | 91.420315 | 97.202952 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_mi | tight | cached | 1 | 97.977285 | 95.154636 | 97.183262 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_mi | tight | poolact | 1 | 99.051407 | 98.637904 | 98.431153 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_bon | moderate | naive | 1 | 99.885793 | 99.558932 | 99.608158 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_bon | moderate | cached | 1 | 99.706609 | 100.124052 | 99.562870 | unknown (1/3) |
+| task=hpobench:nasbench101:C | gap_bon | moderate | poolact | 1 | 99.397468 | 99.905485 | 99.905485 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_bon | tight | naive | 1 | 99.037133 | 98.245569 | 99.356119 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_bon | tight | cached | 1 | 99.186781 | 98.401123 | 99.165121 | unknown (0/3) |
+| task=hpobench:nasbench101:C | gap_bon | tight | poolact | 1 | 99.198595 | 99.251758 | 98.958368 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_mi | moderate | naive | 1 | 0.939987 | 0.940410 | 0.938744 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_mi | moderate | cached | 1 | 0.941047 | 0.942500 | 0.937948 | unknown (1/3) |
+| task=hpobench:nasbench101:C | raw_perf_mi | moderate | poolact | 1 | 0.941025 | 0.943888 | 0.944183 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_mi | tight | naive | 1 | 0.929298 | 0.897088 | 0.929771 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_mi | tight | cached | 1 | 0.934147 | 0.918194 | 0.929660 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_mi | tight | poolact | 1 | 0.940218 | 0.937881 | 0.936713 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_bon | moderate | naive | 1 | 0.944934 | 0.943087 | 0.943365 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_bon | moderate | cached | 1 | 0.943921 | 0.946281 | 0.943109 | unknown (1/3) |
+| task=hpobench:nasbench101:C | raw_perf_bon | moderate | poolact | 1 | 0.942174 | 0.945045 | 0.945045 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_bon | tight | naive | 1 | 0.940138 | 0.935664 | 0.941940 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_bon | tight | cached | 1 | 0.940983 | 0.936543 | 0.940861 | unknown (0/3) |
+| task=hpobench:nasbench101:C | raw_perf_bon | tight | poolact | 1 | 0.941050 | 0.941351 | 0.939692 | unknown (0/3) |
+
+
+Kimi、GLM、Qwen 在两个预算档位的 Gap-MI 均优于 naive，但 MI 提升不自动意味着 BoN 也提高；best-of-4 已接近参考水平时，成员整体质量与最佳候选质量的变化可不同。逐任务表覆盖 NAS101 A/B/C，不按某项正负缩小 `all`。
+
+DeepSeek Pool tuning 为 135/216 个 agent 可评分，而严格完整 N4 池只有 10/54 个。每个预算×策略应有 9 个池；Moderate 的 naive / cached / poolact 完整池数分别为 1/3/1，Tight 为 2/1/2。六个设置的完整 MI / BoN 均值均为 unknown，不能以可评分成员或完整池子集代表全体。其 poolact−naive 在 Moderate 仅 0/9、Tight 仅 1/9 配对端点已知；即使已知子集有正差，也不能用来证明 NAS 整体改善。正常缺最终配置与执行失败是不同事件，不能为补齐质量分母而重抽样。
+
+| 模型 | 预算 | 策略 | 指标 | 2200 | 2204 | 2208 | 三块均值 | 描述 SD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Kimi-K3 | moderate | naive | gap_mi | 98.159365 | 97.682031 | 98.275201 | 98.038866 | 0.314409 |
+| Kimi-K3 | moderate | naive | gap_bon | 98.929687 | 99.008280 | 99.022896 | 98.986955 | 0.050130 |
+| Kimi-K3 | moderate | naive | raw_perf_mi | 0.938966 | 0.935486 | 0.940413 | 0.938288 | 0.002533 |
+| Kimi-K3 | moderate | naive | raw_perf_bon | 0.942786 | 0.943176 | 0.943498 | 0.943153 | 0.000357 |
+| Kimi-K3 | moderate | cached | gap_mi | 98.189185 | 97.876493 | 97.817742 | 97.961140 | 0.199665 |
+| Kimi-K3 | moderate | cached | gap_bon | 98.999939 | 98.619248 | 98.898781 | 98.839323 | 0.197187 |
+| Kimi-K3 | moderate | cached | raw_perf_mi | 0.938785 | 0.937405 | 0.936535 | 0.937575 | 0.001135 |
+| Kimi-K3 | moderate | cached | raw_perf_bon | 0.943476 | 0.941161 | 0.942308 | 0.942315 | 0.001157 |
+| Kimi-K3 | moderate | poolact | gap_mi | 98.742041 | 98.409035 | 98.517909 | 98.556328 | 0.169795 |
+| Kimi-K3 | moderate | poolact | gap_bon | 99.203580 | 98.778343 | 98.631216 | 98.871046 | 0.297230 |
+| Kimi-K3 | moderate | poolact | raw_perf_mi | 0.942160 | 0.940647 | 0.940961 | 0.941256 | 0.000799 |
+| Kimi-K3 | moderate | poolact | raw_perf_bon | 0.944278 | 0.942586 | 0.941551 | 0.942805 | 0.001376 |
+| Kimi-K3 | tight | naive | gap_mi | 95.204981 | 95.935980 | 91.633827 | 94.258262 | 2.302029 |
+| Kimi-K3 | tight | naive | gap_bon | 98.382865 | 97.934448 | 97.662139 | 97.993150 | 0.363931 |
+| Kimi-K3 | tight | naive | raw_perf_mi | 0.925186 | 0.926566 | 0.906539 | 0.919430 | 0.011185 |
+| Kimi-K3 | tight | naive | raw_perf_bon | 0.940505 | 0.939336 | 0.937088 | 0.938976 | 0.001736 |
+| Kimi-K3 | tight | cached | gap_mi | 94.012988 | 95.230677 | 93.090729 | 94.111464 | 1.073367 |
+| Kimi-K3 | tight | cached | gap_bon | 98.556372 | 98.499508 | 98.042884 | 98.366255 | 0.281487 |
+| Kimi-K3 | tight | cached | raw_perf_mi | 0.916386 | 0.920061 | 0.913559 | 0.916669 | 0.003260 |
+| Kimi-K3 | tight | cached | raw_perf_bon | 0.940994 | 0.940527 | 0.938980 | 0.940167 | 0.001054 |
+| Kimi-K3 | tight | poolact | gap_mi | 96.017289 | 96.675142 | 95.462595 | 96.051676 | 0.607004 |
+| Kimi-K3 | tight | poolact | gap_bon | 98.509911 | 98.153972 | 98.431462 | 98.365115 | 0.187015 |
+| Kimi-K3 | tight | poolact | raw_perf_mi | 0.927968 | 0.929596 | 0.929751 | 0.929105 | 0.000988 |
+| Kimi-K3 | tight | poolact | raw_perf_bon | 0.940316 | 0.939080 | 0.940360 | 0.939919 | 0.000726 |
+| GLM-5.3 | moderate | naive | gap_mi | 98.284886 | 97.116195 | 98.218909 | 97.873330 | 0.656527 |
+| GLM-5.3 | moderate | naive | gap_bon | 98.659706 | 99.337451 | 99.025902 | 99.007686 | 0.339239 |
+| GLM-5.3 | moderate | naive | raw_perf_mi | 0.940023 | 0.932492 | 0.939002 | 0.937173 | 0.004086 |
+| GLM-5.3 | moderate | naive | raw_perf_bon | 0.941607 | 0.943699 | 0.942831 | 0.942712 | 0.001051 |
+| GLM-5.3 | moderate | cached | gap_mi | 98.313975 | 98.089126 | 97.780897 | 98.061333 | 0.267624 |
+| GLM-5.3 | moderate | cached | gap_bon | 99.041402 | 99.010835 | 99.295587 | 99.115941 | 0.156326 |
+| GLM-5.3 | moderate | cached | raw_perf_mi | 0.940533 | 0.939539 | 0.934520 | 0.938197 | 0.003223 |
+| GLM-5.3 | moderate | cached | raw_perf_bon | 0.943376 | 0.943298 | 0.943298 | 0.943324 | 0.000045 |
+| GLM-5.3 | moderate | poolact | gap_mi | 98.943264 | 98.786747 | 99.167472 | 98.965828 | 0.191363 |
+| GLM-5.3 | moderate | poolact | gap_bon | 99.303895 | 99.400526 | 99.437796 | 99.380739 | 0.069109 |
+| GLM-5.3 | moderate | poolact | raw_perf_mi | 0.941963 | 0.941317 | 0.943983 | 0.942421 | 0.001391 |
+| GLM-5.3 | moderate | poolact | raw_perf_bon | 0.943610 | 0.944912 | 0.944912 | 0.944478 | 0.000752 |
+| GLM-5.3 | tight | naive | gap_mi | 87.086990 | 81.378917 | 83.415077 | 83.960328 | 2.892836 |
+| GLM-5.3 | tight | naive | gap_bon | 93.425246 | 91.065575 | 96.938176 | 93.809666 | 2.955113 |
+| GLM-5.3 | tight | naive | raw_perf_mi | 0.885976 | 0.873734 | 0.881886 | 0.880532 | 0.006232 |
+| GLM-5.3 | tight | naive | raw_perf_bon | 0.907741 | 0.920339 | 0.934629 | 0.920903 | 0.013453 |
+| GLM-5.3 | tight | cached | gap_mi | 87.586956 | 86.326175 | 84.634604 | 86.182578 | 1.481405 |
+| GLM-5.3 | tight | cached | gap_bon | 97.310553 | 98.131415 | 88.204374 | 94.548781 | 5.509725 |
+| GLM-5.3 | tight | cached | raw_perf_mi | 0.889559 | 0.891373 | 0.884869 | 0.888600 | 0.003357 |
+| GLM-5.3 | tight | cached | raw_perf_bon | 0.935063 | 0.939804 | 0.894253 | 0.923040 | 0.025043 |
+| GLM-5.3 | tight | poolact | gap_mi | 96.015442 | 95.255042 | 97.259313 | 96.176599 | 1.011807 |
+| GLM-5.3 | tight | poolact | gap_bon | 98.309475 | 98.353883 | 98.725721 | 98.463026 | 0.228581 |
+| GLM-5.3 | tight | poolact | raw_perf_mi | 0.927111 | 0.925873 | 0.932901 | 0.928628 | 0.003752 |
+| GLM-5.3 | tight | poolact | raw_perf_bon | 0.940093 | 0.940416 | 0.942553 | 0.941020 | 0.001337 |
+| Qwen3.8 | moderate | naive | gap_mi | 97.263539 | 97.406194 | 96.099122 | 96.922951 | 0.717014 |
+| Qwen3.8 | moderate | naive | gap_bon | 98.896086 | 98.812086 | 98.394444 | 98.700872 | 0.268677 |
+| Qwen3.8 | moderate | naive | raw_perf_mi | 0.934860 | 0.937739 | 0.929056 | 0.933885 | 0.004423 |
+| Qwen3.8 | moderate | naive | raw_perf_bon | 0.942408 | 0.942786 | 0.940983 | 0.942059 | 0.000951 |
+| Qwen3.8 | moderate | cached | gap_mi | 96.827323 | 98.303108 | 98.039568 | 97.723333 | 0.787076 |
+| Qwen3.8 | moderate | cached | gap_bon | 98.316408 | 99.338952 | 99.355229 | 99.003529 | 0.595120 |
+| Qwen3.8 | moderate | cached | raw_perf_mi | 0.935475 | 0.938543 | 0.937547 | 0.937188 | 0.001566 |
+| Qwen3.8 | moderate | cached | raw_perf_bon | 0.940994 | 0.943810 | 0.943944 | 0.942916 | 0.001665 |
+| Qwen3.8 | moderate | poolact | gap_mi | 98.570337 | 98.965374 | 99.072741 | 98.869484 | 0.264573 |
+| Qwen3.8 | moderate | poolact | gap_bon | 98.902879 | 99.108303 | 99.432638 | 99.147940 | 0.267095 |
+| Qwen3.8 | moderate | poolact | raw_perf_mi | 0.941643 | 0.942625 | 0.943716 | 0.942661 | 0.001037 |
+| Qwen3.8 | moderate | poolact | raw_perf_bon | 0.942998 | 0.943298 | 0.944967 | 0.943754 | 0.001061 |
+| Qwen3.8 | tight | naive | gap_mi | 93.249957 | 86.271082 | 92.342232 | 90.621090 | 3.794459 |
+| Qwen3.8 | tight | naive | gap_bon | 98.690903 | 97.966618 | 98.915342 | 98.524288 | 0.495823 |
+| Qwen3.8 | tight | naive | raw_perf_mi | 0.918625 | 0.846835 | 0.909795 | 0.891752 | 0.039148 |
+| Qwen3.8 | tight | naive | raw_perf_bon | 0.941707 | 0.938791 | 0.943320 | 0.941273 | 0.002296 |
+| Qwen3.8 | tight | cached | gap_mi | 92.510783 | 85.821170 | 93.940855 | 90.757603 | 4.334461 |
+| Qwen3.8 | tight | cached | gap_bon | 98.180871 | 97.819759 | 98.450598 | 98.150410 | 0.316521 |
+| Qwen3.8 | tight | cached | raw_perf_mi | 0.913028 | 0.868011 | 0.918055 | 0.899698 | 0.027556 |
+| Qwen3.8 | tight | cached | raw_perf_bon | 0.937589 | 0.935541 | 0.940672 | 0.937934 | 0.002583 |
+| Qwen3.8 | tight | poolact | gap_mi | 96.648598 | 95.278785 | 96.884637 | 96.270673 | 0.867070 |
+| Qwen3.8 | tight | poolact | gap_bon | 98.111913 | 98.321740 | 98.439672 | 98.291108 | 0.166013 |
+| Qwen3.8 | tight | poolact | raw_perf_mi | 0.932701 | 0.929490 | 0.930099 | 0.930763 | 0.001705 |
+| Qwen3.8 | tight | poolact | raw_perf_bon | 0.937166 | 0.939347 | 0.940093 | 0.938869 | 0.001521 |
+| DeepSeek-0731 | moderate | naive | gap_mi | unknown (1/3) | unknown (0/3) | unknown (0/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | moderate | naive | gap_bon | unknown (1/3) | unknown (0/3) | unknown (0/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | moderate | naive | raw_perf_mi | unknown (1/3) | unknown (0/3) | unknown (0/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | moderate | naive | raw_perf_bon | unknown (1/3) | unknown (0/3) | unknown (0/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | moderate | cached | gap_mi | unknown (1/3) | unknown (1/3) | unknown (1/3) | unknown (3/9) | unknown |
+| DeepSeek-0731 | moderate | cached | gap_bon | unknown (1/3) | unknown (1/3) | unknown (1/3) | unknown (3/9) | unknown |
+| DeepSeek-0731 | moderate | cached | raw_perf_mi | unknown (1/3) | unknown (1/3) | unknown (1/3) | unknown (3/9) | unknown |
+| DeepSeek-0731 | moderate | cached | raw_perf_bon | unknown (1/3) | unknown (1/3) | unknown (1/3) | unknown (3/9) | unknown |
+| DeepSeek-0731 | moderate | poolact | gap_mi | unknown (0/3) | unknown (1/3) | unknown (0/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | moderate | poolact | gap_bon | unknown (0/3) | unknown (1/3) | unknown (0/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | moderate | poolact | raw_perf_mi | unknown (0/3) | unknown (1/3) | unknown (0/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | moderate | poolact | raw_perf_bon | unknown (0/3) | unknown (1/3) | unknown (0/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | tight | naive | gap_mi | unknown (0/3) | unknown (2/3) | unknown (0/3) | unknown (2/9) | unknown |
+| DeepSeek-0731 | tight | naive | gap_bon | unknown (0/3) | unknown (2/3) | unknown (0/3) | unknown (2/9) | unknown |
+| DeepSeek-0731 | tight | naive | raw_perf_mi | unknown (0/3) | unknown (2/3) | unknown (0/3) | unknown (2/9) | unknown |
+| DeepSeek-0731 | tight | naive | raw_perf_bon | unknown (0/3) | unknown (2/3) | unknown (0/3) | unknown (2/9) | unknown |
+| DeepSeek-0731 | tight | cached | gap_mi | unknown (0/3) | unknown (0/3) | unknown (1/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | tight | cached | gap_bon | unknown (0/3) | unknown (0/3) | unknown (1/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | tight | cached | raw_perf_mi | unknown (0/3) | unknown (0/3) | unknown (1/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | tight | cached | raw_perf_bon | unknown (0/3) | unknown (0/3) | unknown (1/3) | unknown (1/9) | unknown |
+| DeepSeek-0731 | tight | poolact | gap_mi | unknown (1/3) | unknown (1/3) | unknown (0/3) | unknown (2/9) | unknown |
+| DeepSeek-0731 | tight | poolact | gap_bon | unknown (1/3) | unknown (1/3) | unknown (0/3) | unknown (2/9) | unknown |
+| DeepSeek-0731 | tight | poolact | raw_perf_mi | unknown (1/3) | unknown (1/3) | unknown (0/3) | unknown (2/9) | unknown |
+| DeepSeek-0731 | tight | poolact | raw_perf_bon | unknown (1/3) | unknown (1/3) | unknown (0/3) | unknown (2/9) | unknown |
+
+
+以上三个 seed blocks 的变动仅用于描述固定任务的重复层结果；完整 MI、BoN、raw 与全部负值、unknown 见 [TABLES.md](TABLES.md) 和 [REPEATS.md](REPEATS.md)。
+
+## 4. 运行资源与反馈使用
+
+**受限反馈下质量改善，不等于相同实际推理开销下更省。** 观察复用可以减少重复模拟反馈，而图上下文、协调推理和池内串行决策可能增加或改变模型侧开销。只有保留质量、反馈、token 与实际时长的不同口径，才能判断具体设置的取舍。
+
+下表取已有分析单元遥测，先 item 内平均重复、再 item 等权，不是整项研究的总账。Input / Output 是 token；reasoning 已包含在 Output，不能再次相加。反馈秒为模拟工具成本，不是 GPU 秒。Exp Audit 的遥测为每文档三个 orders 的均值，不是三次合计。
+
+Pool token、反馈次数与模拟成本是四 agents 合计；旧 Kimi / GLM 的 pool wall 来自整个子进程 source_capture.elapsed_seconds。Qwen / DeepSeek 的原 exporter 未记录整个 pool wall，因此保留 unknown，**不使用 agent wall 的 sum / max 补齐**。这项导出差异不能解读为运行没有耗时，也不能据不一致的 wall 字段作跨模型速度排名。Free 无有限预算，budget_utilization 标为“不适用”；这不同于已计划但遥测缺失的 unknown。
+
+受限档位的 `budget_utilization` 为反馈成本 / B；Pool 为四成员反馈成本合计 / (4B)。环境在动作之间检查预算，最后一次已发起工具调用可以越过余额，因此该值允许大于 1，不在报告中截为 1。
+
+| 模型 | 系统/场景 | 预算 | 策略 | input_tokens | output_tokens | feedback_cost_seconds | wall_time_seconds | feedback_attempts | duplicate_action_attempts | feedback_visible | budget_utilization | protocol_failure_rate |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Kimi-K3 | expgym/restricted_search | free | single | 99545.136986 | 9387.739726 | 3631.827073 | 664.067277 | 14.054795 | 0.013699 | 14.054795 | 不适用 | 0.000000 |
+| Kimi-K3 | expgym/restricted_search | moderate | single | 43586.767123 | 7193.082192 | 2525.175439 | 523.515513 | 9.958904 | 0.000000 | 9.767123 | 0.841725 | 0.000000 |
+| Kimi-K3 | expgym/restricted_search | tight | single | 6940.410959 | 2861.712329 | 1012.913496 | 203.157551 | 3.753425 | 0.000000 | 2.958904 | 1.125459 | 0.000000 |
+| Kimi-K3 | expgym/evidence_audit | free | single | 366956.589744 | 16024.974359 | 8327.956221 | 1086.338041 | 27.717949 | 0.128205 | 27.717949 | 不适用 | 0.000000 |
+| Kimi-K3 | expgym/evidence_audit | moderate | single | 104462.025641 | 14751.871795 | 2844.170369 | 1017.687354 | 9.435897 | 0.000000 | 9.230769 | 0.948057 | 0.000000 |
+| Kimi-K3 | expgym/evidence_audit | tight | single | 22878.307692 | 8032.512821 | 850.588274 | 571.388226 | 2.820513 | 0.000000 | 2.384615 | 0.945098 | 0.000000 |
+| Kimi-K3 | expgym/tuning | free | single | 230295.592593 | 14047.407407 | 252387.797068 | 825.945845 | 23.666667 | 0.185185 | 23.666667 | 不适用 | 0.000000 |
+| Kimi-K3 | expgym/tuning | moderate | single | 57097.444444 | 8961.444444 | 96667.251220 | 493.495243 | 8.111111 | 0.000000 | 7.962963 | 0.871193 | 0.000000 |
+| Kimi-K3 | expgym/tuning | tight | single | 21049.037037 | 6563.111111 | 36051.521950 | 382.524720 | 3.814815 | 0.000000 | 3.370370 | 1.232265 | 0.000000 |
+| Kimi-K3 | poolact/restricted_search | moderate | naive | 171855.666667 | 24429.564103 | 9643.410741 | 670.684804 | 39.384615 | 21.794872 | unknown (0/39) | 0.803618 | 0.000000 |
+| Kimi-K3 | poolact/restricted_search | moderate | cached | 193728.256410 | 25506.128205 | 8963.780838 | 636.872697 | 41.051282 | 22.743590 | unknown (0/39) | 0.746982 | 0.001508 |
+| Kimi-K3 | poolact/restricted_search | moderate | poolact | 469631.333333 | 39232.923077 | 7673.324528 | 2785.353798 | 40.666667 | 20.564103 | unknown (0/39) | 0.639444 | 0.000000 |
+| Kimi-K3 | poolact/restricted_search | tight | naive | 30428.615385 | 12059.948718 | 4109.480041 | 384.863589 | 15.461538 | 9.487179 | unknown (0/39) | 1.141522 | 0.000000 |
+| Kimi-K3 | poolact/restricted_search | tight | cached | 35100.794872 | 13563.769231 | 4007.590673 | 468.324156 | 16.256410 | 9.461538 | unknown (0/39) | 1.113220 | 0.000000 |
+| Kimi-K3 | poolact/restricted_search | tight | poolact | 73846.153846 | 17289.384615 | 3886.969286 | 1169.436990 | 17.461538 | 6.102564 | unknown (0/39) | 1.079714 | 0.000000 |
+| Kimi-K3 | poolact/evidence_audit | moderate | naive | 435431.692308 | 59997.076923 | 11537.166336 | 1771.345564 | 38.307692 | 17.538462 | unknown (0/13) | 0.961431 | 0.000000 |
+| Kimi-K3 | poolact/evidence_audit | moderate | cached | 506641.076923 | 59882.538462 | 10966.121039 | 1551.636591 | 43.846154 | 21.615385 | unknown (0/13) | 0.913843 | 0.000000 |
+| Kimi-K3 | poolact/evidence_audit | moderate | poolact | 670641.692308 | 76833.461538 | 11228.417970 | 5380.948324 | 37.615385 | 10.384615 | unknown (0/13) | 0.935701 | 0.000000 |
+| Kimi-K3 | poolact/evidence_audit | tight | naive | 94498.384615 | 36806.846154 | 3153.365251 | 1039.522642 | 10.461538 | 4.846154 | unknown (0/13) | 0.875935 | 0.000000 |
+| Kimi-K3 | poolact/evidence_audit | tight | cached | 104495.000000 | 40671.076923 | 3219.343615 | 1207.165748 | 10.769231 | 5.076923 | unknown (0/13) | 0.894262 | 0.000000 |
+| Kimi-K3 | poolact/evidence_audit | tight | poolact | 123983.153846 | 47385.307692 | 3507.503484 | 3396.817980 | 11.615385 | 2.615385 | unknown (0/13) | 0.974307 | 0.000000 |
+| Kimi-K3 | poolact/tuning | moderate | naive | 519038.333333 | 67688.333333 | 322161.705777 | 1608.792329 | 39.222222 | 0.222222 | unknown (0/9) | 0.913028 | 0.000000 |
+| Kimi-K3 | poolact/tuning | moderate | cached | 512309.777778 | 63995.888889 | 309297.951823 | 1398.424206 | 38.444444 | 0.777778 | unknown (0/9) | 0.888557 | 0.000000 |
+| Kimi-K3 | poolact/tuning | moderate | poolact | 1118384.333333 | 88541.222222 | 268570.794532 | 5582.461858 | 32.888889 | 2.555556 | unknown (0/9) | 0.786614 | 0.000000 |
+| Kimi-K3 | poolact/tuning | tight | naive | 113636.888889 | 34181.000000 | 109658.326131 | 800.030740 | 12.666667 | 0.111111 | unknown (0/9) | 1.107222 | 0.000000 |
+| Kimi-K3 | poolact/tuning | tight | cached | 113071.888889 | 35135.888889 | 114140.534058 | 867.783888 | 12.666667 | 0.444444 | unknown (0/9) | 1.144623 | 0.000000 |
+| Kimi-K3 | poolact/tuning | tight | poolact | 169065.666667 | 33587.333333 | 105743.352919 | 1758.332952 | 12.222222 | 0.555556 | unknown (0/9) | 1.033461 | 0.000000 |
+| GLM-5.3 | expgym/restricted_search | free | single | 169909.917808 | 19600.808219 | 4126.073236 | 494.852681 | 16.863014 | 0.041096 | 16.863014 | 不适用 | 0.034175 |
+| GLM-5.3 | expgym/restricted_search | moderate | single | 67510.958904 | 19054.767123 | 2558.468748 | 481.319470 | 10.287671 | 0.000000 | 10.054795 | 0.852823 | 0.058324 |
+| GLM-5.3 | expgym/restricted_search | tight | single | 14507.273973 | 9697.479452 | 1056.824892 | 244.842457 | 4.054795 | 0.000000 | 3.164384 | 1.174250 | 0.067482 |
+| GLM-5.3 | expgym/evidence_audit | free | single | 899925.666667 | 49681.974359 | 7895.183171 | 1256.699367 | 26.307692 | 0.025641 | 26.307692 | 不适用 | 0.015424 |
+| GLM-5.3 | expgym/evidence_audit | moderate | single | 468084.230769 | 84948.794872 | 2935.049756 | 2134.877804 | 9.794872 | 0.000000 | 9.512821 | 0.978350 | 0.017677 |
+| GLM-5.3 | expgym/evidence_audit | tight | single | 110772.923077 | 49455.769231 | 907.450009 | 1261.353119 | 3.025641 | 0.000000 | 2.564103 | 1.008278 | 0.055983 |
+| GLM-5.3 | expgym/tuning | free | single | 274232.037037 | 14701.185185 | 346971.654252 | 374.648285 | 29.407407 | 0.111111 | 29.407407 | 不适用 | 0.014419 |
+| GLM-5.3 | expgym/tuning | moderate | single | 184063.444444 | 27606.629630 | 113814.763947 | 620.089671 | 10.629630 | 0.000000 | 10.444444 | 0.968884 | 0.054599 |
+| GLM-5.3 | expgym/tuning | tight | single | 37732.703704 | 16316.370370 | 37035.891735 | 403.254350 | 3.666667 | 0.000000 | 3.185185 | 1.113898 | 0.101587 |
+| GLM-5.3 | poolact/restricted_search | moderate | naive | 302391.282051 | 82204.641026 | 10017.152159 | 889.069421 | 41.025641 | 24.692308 | unknown (0/39) | 0.834763 | 0.054349 |
+| GLM-5.3 | poolact/restricted_search | moderate | cached | 355575.743590 | 83759.102564 | 9200.367612 | 840.881999 | 44.512821 | 26.102564 | unknown (0/39) | 0.766697 | 0.043353 |
+| GLM-5.3 | poolact/restricted_search | moderate | poolact | 1062983.717949 | 135370.948718 | 8433.958196 | 3376.654692 | 47.153846 | 24.923077 | unknown (0/39) | 0.702830 | 0.012362 |
+| GLM-5.3 | poolact/restricted_search | tight | naive | 45893.282051 | 43355.051282 | 4168.844006 | 531.803013 | 16.230769 | 9.666667 | unknown (0/39) | 1.158012 | 0.088134 |
+| GLM-5.3 | poolact/restricted_search | tight | cached | 69631.128205 | 46091.564103 | 4144.983991 | 566.510133 | 17.615385 | 10.435897 | unknown (0/39) | 1.151384 | 0.077924 |
+| GLM-5.3 | poolact/restricted_search | tight | poolact | 240859.076923 | 88946.358974 | 4024.406994 | 2257.047684 | 20.410256 | 7.461538 | unknown (0/39) | 1.117891 | 0.031344 |
+| GLM-5.3 | poolact/evidence_audit | moderate | naive | 1798701.769231 | 322716.615385 | 11668.482933 | 2641.934361 | 38.846154 | 20.307692 | unknown (0/13) | 0.972374 | 0.018194 |
+| GLM-5.3 | poolact/evidence_audit | moderate | cached | 2465750.923077 | 352803.461538 | 10778.941689 | 2982.409317 | 47.076923 | 25.307692 | unknown (0/13) | 0.898245 | 0.021547 |
+| GLM-5.3 | poolact/evidence_audit | moderate | poolact | 1828379.923077 | 287668.000000 | 11390.704547 | 7175.411588 | 38.384615 | 10.461538 | unknown (0/13) | 0.949225 | 0.005367 |
+| GLM-5.3 | poolact/evidence_audit | tight | naive | 456518.538462 | 207078.538462 | 3584.775565 | 1825.328098 | 11.923077 | 5.692308 | unknown (0/13) | 0.995771 | 0.052790 |
+| GLM-5.3 | poolact/evidence_audit | tight | cached | 490287.307692 | 211146.230769 | 3570.146708 | 1663.473940 | 12.384615 | 6.153846 | unknown (0/13) | 0.991707 | 0.063340 |
+| GLM-5.3 | poolact/evidence_audit | tight | poolact | 422295.153846 | 231944.307692 | 3559.264010 | 5667.666078 | 11.846154 | 3.538462 | unknown (0/13) | 0.988684 | 0.070792 |
+| GLM-5.3 | poolact/tuning | moderate | naive | 988802.111111 | 197910.666667 | 338082.847551 | 1745.712838 | 38.666667 | 3.000000 | unknown (0/9) | 0.950887 | 0.068127 |
+| GLM-5.3 | poolact/tuning | moderate | cached | 1071169.666667 | 215092.777778 | 327973.409776 | 1772.964828 | 39.444444 | 3.444444 | unknown (0/9) | 0.946202 | 0.066177 |
+| GLM-5.3 | poolact/tuning | moderate | poolact | 3115054.777778 | 322813.888889 | 318969.753086 | 7034.944031 | 43.666667 | 1.555556 | unknown (0/9) | 0.919878 | 0.015097 |
+| GLM-5.3 | poolact/tuning | tight | naive | 369815.333333 | 133198.555556 | 113389.873281 | 1299.392815 | 13.888889 | 2.111111 | unknown (0/9) | 1.171354 | 0.151512 |
+| GLM-5.3 | poolact/tuning | tight | cached | 244441.444444 | 87543.111111 | 117391.549025 | 965.025405 | 13.666667 | 3.000000 | unknown (0/9) | 1.181798 | 0.106991 |
+| GLM-5.3 | poolact/tuning | tight | poolact | 457954.555556 | 130600.000000 | 107524.511929 | 2708.759140 | 15.555556 | 0.888889 | unknown (0/9) | 1.074063 | 0.060739 |
+| Qwen3.8 | expgym/restricted_search | free | single | 83932.780822 | 6003.315068 | 3497.117931 | 258.115580 | 14.643836 | 0.041096 | 14.643836 | 不适用 | 0.033667 |
+| Qwen3.8 | expgym/restricted_search | moderate | single | 53450.150685 | 5958.506849 | 2476.096656 | 246.691747 | 10.767123 | 0.054795 | 10.465753 | 0.825366 | 0.045585 |
+| Qwen3.8 | expgym/restricted_search | tight | single | 9639.465753 | 2305.890411 | 986.534212 | 86.664292 | 4.013699 | 0.013699 | 3.356164 | 1.096149 | 0.055055 |
+| Qwen3.8 | expgym/evidence_audit | free | single | 307147.282051 | 13626.307692 | 8356.558677 | 562.460795 | 27.820513 | 0.025641 | 27.820513 | 不适用 | 0.018590 |
+| Qwen3.8 | expgym/evidence_audit | moderate | single | 95237.230769 | 12671.256410 | 2942.532437 | 464.679027 | 9.769231 | 0.000000 | 9.358974 | 0.980844 | 0.004274 |
+| Qwen3.8 | expgym/evidence_audit | tight | single | 29621.743590 | 10947.256410 | 915.954274 | 410.386282 | 3.051282 | 0.000000 | 2.435897 | 1.017727 | 0.008547 |
+| Qwen3.8 | expgym/tuning | free | single | 267768.259259 | 13746.296296 | 312526.104967 | 503.442693 | 29.074074 | 0.185185 | 29.074074 | 不适用 | 0.008894 |
+| Qwen3.8 | expgym/tuning | moderate | single | 64952.777778 | 7655.888889 | 112729.789523 | 286.809788 | 9.666667 | 0.037037 | 9.592593 | 0.929251 | 0.023952 |
+| Qwen3.8 | expgym/tuning | tight | single | 23737.111111 | 6487.814815 | 38539.219282 | 227.093650 | 3.814815 | 0.000000 | 3.222222 | 1.108715 | 0.018871 |
+| Qwen3.8 | poolact/restricted_search | moderate | naive | 230991.769231 | 25173.179487 | 9834.076814 | unknown (0/39) | 45.179487 | 24.512821 | unknown (0/39) | 0.819506 | 0.048776 |
+| Qwen3.8 | poolact/restricted_search | moderate | cached | 250738.025641 | 23713.897436 | 9106.026165 | unknown (0/39) | 47.461538 | 25.717949 | unknown (0/39) | 0.758836 | 0.043727 |
+| Qwen3.8 | poolact/restricted_search | moderate | poolact | 548091.333333 | 35190.794872 | 7867.017264 | unknown (0/39) | 44.487179 | 21.230769 | unknown (0/39) | 0.655585 | 0.009733 |
+| Qwen3.8 | poolact/restricted_search | tight | naive | 34095.179487 | 7174.333333 | 3966.822959 | unknown (0/39) | 16.512821 | 9.743590 | unknown (0/39) | 1.101895 | 0.052547 |
+| Qwen3.8 | poolact/restricted_search | tight | cached | 35458.282051 | 6880.897436 | 3905.680213 | unknown (0/39) | 16.410256 | 9.461538 | unknown (0/39) | 1.084911 | 0.067137 |
+| Qwen3.8 | poolact/restricted_search | tight | poolact | 60483.846154 | 14122.641026 | 3915.714097 | unknown (0/39) | 16.538462 | 4.717949 | unknown (0/39) | 1.087698 | 0.016294 |
+| Qwen3.8 | poolact/evidence_audit | moderate | naive | 367328.307692 | 44462.923077 | 11892.643388 | unknown (0/13) | 39.461538 | 19.230769 | unknown (0/13) | 0.991054 | 0.008589 |
+| Qwen3.8 | poolact/evidence_audit | moderate | cached | 432017.769231 | 45707.307692 | 11904.439203 | unknown (0/13) | 44.384615 | 22.846154 | unknown (0/13) | 0.992037 | 0.004586 |
+| Qwen3.8 | poolact/evidence_audit | moderate | poolact | 607184.846154 | 60782.153846 | 11360.052137 | unknown (0/13) | 37.769231 | 8.923077 | unknown (0/13) | 0.946671 | 0.012737 |
+| Qwen3.8 | poolact/evidence_audit | tight | naive | 109687.000000 | 43988.384615 | 3572.513785 | unknown (0/13) | 11.846154 | 6.307692 | unknown (0/13) | 0.992365 | 0.000000 |
+| Qwen3.8 | poolact/evidence_audit | tight | cached | 115658.846154 | 47583.000000 | 3529.017576 | unknown (0/13) | 11.846154 | 5.923077 | unknown (0/13) | 0.980283 | 0.008573 |
+| Qwen3.8 | poolact/evidence_audit | tight | poolact | 121894.000000 | 45493.923077 | 3611.961734 | unknown (0/13) | 12.000000 | 3.230769 | unknown (0/13) | 1.003323 | 0.008856 |
+| Qwen3.8 | poolact/tuning | moderate | naive | 635250.222222 | 57983.111111 | 336390.507575 | unknown (0/9) | 46.888889 | 0.666667 | unknown (0/9) | 0.950695 | 0.019584 |
+| Qwen3.8 | poolact/tuning | moderate | cached | 669797.777778 | 61250.888889 | 344911.559275 | unknown (0/9) | 46.666667 | 0.333333 | unknown (0/9) | 0.979511 | 0.027357 |
+| Qwen3.8 | poolact/tuning | moderate | poolact | 2087892.555556 | 120289.888889 | 283669.345161 | unknown (0/9) | 39.666667 | 1.888889 | unknown (0/9) | 0.816040 | 0.014731 |
+| Qwen3.8 | poolact/tuning | tight | naive | 129447.666667 | 32709.666667 | 113055.235318 | unknown (0/9) | 12.111111 | 0.222222 | unknown (0/9) | 1.093464 | 0.095879 |
+| Qwen3.8 | poolact/tuning | tight | cached | 141519.000000 | 37746.000000 | 112835.088630 | unknown (0/9) | 13.333333 | 0.222222 | unknown (0/9) | 1.111161 | 0.057537 |
+| Qwen3.8 | poolact/tuning | tight | poolact | 293542.888889 | 54818.222222 | 104479.993761 | unknown (0/9) | 14.444444 | 0.222222 | unknown (0/9) | 1.027782 | 0.028719 |
+| DeepSeek-0731 | expgym/restricted_search | free | single | 131940.369863 | 11589.178082 | 3387.712077 | 134.496908 | 17.547945 | 0.027397 | 17.547945 | 不适用 | 0.063256 |
+| DeepSeek-0731 | expgym/restricted_search | moderate | single | 68977.479452 | 11360.534247 | 2568.349812 | 127.875105 | 12.794521 | 0.041096 | 12.273973 | 0.856117 | 0.076490 |
+| DeepSeek-0731 | expgym/restricted_search | tight | single | 12432.958904 | 8252.520548 | 1064.204590 | 89.370928 | 4.643836 | 0.013699 | 3.739726 | 1.182450 | 0.121330 |
+| DeepSeek-0731 | expgym/evidence_audit | free | single | 366150.871795 | 21262.435897 | 6914.979495 | 241.673945 | 23.128205 | 0.128205 | 23.128205 | 不适用 | 0.109717 |
+| DeepSeek-0731 | expgym/evidence_audit | moderate | single | 137147.051282 | 17861.641026 | 2904.364756 | 192.190897 | 9.743590 | 0.000000 | 9.179487 | 0.968122 | 0.096219 |
+| DeepSeek-0731 | expgym/evidence_audit | tight | single | 44672.102564 | 16333.564103 | 886.331050 | 175.489407 | 3.000000 | 0.000000 | 2.333333 | 0.984812 | 0.179548 |
+| DeepSeek-0731 | expgym/tuning | free | single | 148796.740741 | 12851.222222 | 216689.802123 | 152.040070 | 16.407407 | 0.037037 | 16.407407 | 不适用 | 0.159228 |
+| DeepSeek-0731 | expgym/tuning | moderate | single | 74453.037037 | 9823.407407 | 109647.200313 | 118.364281 | 9.740741 | 0.037037 | 9.370370 | 0.805942 | 0.127625 |
+| DeepSeek-0731 | expgym/tuning | tight | single | 24947.666667 | 6140.740741 | 34420.824366 | 72.669557 | 4.074074 | 0.000000 | 3.629630 | 0.939236 | 0.239390 |
+| DeepSeek-0731 | poolact/restricted_search | moderate | naive | 186091.435897 | 35565.974359 | 4945.457496 | unknown (0/39) | 24.923077 | 11.948718 | unknown (0/39) | 0.412121 | 0.308474 |
+| DeepSeek-0731 | poolact/restricted_search | moderate | cached | 169259.128205 | 31060.666667 | 4688.736843 | unknown (0/39) | 25.076923 | 13.307692 | unknown (1/39) | 0.390728 | 0.323588 |
+| DeepSeek-0731 | poolact/restricted_search | moderate | poolact | 126466.384615 | 32022.794872 | 2443.333261 | unknown (0/39) | 10.923077 | 4.461538 | unknown (0/39) | 0.203611 | 0.417162 |
+| DeepSeek-0731 | poolact/restricted_search | tight | naive | 66929.128205 | 26095.974359 | 2333.695477 | unknown (0/39) | 11.538462 | 5.948718 | unknown (0/39) | 0.648249 | 0.370000 |
+| DeepSeek-0731 | poolact/restricted_search | tight | cached | 54360.435897 | 26575.743590 | 2935.111190 | unknown (0/39) | 13.435897 | 7.435897 | unknown (2/39) | 0.815309 | 0.309256 |
+| DeepSeek-0731 | poolact/restricted_search | tight | poolact | 80792.692308 | 33809.615385 | 2267.306043 | unknown (0/39) | 9.717949 | 4.846154 | unknown (0/39) | 0.629807 | 0.402962 |
+| DeepSeek-0731 | poolact/evidence_audit | moderate | naive | 376721.692308 | 109929.461538 | 5595.334333 | unknown (0/13) | 18.846154 | 4.615385 | unknown (1/13) | 0.466278 | 0.353350 |
+| DeepSeek-0731 | poolact/evidence_audit | moderate | cached | 473478.461538 | 82999.076923 | 7514.718550 | unknown (0/13) | 32.153846 | 9.846154 | unknown (1/13) | 0.626227 | 0.235076 |
+| DeepSeek-0731 | poolact/evidence_audit | moderate | poolact | 302074.461538 | 84832.384615 | 2959.628886 | unknown (0/13) | 10.461538 | 1.615385 | unknown (2/13) | 0.246636 | 0.447477 |
+| DeepSeek-0731 | poolact/evidence_audit | tight | naive | 249212.230769 | 104833.769231 | 2059.258741 | unknown (0/13) | 7.000000 | 2.538462 | unknown (1/13) | 0.572016 | 0.459612 |
+| DeepSeek-0731 | poolact/evidence_audit | tight | cached | 194020.846154 | 82773.846154 | 1913.588035 | unknown (0/13) | 7.000000 | 2.153846 | unknown (1/13) | 0.531552 | 0.453801 |
+| DeepSeek-0731 | poolact/evidence_audit | tight | poolact | 132750.769231 | 61874.000000 | 624.278457 | unknown (0/13) | 2.230769 | 0.692308 | unknown (2/13) | 0.173411 | 0.631380 |
+| DeepSeek-0731 | poolact/tuning | moderate | naive | 269754.333333 | 72492.444444 | 66391.563171 | unknown (0/9) | 9.888889 | 0.666667 | unknown (1/9) | 0.188325 | 0.505538 |
+| DeepSeek-0731 | poolact/tuning | moderate | cached | 278340.000000 | 77948.222222 | 94525.820157 | unknown (0/9) | 15.222222 | 1.666667 | unknown (3/9) | 0.336466 | 0.453267 |
+| DeepSeek-0731 | poolact/tuning | moderate | poolact | 212592.333333 | 55006.666667 | 31728.029487 | unknown (0/9) | 5.111111 | 0.444444 | unknown (3/9) | 0.120280 | 0.586604 |
+| DeepSeek-0731 | poolact/tuning | tight | naive | 229168.444444 | 72176.222222 | 46493.551731 | unknown (0/9) | 9.000000 | 2.222222 | unknown (1/9) | 0.492657 | 0.461251 |
+| DeepSeek-0731 | poolact/tuning | tight | cached | 168160.333333 | 82649.222222 | 40665.060096 | unknown (0/9) | 6.666667 | 0.777778 | unknown (0/9) | 0.389056 | 0.470592 |
+| DeepSeek-0731 | poolact/tuning | tight | poolact | 238965.888889 | 89996.333333 | 46509.283440 | unknown (0/9) | 6.777778 | 0.222222 | unknown (0/9) | 0.463469 | 0.465028 |
+
+
+### 4.1 有效结果与完整尝试的总体模型用量
+
+| 模型 | 有效分析单元 / 逻辑结果 / agent 结果 | 正式持久化请求数 | Input tokens | Output tokens | 其中 reasoning tokens |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Kimi-K3 | 705 / 783 / 1881 | 16,387 | 124,643,382 | 15,971,159 | 13,781,826 |
+| GLM-5.3 | 705 / 783 / 1881 | 18,403 | 323,702,359 | 61,759,454 | 59,754,394 |
+| Qwen3.8 | 705 / 783 / 1881 | 18,121 | 140,855,799 | 14,652,505 | 12,785,832 |
+| DeepSeek-V4-Flash-0731 | 705 / 783 / 1881 | 14,300 | 105,359,032 | 23,345,301 | 18,484,906 |
+
+上表 Kimi 是最终有效结果用量；包含原失败尝试的**已知** input / output 小计为 126,556,991 / 16,272,997，另有 63 次用量未知，不能把该小计写成完整已知总量。GLM 的完整尝试与有效结果相同；Qwen / DeepSeek 的 `all_physical_attempts` 与 `effective_slots` 总计相同。正式 HTTP 总账不把 native / task smoke 加入正式质量分母。
+
+Qwen / DeepSeek 的 reasoning 读取同时支持 usage 顶层与嵌套形状，不按 reasoning 文本估算，也不重复加入 output。DeepSeek 的推荐成本源为 `full_v2`；修复只补齐漏读的 reasoning 用量，原科学结果未被重新评分。各模型 tokenizer、推理设置、任务进程结构与服务拓扑不同，以上 token 数不是直接可比的有效计算量。
+
+### 4.2 实际 Slurm 分配成本与队列历时
+
+| 模型 | 本次冻结总账内 Slurm allocation | allocation GPU-hours | 口径 |
+| --- | --- | ---: | --- |
+| Kimi-K3 | 1203653、1203933 | 1259.235556 | 原服务及固定 8 项恢复服务；包含加载、验证、等待和空闲 |
+| GLM-5.3 | 1203652 | 1342.648889 | 一次完整服务分配；包含准备与非正式执行时间 |
+| Qwen3.8 | 1204491、1204495 | 468.204444 | 包含失败启动 21.04 GPU-hours 及最终服务分配 |
+| DeepSeek-V4-Flash-0731 | 1204605、1204607 | 98.062222 | 包含编译缓存隔离前的启动与最终服务分配 |
+
+每项以顶层 job 的实际分配 GPU 数 × Slurm elapsed 秒 ÷3600 计算，不再乘副本数或重复加入 batch/extern steps。这是**资源保留量**，不是实测有效 GPU compute、formal-only 用量或完整项目历史总成本；不同服务拓扑、并发、精度、模型规模、加载和空闲都影响它，不能据此宣称模型本身速度或成本效率的因果排名。
+
+Qwen 正式队列从 2026-09-10 23:51:51 UTC 到 2026-09-11 13:24:48 UTC，两 session 的 elapsed 分别为 8196.595 s 与 40440.522 s，中间有已记录的停止准入、自然 drain 与同计划续接；已有完成项只作身份校验，不重算得分或重跑模型。DeepSeek 全部正式执行在 2026-09-11 04:39:11–06:48:03 UTC 自然完成，队列 elapsed 为 7731.582 s，正式 workers 全程为 32。两者 HTTP request wall 合计分别为 482219.492 s 与 274929.122 s，不能相加或与 queue wall 混用来推导实验历时。四副本动态补位也不证明所有 GPU 全程饱和。
+
+固定账本：[Kimi / GLM 总成本](https://github.com/tiannuo-yang/LLM_ExpGym/blob/6119f9d136c9ed1f06a7bedd7371be0deb9b5d59/results/portable-eval-20260908/full_delivery_v5/kimi-k3-fixed8-composite-20260910/analysis/dual_model_analysis_fixed8_v2/COSTS.json)；[Qwen HTTP 成本](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ff8c572b6a00c33964a00a8fb991fd79dcf900e4/results/qwen38-20260910/analysis/full_v1/COSTS.json)、[Slurm/queue 账本](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ff8c572b6a00c33964a00a8fb991fd79dcf900e4/results/qwen38-20260910/study/accounting.json)；[DeepSeek HTTP 成本](https://github.com/tiannuo-yang/LLM_ExpGym/blob/8c79111de3398d12fb36ba349d8f4266f2330200/results/deepseek-flash-0731-20260911/analysis/full_v2/COSTS.json)、[Slurm 账本](https://github.com/tiannuo-yang/LLM_ExpGym/blob/8c79111de3398d12fb36ba349d8f4266f2330200/results/deepseek-flash-0731-20260911/study/allocation_final/ACCOUNTING.json)。
+
+## 5. 围绕主张的归纳
+
+1. **反馈预算收紧带来的退化具有跨模型共同方向。** 四模型 Search F1 与 Audit EA 在 Free→Tight 均下降；Moderate 列说明损失发生在哪一段。Kimi、GLM、Qwen 的 HPO 总体 Gap 也下降；DeepSeek 因完整配置分母缺失，不能给出同等级的 HPO 结论。Audit LA 与 EA 的方向并不总相同，不把证据端点退化扩大到所有能力。
+2. **PoolAct 的收益能跨部分模型出现，但有清晰边界。** Kimi、GLM、Qwen 的六组主要展示端点均优于 naive；四模型 Tight Search F1-MV 共同改善。DeepSeek Moderate Search、Audit 的负向结果以及 HPO unknown 同样构成结论的一部分，排除了本轮“所有模型、所有场景稳定改善”的概括。
+3. **cached 是必要中间对照，协调不总比缓存更好。** Qwen Tight Search 投票质量低于 cached，说明 poolact−naive 为正仍不能证明协调部分优于仅缓存。NAS 同时保留 MI 与 BoN，区分成员平均质量和最佳候选质量。
+4. **这里比较的是固定设置下的质量与资源取舍，不是等实际成本下的普适优势。** N=4 和每 agent 同反馈预算没有控制 token、推理锁、服务并发或 GPU 分配成本。四模型的源码/provider、采样设置、上下文与拓扑不同，合报是同任务上的并列描述，不是纯模型能力排行榜、跨模型总体推断或统计显著性证据。
+
+这些结论对应四个已经运行的 checkpoint、所列固定任务及冻结生成设置。结果相符与不相符都保留；报告整理不能将完整性验收改成“必须得到预期性能趋势”。
+
+## 6. 表格文件与生成方法
+
+[全部绝对聚合指标](absolute_settings.csv) 保留各模型、系统、场景、任务层次、档位、策略、指标与分母；[全部对照差值](contrasts.csv) 保留比较方向、完整端点及 known 子集；[逐 seed-block 表](by_outerseed.csv) 保留重复层结果。[TABLES.md](TABLES.md) 与 [REPEATS.md](REPEATS.md) 提供完整可读附件，正文按原八章结构组织主要表格，而不是另选一套有利数字。
+
+输入固定清单见 [INPUTS.json](INPUTS.json)，本次生成器见 [build_report.py](build_report.py)，针对报告适配与聚合契约的测试见 [test_report.py](test_report.py)。`inputs/` 内是按清单固定 Git commit 取得的原样小型 CSV/JSON 快照；下载本报告目录后可离线运行以下命令，不依赖原始 dump 或旧绝对路径：
+
+```bash
+python3 -B -m unittest -v test_report test_archive_index
+python3 -B build_report.py --check
+```
+
+去掉 `--check` 可从快照与 [正文模板](REPORT_TEMPLATE.zh.md) 重新生成表格和正文。索引的独立复建入口与六个固定外部索引输入见 [ARCHIVE_INDEX.md](ARCHIVE_INDEX.md)。本次仅读取列明的冻结导出并统一展示，不调用模型、scorer 或工具环境，不修改旧 metrics、原始终态、请求/回复、归档或旧分析器。原报告中的展示舍入不作为计算新差值的输入；先使用冻结未舍入值，再格式化。旧模型对照是完整冻结均值的描述性差，新模型直接保留原生配对导出的结果；有缺失时不对不同 known 子集的均值做差。
+
+旧模型与新模型导出 schema 不同，适配时明确映射模型、分析单元、档位、指标、完整与缺失分母；已折叠的 Audit orders 不再折叠第二次。保留旧 CSV 的真实资源单位，并使新模型原本缺少的 Pool wall 继续为 unknown。原 `raw_terminals` 仅为终态投影，不替代 HTTP 原始 dump；本次 CSV 也不是重新签发的逐题评分证据。
+
+此次输入身份和哈希的读取范围、继承的旧检查声明以及实际生成核对范围，以 [INPUTS.json](INPUTS.json)、[REVIEW.md](REVIEW.md) 与 [VALIDATION.json](VALIDATION.json) 为准，不把本次元数据比对写成又做了一次全量 raw/归档验证。
+
+## 7. 原始 dump、聚合比较与恢复：完整存档索引
+
+**统一入口：** [ARCHIVE_INDEX.md](ARCHIVE_INDEX.md) · [ARCHIVE_INDEX.json](ARCHIVE_INDEX.json)。这里汇集既有原件、逐文件 member inventory、归档分片、分析 CSV、全部尝试成本与恢复说明，原件留在各自固定发布提交，不复制或重打包已有大文件。
+
+| 模型 | 完整原报告 | 原始 dump 与聚合完整索引 |
+| --- | --- | --- |
+| Kimi-K3 / GLM-5.3 | [双模型全设置报告](https://github.com/tiannuo-yang/LLM_ExpGym/blob/0ee6f4a2f69a463fdf98f8d787b4ce5662a5af91/results/portable-eval-20260908/full_matrix_report_v1/README.zh.md) | [双模型完整索引](https://github.com/tiannuo-yang/LLM_ExpGym/blob/0ee6f4a2f69a463fdf98f8d787b4ce5662a5af91/results/portable-eval-20260908/full_matrix_report_v1/ARCHIVE_INDEX.md) · [JSON](https://github.com/tiannuo-yang/LLM_ExpGym/blob/0ee6f4a2f69a463fdf98f8d787b4ce5662a5af91/results/portable-eval-20260908/full_matrix_report_v1/ARCHIVE_INDEX.json) |
+| Qwen3.8 | [全设置报告](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ff8c572b6a00c33964a00a8fb991fd79dcf900e4/results/qwen38-20260910/report/README.zh.md) | [完整索引](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ff8c572b6a00c33964a00a8fb991fd79dcf900e4/results/qwen38-20260910/report/ARCHIVE_INDEX.md) · [JSON](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ff8c572b6a00c33964a00a8fb991fd79dcf900e4/results/qwen38-20260910/report/ARCHIVE_INDEX.json) |
+| DeepSeek-V4-Flash-0731 | [全设置报告](https://github.com/tiannuo-yang/LLM_ExpGym/blob/8c79111de3398d12fb36ba349d8f4266f2330200/results/deepseek-flash-0731-20260911/report/README.zh.md) | [完整索引](https://github.com/tiannuo-yang/LLM_ExpGym/blob/8c79111de3398d12fb36ba349d8f4266f2330200/results/deepseek-flash-0731-20260911/report/ARCHIVE_INDEX.md) · [JSON](https://github.com/tiannuo-yang/LLM_ExpGym/blob/8c79111de3398d12fb36ba349d8f4266f2330200/results/deepseek-flash-0731-20260911/report/ARCHIVE_INDEX.json) |
+
+Kimi / GLM 的原始数据固定于 `6119f9d136c9ed1f06a7bedd7371be0deb9b5d59`；Qwen 与 DeepSeek 的推荐分析分别为 `analysis/full_v1` 与 `analysis/full_v2`。统一索引明确区分原 collection、逐原件清单、tar 分片、外层 CSV/JSON/报告及本次合报附件；不把 Kimi composite 引用的原包再作为一份新物理副本累计。
+
+存档时应同时保留索引引用的原件清单、分片、外层分析/成本附件和本报告，只有 tar 不足以保存完整研究。按对应历史格式的恢复说明和工具操作；原归档校验通过仅说明内容完整性，不等于重新评分或科学结论被独立证明。Qwen / DeepSeek 的原分析器绑定绝对原件/状态路径，换一个目录下载可以阅读 raw 和 CSV，但不自动得到任意路径重定位后的逐字节重放能力；不要把继承的 hash 声明写成本次重新恢复或重评分。
+
+## 8. 验收记录
+
+本次按仓库 `expgym-runner` 的“冻结输入→全设置汇总→主问题报告→完整索引→一次成稿独立复核→确切增量发布”流程完成报告层工作。验收目标是完整、忠实、可追溯，不是使四模型必须支持相同方向。
+
+验收记录分别覆盖：冻结输入身份与实际矩阵、schema/分母及 unknown 处理、未舍入值生成表格与差值、源文件与本地链接范围、独立成稿数字/逻辑复核，以及本次发布增量扫描和远端提交身份。实际执行的检查、通过与未通过项、修正范围见 [REVIEW.md](REVIEW.md) 和 [VALIDATION.json](VALIDATION.json)；本节不以计划中的检查冒充已通过。
+
+本次报告任务不申请 GPU、不新增模型调用、不重新评分，不恢复、扫描或重打包全部历史 raw/tar。对旧归档复用已有不可变身份；仅本次新增/修改的发布字节进入增量检查。一次有限复核不能证明没有任何逻辑漏洞，原研究已有的性能负向结果、不可评分端点和复现边界均随本报告保留。
