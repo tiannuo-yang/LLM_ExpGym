@@ -240,7 +240,8 @@ class ServingPlanTests(unittest.TestCase):
     def test_reviewed_pipeline_backend_values_are_explicit_only(self):
         extra = ["--dist-timeout", "1800", "--linear-attn-prefill-backend", "flashinfer",
                  "--linear-attn-decode-backend", "flashinfer", "--mamba-full-memory-ratio", "0.95",
-                 "--mamba-ssm-dtype", "bfloat16", "--max-prefill-tokens", "8192", "--page-size", "64"]
+                 "--mamba-ssm-dtype", "bfloat16", "--max-prefill-tokens", "8192", "--page-size", "64",
+                 "--chunked-prefill-size", "4096"]
         plan = serving.build_plan(self.pipeline_config(), **dict(self.arguments, server_args=extra))
         replica = serving.node_layout(plan, ["n0", "n1", "n2", "n3"])[0]
         for rank in range(4):

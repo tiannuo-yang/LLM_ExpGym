@@ -47,7 +47,8 @@ snapshot of the launcher.
 `--quantization`, `--random-seed`, `--enable-deterministic-inference`,
 `--enable-symm-mem`, `--dist-timeout`, `--linear-attn-prefill-backend`,
 `--linear-attn-decode-backend`, `--mamba-full-memory-ratio`,
-`--mamba-ssm-dtype`, `--max-prefill-tokens` and `--page-size`. For example:
+`--mamba-ssm-dtype`, `--max-prefill-tokens`, `--page-size` and
+`--chunked-prefill-size`. For example:
 
 ```text
 --server-args-json '["--attention-backend", "fa3", "--random-seed", "42"]'
@@ -159,6 +160,11 @@ It does not change either the default schema-1 two-TP16 profile or schema-2
 single-TP8×PP4 profile. This is an explicit topology choice, not a model-name
 adapter. EP remains an explicit launch argument that must divide TP8; the
 example uses EP1 and no automatic architecture inference is performed.
+
+`--chunked-prefill-size` is an explicit, model-independent backend knob, useful
+for bounding a prefill chunk in the [DeepSeek-V4 cookbook](https://docs.sglang.io/cookbook/autoregressive/DeepSeek/DeepSeek-V4).
+It does not change the experiment's output-token limit, reasoning effort or
+step/feedback budgets. The selected runtime still validates its supported value.
 
 Allocated node N owns replica N, each with `--tp-size 8 --pp-size 1 --nnodes 1
 --node-rank 0`. Each replica has its own head-node rendezvous and HTTP endpoint.

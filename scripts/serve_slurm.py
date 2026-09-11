@@ -28,7 +28,7 @@ BACKEND_VALUE_FLAGS = {"--moe-runner-backend", "--attention-backend", "--samplin
                        "--quantization", "--random-seed", "--dist-timeout",
                        "--linear-attn-prefill-backend", "--linear-attn-decode-backend",
                        "--mamba-full-memory-ratio", "--mamba-ssm-dtype",
-                       "--max-prefill-tokens", "--page-size"}
+                       "--max-prefill-tokens", "--page-size", "--chunked-prefill-size"}
 BACKEND_SWITCH_FLAGS = {"--enable-deterministic-inference", "--enable-symm-mem"}
 
 
