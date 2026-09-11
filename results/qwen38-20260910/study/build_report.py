@@ -628,6 +628,7 @@ def render(description, data, context, units, links, descriptor_sha):
             "metrics_execution 是执行层；metrics 是 Audit 已折叠一次的分析层；normalized 是唯一有效槽位映射；raw_terminals 是终态投影，不是 HTTP 回复。all_attempt_costs 与原始请求/回复的完整映射入口分别是成本表和 SOURCE_INDEX/存档索引。",
             table(("显式输入", "字节", "SHA256", "本次使用范围"), input_rows),
             "## 8. 生成与有限验收",
+            "本稿最终生成器见 [同一报告提交的 build_report.py](../study/build_report.py)，输入描述见 [report_inputs.json](../study/report_inputs.json)。数据提交和 tar 内保留的是封存时的历史工具版本；成稿复核后的文案修订工具随本报告提交，不能将历史版本当作本稿实际生成器。分析数据与原始封包未改变。",
             "报告输入描述 SHA256：`%s`；生成器 SHA256：`%s`。没有模型调用、重评分、raw 恢复或归档内容扫描。" % (descriptor_sha, sha(Path(__file__).read_bytes())),
             "生成器检查 schema、固定输入 SHA、覆盖/分母、对照方向与均值差（1e-10 浮点容差）及固定提交链接格式；仅允许两份存档索引用精确同目录文件名，随本报告固定提交解析。显示保留六位有效数字，真实 CSV 值不改写。`--check` 只比较这三份 Markdown 的精确字节，不写文件。链接实际可达性、索引内容与一次成稿后的独立数值/逻辑复核仍由发布流程完成；本生成器不把自身检查称为独立复核。"]
     appendix = ["# 全部 family / task 与资源表", "本附件直接展示冻结聚合表，不重新评分。unknown 与已知子集严格区分；层级 all/family/task 不相加当作额外样本。",
@@ -636,7 +637,7 @@ def render(description, data, context, units, links, descriptor_sha):
                 "## 资源：全部层次", absolute_table([r for r in absolute if not quality(r)]),
                 "## 资源：全部差值", "资源差值只描述消耗变化；正负不能单独解释为性能改善。", contrast_table([r for r in contrasts if not quality(r)])]
     repeat_rows = [r for r in repeats if r["scenario"] == "tuning" and quality(r)]
-    repeated = ["# Tuning R3 明细", "outerrep 0/1/2 对应三个独立队列 stage 的 seed block 2200/2204/2208；seed 标签不是独立生成保证。所有 tuning 指标、family/task/all、档位和策略均保留。Search / Pool Audit 是 R1；Exp Audit 三顺序已经按文档平均一次，不再冒充 R3。完整含资源的 block 数据请见主报告链接的 by_outerseed.csv。",
+    repeated = ["# Tuning R3 明细", "outerrep 0/1/2 对应同一 flat plan 中三个 R1 stage 的 seed block 2200/2204/2208；seed 标签不是独立生成保证。所有 tuning 指标、family/task/all、档位和策略均保留。Search / Pool Audit 是 R1；Exp Audit 三顺序已经按文档平均一次，不再冒充 R3。完整含资源的 block 数据请见主报告链接的 by_outerseed.csv。",
                 table(("系统", "场景", "层/切片", "档位", "策略", "指标", "单位", "outerrep", "seed 标签", "完整均值", "known/expected", "missing", "已知子集"),
                       [[r["system"], r["scenario"], r["slice_kind"] + "/" + r["slice"], r["regime"], r["strategy"], r["metric"], r["unit"], r["outerrep"], r["seed_labels"], r["full_mean"],
                         "%s/%s" % (r["known_outcomes"], r["expected_outcomes"]), r["missing_outcomes"], r["known_subset_item_weighted_mean"]] for r in ordered(repeat_rows)])]

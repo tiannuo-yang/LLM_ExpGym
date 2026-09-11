@@ -352,7 +352,8 @@ def markdown(index):
             security["scanner_sha256"], security["known_secret_sources"], security["advisory_count"])]
     else:
         lines += ["", "manifest 原有声明为 `public_scan_passed=false`：这是 local-only 封包，不能据此视为公开发布通过；下述 `--require-public-scan` 会拒绝它。"]
-    lines += ["", "## 验证、选择性恢复与分析重放", "",
+    lines += ["", "最终索引生成器见 [同一报告提交的 build_archive_index.py](../study/build_archive_index.py)。数据提交和 tar 内工具是封存时的历史版本；成稿复核后的文案修订版本随本报告提交，不应混淆。此修订没有改动原件、分析值或 archive identity。", "",
+              "## 验证、选择性恢复与分析重放", "",
               "使用冻结源码 `%s` 中的 %s 与 %s；先核对下载提交/manifest 身份，再调用对应版本。" % (
                   SOURCE_COMMIT, link("scripts/package_run.py", index["restore"]["package_run"]), link("expgym/delivery.py", index["restore"]["delivery"])), "",
               "默认验证全部 shard 和全部 member，恢复 **0 个文件**：", "", "```bash",
@@ -362,7 +363,7 @@ def markdown(index):
               "```", "", "如果只需部分原件，以原 member 相对路径写非空 JSON 字符串数组作为选择清单；增加：", "", "```bash",
               "  --select /absolute/selected-member-paths.json \\",
               "  --restore-dir /absolute/fresh-selected-inputs", "```", "",
-              "`--select` / `--restore-dir` 只决定写出哪些文件，仍校验全部分片与全部未选中成员。恢复目录必须事先不存在；失败可能留下不完整私有目录。只有 CLI exit 0 表示该次完整性验证完成，目录存在不等于成功；完整性不等于重新评分或科学真实性证明。外层附件不是 tar member，须另取并按其继承 pin 校验。", "",
+              "`--select` / `--restore-dir` 只决定写出哪些文件，仍校验全部分片与全部未选中成员。恢复目录必须事先不存在；失败可能留下不完整私有目录。只有 CLI exit 0 表示该次完整性验证完成，目录存在不等于成功；完整性不等于重新评分或科学真实性证明。外层附件作为独立文件分发；有 member_path 身份绑定的副本也存在于 tar 中，无副本的附件须另取并按其继承 pin 校验。", "",
               "`--require-public-scan` 只检查可信 manifest 的原扫描声明，不重新读取密钥或扫描内容。未核对 manifest 的来源时，一个手写 true 不构成可信证据。", "",
               "当前 `analyze_qwen.py` 内部绑定绝对 state/artifact/authorization 路径，没有 `--relocate` 或 `--path-map`。任意新根可用于查看/验证 raw 与 CSV，不自动支持原样 raw→analysis 重放。原重放需要冻结的绝对布局、脚本/Python 身份和全部实际读取依赖（包括 controller.lock、session 元数据及所选授权记录），以及新的输出目录；不能假定只恢复几份 CSV 足够。需要逐字节重放时还应保留记录中的实际输入/脚本路径和解释器版本。", "",
               "不推荐用 symlink 绕过布局：分析器拒绝 symlink 父目录。修改绑定路径会形成新的 input identity，不能宣称已经通过原身份的重放；本索引未尝试这种迁移。原始源码/数据/权重的身份记录不代表其实体已收入当前 tar。", ""]

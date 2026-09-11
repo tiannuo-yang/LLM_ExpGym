@@ -335,6 +335,11 @@ class BuildReportTests(unittest.TestCase):
         output = fixture.read_output()
         for seed in ("2200", "2204", "2208"):
             self.assertIn(seed, output["REPEATS.md"])
+        self.assertIn("同一 flat plan 中三个 R1 stage", output["REPEATS.md"])
+        self.assertNotIn("独立队列 stage", output["REPEATS.md"])
+        self.assertIn("../study/build_report.py", output["README.zh.md"])
+        self.assertIn("../study/report_inputs.json", output["README.zh.md"])
+        self.assertIn("历史工具版本", output["README.zh.md"])
         text = "\n".join(output.values())
         self.assertIn("117", text)
         self.assertIn("39", text)

@@ -102,6 +102,11 @@ class ArchiveIndexTests(unittest.TestCase):
     def test_restoration_boundaries_and_fixed_tool_old_report_urls(self):
         index = self.build()
         body = markdown(index).decode()
+        self.assertIn("有 member_path 身份绑定的副本也存在于 tar 中", body)
+        self.assertIn("无副本的附件须另取", body)
+        self.assertNotIn("外层附件不是 tar member", body)
+        self.assertIn("../study/build_archive_index.py", body)
+        self.assertIn("封存时的历史版本", body)
         for phrase in ("恢复 **0 个文件**", "仍校验全部分片与全部未选中成员", "CLI exit 0",
                        "没有 `--relocate` 或 `--path-map`", "controller.lock", "input identity",
                        "不推荐用 symlink", "不是 Git clone 大小", "local-only", "更晚提交"):
