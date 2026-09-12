@@ -1,0 +1,2153 @@
+diff --git a/demo_experiment.py b/demo_experiment.py
+index 69c4b3a3f235fd81b44b7c5c7e0bb39f7d7c11d6..d92c61b162a1e331b133a93674dc13e15af916a8 100755
+--- a/demo_experiment.py
++++ b/demo_experiment.py
+@@ -118,6 +118,31 @@ def build_llm(
+     if backend == "fake":
+         final_answer = plan[-1][1] if plan else None
+         return FakeLLM(plan=plan, final_answer=final_answer)
++    api_protocol = getattr(args, "api_protocol", "chat")
++    if api_protocol != "chat":
++        if backend not in {"sub2api", "openai"}:
++            raise ValueError("Native API protocols require the sub2api or openai backend")
++        if api_protocol == "responses":
++            from expgym.native_responses_client import NativeResponsesLLM
++            client_type = NativeResponsesLLM
++        elif api_protocol == "anthropic":
++            from expgym.native_anthropic_client import NativeAnthropicLLM
++            client_type = NativeAnthropicLLM
++        else:
++            raise ValueError("Unknown API protocol: " + api_protocol)
++        key_env = "SUB2API_API_KEY" if backend == "sub2api" else "OPENAI_API_KEY"
++        url_env = "SUB2API_BASE_URL" if backend == "sub2api" else "OPENAI_BASE_URL"
++        return client_type(
++            api_key=args.api_key or os.getenv(key_env),
++            model=args.model,
++            system_prompt=system_prompt,
++            temperature=getattr(args, "temperature", 0.0),
++            seed=args.seed,
++            base_url=args.base_url or os.getenv(url_env),
++            prompt_cache_key=prompt_cache_key,
++            **_generation_options(args, backend=backend),
++            **_transport_options(args),
++        )
+     if backend == "openai":
+         from expgym.llm_clients import OpenAICompatibleLLM
+ 
+@@ -205,13 +230,16 @@ def _generation_options(
+         if chat_kwargs.get("enable_thinking") not in (None, False):
+             raise ValueError("--vllm-disable-thinking conflicts with chat_template_kwargs.enable_thinking")
+         chat_kwargs["enable_thinking"] = False
+-    return {
++    options = {
+         "max_tokens": getattr(args, "max_tokens", None),
+         "top_p": getattr(args, "top_p", 1.0),
+         "top_k": getattr(args, "top_k", None),
+         "chat_template_kwargs": chat_kwargs,
+         "reasoning_effort": getattr(args, "reasoning_effort", None),
+     }
++    if getattr(args, "api_protocol", "chat") != "chat":
++        options["api_protocol"] = args.api_protocol
++    return options
+ 
+ 
+ def _loop_options(args: argparse.Namespace) -> Dict[str, object]:
+@@ -224,6 +252,8 @@ def _loop_options(args: argparse.Namespace) -> Dict[str, object]:
+ 
+ 
+ def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
++    parser.add_argument("--api-protocol", choices=["chat", "responses", "anthropic"], default="chat",
++                        help="Explicit wire API; native adapters preserve provider reasoning state and record parameter omissions.")
+     parser.add_argument("--missing-final-policy", choices=["error", "task-abstention-v1"], default="error",
+                         help="Explicit post-loop missing-answer policy; does not change model requests or budgets.")
+     def positive_integer(value: str) -> int:
+diff --git a/expgym/extras/parallel_cache.py b/expgym/extras/parallel_cache.py
+index 354ed34c10bfcf6392393a3197d29b8f85c2a4f3..06a070d58c421e2dc09a7d403481a376ea36a664 100644
+--- a/expgym/extras/parallel_cache.py
++++ b/expgym/extras/parallel_cache.py
+@@ -14,6 +14,7 @@ Provides:
+ from __future__ import annotations
+ 
+ import copy
++import hashlib
+ import json
+ import math
+ import re
+@@ -649,6 +650,7 @@ class SharedExplorationGraph:
+         self._fetch_nodes: Dict[int, FetchNode] = {}    # doc_id -> node
+         self._end_nodes: Dict[str, EndNode] = {}        # answer -> node
+         self._eval_nodes: Dict[str, EvalNode] = {}      # config_key -> node
++        self._eval_key_payloads: Dict[str, str] = {}    # digest identity -> full payload
+ 
+         # Edges: (source_key, target_key) -> GraphEdge
+         self._edges: Dict[Tuple[str, str], GraphEdge] = {}
+@@ -866,7 +868,45 @@ class SharedExplorationGraph:
+         return 'END:"{}"'.format(short)
+ 
+     def _eval_key(self, config_key: str) -> str:
+-        return "E:{}".format(config_key[:80])
++        # Path identity must include the complete canonical payload. Truncating
++        # JSON merges distinct long configurations into false transitions/loops.
++        # This full digest is internal; visible paths use snapshot-local labels.
++        # Cache, claim and observation dedup still use their full payload keys.
++        return "E:sha256:{}".format(hashlib.sha256(config_key.encode("utf-8")).hexdigest())
++
++    def _eval_display_keys(self, eval_nodes: Dict[str, EvalNode]) -> Dict[str, str]:
++        """Map full identities to compact IDs using only this visible snapshot.
++
++        Short canonical JSON retains its original readable path label. Long
++        keys use hash prefixes; all colliding prefixes expand together. These
++        aliases are snapshot-local, not a pool-global registry influenced by
++        observations that are still hidden from the receiving agent.
++        """
++        short = {}
++        long = {}
++        for config_key in eval_nodes:
++            identity = self._eval_key(config_key)
++            if len(config_key) <= 80:
++                short[identity] = "E:" + config_key
++            else:
++                long[identity] = 12
++        while True:
++            aliases = dict(short)
++            aliases.update({identity: "E:h:" + identity.rsplit(":", 1)[1][:width]
++                            for identity, width in long.items()})
++            by_alias: Dict[str, List[str]] = {}
++            for identity, alias in aliases.items():
++                by_alias.setdefault(alias, []).append(identity)
++            conflicts = [identities for identities in by_alias.values()
++                         if len(identities) > 1]
++            if not conflicts:
++                return aliases
++            for identities in conflicts:
++                expandable = [identity for identity in identities if identity in long]
++                if not expandable or any(long[identity] >= 64 for identity in expandable):
++                    raise ValueError("Cannot assign distinct evaluation graph display IDs")
++                for identity in expandable:
++                    long[identity] += 1
+ 
+     def _add_edge(self, source: str, target: str, agent_id: int) -> None:
+         """Add or increment an edge. Caller must hold _lock."""
+@@ -1017,11 +1057,15 @@ class SharedExplorationGraph:
+             completion_time: Simulated time when this eval completed.
+         """
+         with self._lock:
++            ekey = self._eval_key(config_key)
++            previous_payload = self._eval_key_payloads.get(ekey)
++            if previous_payload is not None and previous_payload != config_key:
++                raise ValueError("Evaluation graph identity digest collision")
+             completion_time = self._remember_observation(
+                 "record_evaluate_config",
+                 (agent_id, config_key, config_display, perf, cost), completion_time,
+             )
+-            ekey = self._eval_key(config_key)
++            self._eval_key_payloads[ekey] = config_key
+             if config_key not in self._eval_nodes:
+                 self._eval_nodes[config_key] = EvalNode(
+                     config_key=config_key,
+@@ -1124,6 +1168,12 @@ class SharedExplorationGraph:
+                 and not pending_claims:
+             return ""
+ 
++        # Render from the filtered snapshot only. Keep internal edge identities
++        # untouched, and use the same alias map in observation rows and paths.
++        eval_display_keys = self._eval_display_keys(eval_nodes)
++        edges = {(eval_display_keys.get(src, src), eval_display_keys.get(tgt, tgt)): edge
++                 for (src, tgt), edge in edges.items()}
++
+         # Diversity mode: unified coverage-map format for all scenarios
+         if self._diversity_mode:
+             return self._format_unified(
+@@ -1131,11 +1181,13 @@ class SharedExplorationGraph:
+                 end_nodes, edges,
+                 agent_id=agent_id,
+                 pending_claims=pending_claims,
++                eval_display_keys=eval_display_keys,
+             )
+ 
+         # Non-diversity mode: original formats
+         if eval_nodes and not search_nodes and not fetch_nodes:
+-            return self._format_tuning_default(eval_nodes, end_nodes, edges)
++            return self._format_tuning_default(eval_nodes, end_nodes, edges,
++                                               eval_display_keys=eval_display_keys)
+         return self._format_default(
+             search_nodes, fetch_nodes, end_nodes, edges,
+         )
+@@ -1254,6 +1306,7 @@ class SharedExplorationGraph:
+         *,
+         agent_id: Optional[int] = None,
+         pending_claims: Optional[List[ActionClaim]] = None,
++        eval_display_keys: Dict[str, str],
+     ) -> str:
+         """Unified coverage-map format for all scenarios in diversity mode.
+ 
+@@ -1337,10 +1390,14 @@ class SharedExplorationGraph:
+             for node in sorted_nodes:
+                 who = sorted(node.visited_by)
+                 marker = " (you)" if agent_id in who else ""
++                display = node.config_display
++                if len(node.config_key) > 80:
++                    display = "{} {}".format(eval_display_keys[self._eval_key(node.config_key)],
++                                             display)
+                 if is_audit:
+                     lines.append(
+                         "  {} [agents {}]{}".format(
+-                            node.config_display,
++                            display,
+                             ",".join(str(a) for a in who), marker,
+                         )
+                     )
+@@ -1348,7 +1405,7 @@ class SharedExplorationGraph:
+                     perf_str = "{:.6f}".format(node.perf) if node.perf is not None else "INVALID"
+                     lines.append(
+                         "  {} -> {} [agents {}]{}".format(
+-                            node.config_display, perf_str,
++                            display, perf_str,
+                             ",".join(str(a) for a in who), marker,
+                         )
+                     )
+@@ -1434,6 +1491,8 @@ class SharedExplorationGraph:
+         eval_nodes: Dict[str, EvalNode],
+         end_nodes: Dict[str, EndNode],
+         edges: Dict[Tuple[str, str], GraphEdge],
++        *,
++        eval_display_keys: Dict[str, str],
+     ) -> str:
+         """Default format for tuning: show all configs with perf + cost."""
+         lines = [
+@@ -1456,9 +1515,13 @@ class SharedExplorationGraph:
+ 
+         for node in sorted_nodes:
+             perf_str = "perf={:.6f}".format(node.perf) if node.perf is not None else "INVALID"
++            display = node.config_display
++            if len(node.config_key) > 80:
++                display = "{} {}".format(eval_display_keys[self._eval_key(node.config_key)],
++                                         display)
+             lines.append(
+                 "  {} -> {}, cost={:.0f}s ({}x by [{}])".format(
+-                    node.config_display,
++                    display,
+                     perf_str,
+                     node.cost,
+                     node.visits,
+diff --git a/expgym/native_anthropic_client.py b/expgym/native_anthropic_client.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..a743801ab598a5dfa63085ec25912e80d11c112e
+--- /dev/null
++++ b/expgym/native_anthropic_client.py
+@@ -0,0 +1,330 @@
++"""Explicit Anthropic Messages transport with lossless assistant block replay.
++
++The runner continues to exchange its common message/tool-call representation.
++Only this wire boundary maps tools and tool results. Original native content
++blocks (including opaque thinking signatures) and raw API responses are retained.
++Retry policy, failure accounting and credential-safe dumps are inherited from
++the common client; no model-name heuristics select capabilities.
++"""
++from __future__ import annotations
++
++import copy
++import json
++import urllib.parse
++import urllib.request
++from typing import Dict, Optional, Sequence
++
++from expgym.llm_clients import OpenAICompatibleLLM
++
++
++DEFAULT_OMITTED_PARAMETERS = (
++    "temperature", "top_p", "top_k", "seed", "prompt_cache_key",
++)
++
++
++def _messages_url(base_url: str) -> str:
++    parsed = urllib.parse.urlsplit(base_url.rstrip("/"))
++    path = parsed.path.rstrip("/")
++    if path.endswith("/chat/completions"):
++        path = path[:-len("/chat/completions")] + "/messages"
++    elif not path:
++        path = "/v1/messages"
++    elif not path.endswith("/messages"):
++        path += "/messages"
++    return urllib.parse.urlunsplit(parsed._replace(path=path))
++
++
++class NativeAnthropicLLM(OpenAICompatibleLLM):
++    """Messages API adapter; capabilities must be supplied explicitly.
++
++    ``omitted_parameters`` describes the configured endpoint's unsupported
++    controls. The default is suitable for a Messages endpoint whose sampling
++    controls are fixed. Requested values remain in config and dump metadata,
++    while the actual native payload omits those fields. An empty tuple permits
++    temperature/top_p/top_k, but seed and prompt_cache_key have no native mapping.
++    A routing key does not imply physical provider prompt-cache isolation.
++    """
++
++    api_protocol = "anthropic"
++    requires_immutable_history = True
++
++    def __init__(
++        self, *, api_protocol: str = "anthropic",
++        omitted_parameters: Sequence[str] = DEFAULT_OMITTED_PARAMETERS,
++        thinking: Optional[Dict[str, object]] = None,
++        anthropic_version: str = "2023-06-01",
++        default_max_tokens: int = 8192,
++        **kwargs,
++    ) -> None:
++        if api_protocol != "anthropic":
++            raise ValueError("NativeAnthropicLLM requires api_protocol='anthropic'")
++        if isinstance(omitted_parameters, str):
++            raise ValueError("omitted_parameters must be a sequence of field names")
++        self.omitted_parameters = tuple(omitted_parameters)
++        allowed = set(DEFAULT_OMITTED_PARAMETERS) | {"max_tokens"}
++        if any(name not in allowed for name in self.omitted_parameters):
++            raise ValueError("unsupported omitted_parameters entry")
++        if "max_tokens" in self.omitted_parameters:
++            raise ValueError("Anthropic Messages requires max_tokens")
++        if thinking is not None and not isinstance(thinking, dict):
++            raise ValueError("thinking must be an explicit native configuration object")
++        if (isinstance(default_max_tokens, bool)
++                or not isinstance(default_max_tokens, int) or default_max_tokens < 1):
++            raise ValueError("default_max_tokens must be a positive integer")
++        if not isinstance(anthropic_version, str) or not anthropic_version.strip():
++            raise ValueError("anthropic_version must be non-empty")
++        # These controls cannot be translated faithfully by this adapter.
++        for field in ("provider", "reasoning", "chat_template_kwargs", "nothink_prefix"):
++            if kwargs.get(field):
++                raise ValueError(field + " has no native Anthropic mapping")
++        self.thinking = copy.deepcopy(thinking)
++        self.anthropic_version = anthropic_version
++        self.default_max_tokens = default_max_tokens
++        endpoint = _messages_url(kwargs.pop("base_url", None) or "https://api.anthropic.com/v1")
++        super().__init__(base_url=endpoint, **kwargs)
++        # The parent accepts a complete /messages URL without changing it.
++        self.config.base_url = endpoint
++        self._dump_context.update({
++            "api_protocol": self.api_protocol,
++            "parameter_compatibility": self.parameter_compatibility,
++        })
++
++    @property
++    def parameter_compatibility(self) -> Dict[str, object]:
++        requested = {
++            name: copy.deepcopy(getattr(self.config, name))
++            for name in self.omitted_parameters
++        }
++        return {
++            "api_protocol": self.api_protocol,
++            "anthropic_version": self.anthropic_version,
++            "requires_immutable_history": self.requires_immutable_history,
++            "omitted_parameters": requested,
++            "effort": self.config.reasoning_effort or "high",
++            "effort_source": "explicit" if self.config.reasoning_effort else "provider_default",
++            "thinking": copy.deepcopy(self.thinking) if self.thinking is not None else "provider_default",
++            "max_tokens": self.config.max_tokens or self.default_max_tokens,
++            "provider_cache_isolation": "not_guaranteed",
++            "seed_semantics": "omitted; local task/pool seed does not seed provider generation",
++        }
++
++    @staticmethod
++    def _blocks(content: object) -> list:
++        if content is None:
++            return []
++        if isinstance(content, str):
++            return [{"type": "text", "text": content}] if content else []
++        if not isinstance(content, list):
++            raise ValueError("Native message content must be text, blocks, or null")
++        if any(not isinstance(block, dict) or not isinstance(block.get("type"), str)
++               or not block["type"] for block in content):
++            raise ValueError("Native content blocks require non-empty type strings")
++        return copy.deepcopy(content)
++
++    @classmethod
++    def _native_messages(cls, messages: list) -> tuple:
++        system = []
++        native = []
++        for message in messages:
++            if not isinstance(message, dict):
++                raise ValueError("Messages must be objects")
++            role = message.get("role")
++            if role in ("system", "developer"):
++                if native:
++                    raise ValueError("Mid-conversation system messages require a separately configured native capability")
++                system.extend(cls._blocks(message.get("content")))
++                continue
++            if role == "tool":
++                call_id = message.get("tool_call_id")
++                if not isinstance(call_id, str) or not call_id:
++                    raise ValueError("Tool result requires tool_call_id")
++                content = message.get("content")
++                if not isinstance(content, (str, list)):
++                    raise ValueError("Tool result content must be text or native blocks")
++                blocks = [{"type": "tool_result", "tool_use_id": call_id,
++                           "content": copy.deepcopy(content)}]
++                role = "user"
++            elif role in ("user", "assistant"):
++                blocks = cls._blocks(message.get("content"))
++                if role == "assistant":
++                    if message.get("reasoning_content") or message.get("reasoning"):
++                        raise ValueError("Cannot replay unsigned Chat reasoning as native Anthropic thinking")
++                    calls = cls._normalize_tool_calls(message.get("tool_calls"))
++                    existing = {block.get("id"): block for block in blocks if block["type"] == "tool_use"}
++                    for call in calls:
++                        function = call["function"]
++                        try:
++                            arguments = json.loads(function["arguments"])
++                        except (TypeError, ValueError) as exc:
++                            raise ValueError("Historical native tool arguments must be JSON") from exc
++                        if call["id"] in existing:
++                            block = existing[call["id"]]
++                            if block.get("name") != function["name"] or block.get("input") != arguments:
++                                raise ValueError("Native tool block and internal tool-call alias disagree")
++                        else:
++                            blocks.append({"type": "tool_use", "id": call["id"],
++                                           "name": function["name"], "input": arguments})
++            else:
++                raise ValueError("Unsupported native message role: " + str(role))
++            # Tool results and any following runtime context form one user
++            # message, preserving block order and the entire assistant block list.
++            if native and native[-1]["role"] == role:
++                native[-1]["content"].extend(blocks)
++            else:
++                native.append({"role": role, "content": blocks})
++        return system, native
++
++    def _native_payload(self, payload: Dict[str, object]) -> Dict[str, object]:
++        system, messages = self._native_messages(payload["messages"])
++        native = {
++            "model": payload["model"], "messages": messages,
++            "max_tokens": payload.get("max_tokens", self.default_max_tokens),
++            "stream": False,
++        }
++        if system:
++            native["system"] = system
++        for name in ("temperature", "top_p", "top_k"):
++            if name in payload and name not in self.omitted_parameters:
++                native[name] = payload[name]
++        for name in ("seed", "prompt_cache_key"):
++            if name in payload and name not in self.omitted_parameters:
++                raise ValueError(name + " has no native Anthropic mapping; explicitly omit it")
++        if self.config.reasoning_effort is not None:
++            native["output_config"] = {"effort": self.config.reasoning_effort}
++        if self.thinking is not None:
++            native["thinking"] = copy.deepcopy(self.thinking)
++        if "tools" in payload:
++            tools = []
++            for tool in payload["tools"]:
++                if not isinstance(tool, dict) or tool.get("type") != "function":
++                    raise ValueError("Native adapter requires function tool definitions")
++                function = tool.get("function")
++                if not isinstance(function, dict) or not isinstance(function.get("name"), str):
++                    raise ValueError("Function tool requires a name")
++                converted = {"name": function["name"],
++                             "input_schema": copy.deepcopy(function.get("parameters", {}))}
++                for name in ("description", "strict"):
++                    if name in function:
++                        converted[name] = copy.deepcopy(function[name])
++                tools.append(converted)
++            native["tools"] = tools
++        if "tool_choice" in payload:
++            choice = payload["tool_choice"]
++            if isinstance(choice, str) and choice in ("auto", "none", "required"):
++                converted_choice = {"type": "any" if choice == "required" else choice}
++            elif isinstance(choice, dict) and choice.get("type") == "function":
++                function = choice.get("function") or {}
++                name = function.get("name") or choice.get("name")
++                if not isinstance(name, str) or not name:
++                    raise ValueError("Named tool choice requires a name")
++                converted_choice = {"type": "tool", "name": name}
++            else:
++                raise ValueError("Unsupported tool_choice for native Anthropic adapter")
++            if converted_choice["type"] != "none":
++                converted_choice["disable_parallel_tool_use"] = True
++            native["tool_choice"] = converted_choice
++        return native
++
++    def _build_request(self, payload: Dict[str, object]) -> urllib.request.Request:
++        return urllib.request.Request(
++            self.config.base_url,
++            data=json.dumps(self._native_payload(payload), ensure_ascii=False, allow_nan=False).encode("utf-8"),
++            headers={"Authorization": "Bearer " + self.config.api_key,
++                     "Content-Type": "application/json",
++                     "anthropic-version": self.anthropic_version,
++                     **self.config.extra_headers},
++            method="POST",
++        )
++
++    def _dump_attempt(self, metadata, payload, started, **kwargs) -> None:
++        # Persist the actual native wire payload and original native response,
++        # never the temporary common representation used by the retry engine.
++        super()._dump_attempt(metadata, self._native_payload(payload), started, **kwargs)
++
++    def _attempt_usage_record(self, metadata, state, raw=None, http_status=None):
++        record = super()._attempt_usage_record(metadata, state, raw, http_status)
++        record["api_protocol"] = self.api_protocol
++        record["usage_semantics"] = "anthropic_input_excludes_cache_read_and_creation"
++        return record
++
++    @staticmethod
++    def _validate_usage(usage: object) -> None:
++        OpenAICompatibleLLM._validate_usage(usage)
++        if usage is None:
++            return
++        counts = [(name, usage[name]) for name in (
++            "cache_creation_input_tokens", "cache_read_input_tokens", "thinking_tokens",
++        ) if name in usage]
++        for section in ("cache_creation", "output_tokens_details"):
++            details = usage.get(section)
++            if details is not None:
++                if not isinstance(details, dict):
++                    raise ValueError("API usage " + section + " must be an object or null")
++                counts.extend((section + "." + name, value) for name, value in details.items()
++                              if name.endswith("tokens"))
++        for name, value in counts:
++            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
++                raise ValueError("API usage " + name + " must be a non-negative integer or null")
++
++    @classmethod
++    def _decode_response(cls, raw: bytes) -> tuple:
++        try:
++            data = json.loads(raw.decode("utf-8"))
++        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
++            raise ValueError("API returned invalid JSON") from exc
++        if not isinstance(data, dict) or data.get("type", "message") != "message":
++            raise ValueError("API response is not a native Anthropic message")
++        if data.get("role") != "assistant" or not isinstance(data.get("content"), list):
++            raise ValueError("API response requires assistant role and native content blocks")
++        content = cls._blocks(data["content"])
++        text = []
++        calls = []
++        for block in content:
++            if block["type"] == "text":
++                if not isinstance(block.get("text"), str):
++                    raise ValueError("API text block requires text")
++                text.append(block["text"])
++            elif block["type"] == "thinking":
++                if not isinstance(block.get("thinking"), str) or not isinstance(block.get("signature"), str):
++                    raise ValueError("API thinking block requires thinking text and signature")
++            elif block["type"] == "redacted_thinking":
++                if not isinstance(block.get("data"), str):
++                    raise ValueError("API redacted_thinking block requires opaque data")
++            elif block["type"] == "tool_use":
++                if not isinstance(block.get("input"), dict):
++                    raise ValueError("API tool_use block requires object input")
++                calls.append({"id": block.get("id"), "type": "function", "function": {
++                    "name": block.get("name"),
++                    "arguments": json.dumps(block["input"], ensure_ascii=False, allow_nan=False),
++                }})
++        calls = cls._normalize_tool_calls(calls)
++        stop = data.get("stop_reason")
++        if stop is not None and not isinstance(stop, str):
++            raise ValueError("API stop_reason must be a string or null")
++        if stop == "tool_use" and not calls:
++            raise ValueError("API tool_use stop missing tool calls")
++        finish = {"tool_use": "tool_calls", "end_turn": "stop", "stop_sequence": "stop",
++                  "max_tokens": "length"}.get(stop, stop)
++        cls._validate_usage(data.get("usage"))
++        assistant = {"role": "assistant", "content": content}
++        if calls:
++            # Alias is for the runner's pairing checks only. Native wire replay
++            # uses the untouched content blocks, with no duplicate tool_use.
++            assistant["tool_calls"] = copy.deepcopy(calls)
++        normalized = copy.deepcopy(data)
++        usage = data.get("usage")
++        if isinstance(usage, dict):
++            accounting = copy.deepcopy(usage)
++            parts = [usage.get(name) for name in (
++                "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
++            )]
++            # Anthropic input_tokens excludes reads/writes. Missing pieces
++            # remain unknown; zero is never invented for incomplete accounting.
++            accounting["prompt_tokens"] = sum(parts) if all(isinstance(v, int) for v in parts) else None
++            accounting["input_tokens"] = accounting["prompt_tokens"]
++            accounting["prompt_tokens_details"] = {
++                "cached_tokens": usage.get("cache_read_input_tokens"),
++                "cache_write_tokens": usage.get("cache_creation_input_tokens"),
++            }
++            normalized["usage"] = accounting
++        return normalized, "\n".join(text).strip(), calls, assistant, finish
+diff --git a/expgym/native_responses_client.py b/expgym/native_responses_client.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d314ff73e2be7dcda015e73e1a8b70abfe2dd08
+--- /dev/null
++++ b/expgym/native_responses_client.py
+@@ -0,0 +1,283 @@
++"""Explicit Responses transport with lossless native output-item replay.
++
++The common runner sees assistant messages and function-call aliases. The wire
++boundary retains every native output item, including opaque encrypted reasoning,
++and sends those items back unchanged with their matching function-call results.
++Transport retries, all-attempt accounting and credential-safe dumps are inherited
++from the common client. Capabilities are configured, never guessed from model IDs.
++"""
++from __future__ import annotations
++
++import copy
++import json
++import urllib.parse
++import urllib.request
++from typing import Dict, Sequence
++
++from expgym.llm_clients import OpenAICompatibleLLM
++
++
++DEFAULT_OMITTED_PARAMETERS = (
++    "temperature", "top_p", "top_k", "seed", "max_tokens", "prompt_cache_key",
++)
++OUTPUT_ITEMS_FIELD = "_responses_output"
++
++
++def _responses_url(base_url: str) -> str:
++    parsed = urllib.parse.urlsplit(base_url.rstrip("/"))
++    path = parsed.path.rstrip("/")
++    if path.endswith("/chat/completions"):
++        path = path[:-len("/chat/completions")] + "/responses"
++    elif not path:
++        path = "/v1/responses"
++    elif not path.endswith("/responses"):
++        path += "/responses"
++    return urllib.parse.urlunsplit(parsed._replace(path=path))
++
++
++class NativeResponsesLLM(OpenAICompatibleLLM):
++    """Native Responses adapter with an explicit endpoint capability profile.
++
++    The default omissions describe an endpoint with fixed sampling controls and
++    no accepted output-token limit. Requested values stay in config and audit
++    metadata; the actual request omits them. An empty omission list permits
++    temperature/top_p/max_tokens, but seed and top_k have no Responses mapping.
++    ``max_tokens`` maps to ``max_output_tokens`` only when explicitly supported.
++    """
++
++    api_protocol = "responses"
++    requires_immutable_history = True
++
++    def __init__(
++        self, *, api_protocol: str = "responses",
++        omitted_parameters: Sequence[str] = DEFAULT_OMITTED_PARAMETERS,
++        store: bool = False,
++        include: Sequence[str] = ("reasoning.encrypted_content",),
++        **kwargs,
++    ) -> None:
++        if api_protocol != "responses":
++            raise ValueError("NativeResponsesLLM requires api_protocol='responses'")
++        if isinstance(omitted_parameters, str):
++            raise ValueError("omitted_parameters must be a sequence of field names")
++        self.omitted_parameters = tuple(omitted_parameters)
++        allowed = set(DEFAULT_OMITTED_PARAMETERS)
++        if any(name not in allowed for name in self.omitted_parameters):
++            raise ValueError("unsupported omitted_parameters entry")
++        if not isinstance(store, bool):
++            raise ValueError("store must be a boolean")
++        if isinstance(include, str) or any(not isinstance(value, str) or not value for value in include):
++            raise ValueError("include must be a sequence of non-empty strings")
++        self.store = store
++        self.include = tuple(include)
++        if not store and "reasoning.encrypted_content" not in self.include:
++            raise ValueError("Stateless native history requires reasoning.encrypted_content")
++        for field in ("provider", "chat_template_kwargs", "nothink_prefix"):
++            if kwargs.get(field):
++                raise ValueError(field + " has no native Responses mapping")
++        reasoning = kwargs.get("reasoning")
++        if reasoning is not None:
++            if not isinstance(reasoning, dict) or any(name not in ("effort", "summary") for name in reasoning):
++                raise ValueError("reasoning must be a native Responses effort/summary object")
++            if (kwargs.get("reasoning_effort") is not None and reasoning.get("effort") is not None
++                    and kwargs["reasoning_effort"] != reasoning["effort"]):
++                raise ValueError("reasoning_effort conflicts with native reasoning.effort")
++        endpoint = _responses_url(kwargs.pop("base_url", None) or "https://api.openai.com/v1")
++        super().__init__(base_url=endpoint, **kwargs)
++        self.config.base_url = endpoint
++        self._dump_context.update({
++            "api_protocol": self.api_protocol,
++            "parameter_compatibility": self.parameter_compatibility,
++        })
++
++    @property
++    def parameter_compatibility(self) -> Dict[str, object]:
++        requested = {name: copy.deepcopy(getattr(self.config, name)) for name in self.omitted_parameters}
++        native_reasoning = copy.deepcopy(self.config.reasoning or {})
++        if self.config.reasoning_effort is not None:
++            native_reasoning["effort"] = self.config.reasoning_effort
++        return {
++            "api_protocol": self.api_protocol,
++            "omitted_parameters": requested,
++            "reasoning": native_reasoning or "provider_default",
++            "max_output_tokens": None if "max_tokens" in self.omitted_parameters else self.config.max_tokens,
++            "output_token_limit_enforced_by_client": False,
++            "store": self.store,
++            "include": list(self.include),
++            "provider_cache_isolation": "not_guaranteed",
++            "seed_semantics": "omitted; local task/pool seed does not seed provider generation",
++        }
++
++    @staticmethod
++    def _items(value: object) -> list:
++        if not isinstance(value, list):
++            raise ValueError("Native Responses output must be a list")
++        if any(not isinstance(item, dict) or not isinstance(item.get("type"), str)
++               or not item["type"] for item in value):
++            raise ValueError("Native Responses items require non-empty type strings")
++        return copy.deepcopy(value)
++
++    @classmethod
++    def _calls(cls, items: list) -> list:
++        return cls._normalize_tool_calls([
++            {"id": item.get("call_id"), "type": "function", "function": {
++                "name": item.get("name"), "arguments": item["arguments"],
++            }} for item in items if item["type"] == "function_call" and "arguments" in item
++        ])
++
++    @classmethod
++    def _native_messages(cls, messages: list) -> list:
++        native = []
++        for message in messages:
++            if not isinstance(message, dict):
++                raise ValueError("Messages must be objects")
++            role = message.get("role")
++            if role == "assistant" and OUTPUT_ITEMS_FIELD in message:
++                items = cls._items(message[OUTPUT_ITEMS_FIELD])
++                native_calls = cls._calls(items)
++                aliases = cls._normalize_tool_calls(message.get("tool_calls"))
++                if aliases != native_calls:
++                    raise ValueError("Native output items and internal tool-call aliases disagree")
++                native.extend(items)
++                continue
++            if role == "tool":
++                call_id = message.get("tool_call_id")
++                if not isinstance(call_id, str) or not call_id:
++                    raise ValueError("Tool result requires tool_call_id")
++                content = message.get("content")
++                if not isinstance(content, (str, list)):
++                    raise ValueError("Tool result content must be text or native blocks")
++                native.append({"type": "function_call_output", "call_id": call_id,
++                               "output": copy.deepcopy(content)})
++                continue
++            if role not in ("system", "developer", "user", "assistant"):
++                raise ValueError("Unsupported native message role: " + str(role))
++            if message.get("reasoning_content") or message.get("reasoning"):
++                raise ValueError("Cannot replay Chat reasoning without original native Responses items")
++            content = message.get("content")
++            if content is not None and not isinstance(content, (str, list)):
++                raise ValueError("Message content must be text, blocks, or null")
++            if content is not None:
++                if isinstance(content, list):
++                    content = copy.deepcopy(content)
++                    for block in content:
++                        if not isinstance(block, dict) or not isinstance(block.get("type"), str):
++                            raise ValueError("Message blocks require a type string")
++                        if block["type"] == "text":
++                            block["type"] = "output_text" if role == "assistant" else "input_text"
++                native.append({"role": role, "content": content})
++            calls = cls._normalize_tool_calls(message.get("tool_calls"))
++            if calls and role != "assistant":
++                raise ValueError("Only assistant messages can carry function calls")
++            for call in calls:
++                native.append({"type": "function_call", "call_id": call["id"],
++                               "name": call["function"]["name"],
++                               "arguments": call["function"]["arguments"]})
++        return native
++
++    def _native_payload(self, payload: Dict[str, object]) -> Dict[str, object]:
++        native = {
++            "model": payload["model"], "input": self._native_messages(payload["messages"]),
++            "stream": False, "store": self.store, "include": list(self.include),
++        }
++        for name in ("temperature", "top_p", "prompt_cache_key"):
++            if name in payload and name not in self.omitted_parameters:
++                native[name] = copy.deepcopy(payload[name])
++        if "max_tokens" in payload and "max_tokens" not in self.omitted_parameters:
++            native["max_output_tokens"] = payload["max_tokens"]
++        for name in ("seed", "top_k"):
++            if name in payload and name not in self.omitted_parameters:
++                raise ValueError(name + " has no native Responses mapping; explicitly omit it")
++        reasoning = copy.deepcopy(payload.get("reasoning") or {})
++        if self.config.reasoning_effort is not None:
++            reasoning["effort"] = self.config.reasoning_effort
++        if reasoning:
++            native["reasoning"] = reasoning
++        if "tools" in payload:
++            tools = []
++            for tool in payload["tools"]:
++                if not isinstance(tool, dict) or tool.get("type") != "function":
++                    raise ValueError("Native adapter requires function tool definitions")
++                function = tool.get("function")
++                if not isinstance(function, dict) or not isinstance(function.get("name"), str) or not function["name"]:
++                    raise ValueError("Function tool requires a name")
++                # Preserve the complete supplied schema, including strict and
++                # optional future function fields, while flattening its wrapper.
++                converted = copy.deepcopy(function)
++                converted["type"] = "function"
++                tools.append(converted)
++            native["tools"] = tools
++            native["parallel_tool_calls"] = False
++        if "tool_choice" in payload:
++            choice = payload["tool_choice"]
++            if isinstance(choice, str) and choice in ("auto", "none", "required"):
++                native["tool_choice"] = choice
++            elif isinstance(choice, dict) and choice.get("type") == "function":
++                function = choice.get("function") or {}
++                name = function.get("name") or choice.get("name")
++                if not isinstance(name, str) or not name:
++                    raise ValueError("Named tool choice requires a name")
++                native["tool_choice"] = {"type": "function", "name": name}
++            else:
++                raise ValueError("Unsupported tool_choice for native Responses adapter")
++        return native
++
++    def _build_request(self, payload: Dict[str, object]) -> urllib.request.Request:
++        return urllib.request.Request(
++            self.config.base_url,
++            data=json.dumps(self._native_payload(payload), ensure_ascii=False, allow_nan=False).encode("utf-8"),
++            headers={"Authorization": "Bearer " + self.config.api_key,
++                     "Content-Type": "application/json", **self.config.extra_headers},
++            method="POST",
++        )
++
++    def _dump_attempt(self, metadata, payload, started, **kwargs) -> None:
++        super()._dump_attempt(metadata, self._native_payload(payload), started, **kwargs)
++
++    @classmethod
++    def _decode_response(cls, raw: bytes) -> tuple:
++        try:
++            data = json.loads(raw.decode("utf-8"))
++        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
++            raise ValueError("API returned invalid JSON") from exc
++        if not isinstance(data, dict) or data.get("object", "response") != "response":
++            raise ValueError("API response is not a native Responses object")
++        status = data.get("status")
++        if status not in ("completed", "incomplete", "failed", "cancelled"):
++            raise ValueError("API response has no terminal Responses status")
++        cls._validate_usage(data.get("usage"))
++        if status in ("failed", "cancelled") or data.get("error"):
++            # No partially emitted tool is a delivered decision on an explicit
++            # provider failure, even if the partial output is malformed.
++            return data, "", [], {"role": "assistant", "content": None,
++                                  OUTPUT_ITEMS_FIELD: copy.deepcopy(data.get("output"))}, "abort"
++        items = cls._items(data.get("output"))
++        text = []
++        for item in items:
++            if item["type"] == "function_call" and "arguments" not in item:
++                raise ValueError("Native function call missing arguments")
++            if item["type"] == "message":
++                if item.get("role") != "assistant" or not isinstance(item.get("content"), list):
++                    raise ValueError("Native output message requires assistant role and content blocks")
++                for block in item["content"]:
++                    if not isinstance(block, dict) or not isinstance(block.get("type"), str) or not block["type"]:
++                        raise ValueError("Native output blocks require a type string")
++                    if block["type"] == "output_text":
++                        if not isinstance(block.get("text"), str):
++                            raise ValueError("Native output_text block requires text")
++                        text.append(block["text"])
++        calls = cls._calls(items)
++        visible = "\n".join(text).strip()
++        assistant = {"role": "assistant", "content": visible or None,
++                     OUTPUT_ITEMS_FIELD: items, "_responses_status": status}
++        if data.get("incomplete_details") is not None:
++            assistant["_responses_incomplete_details"] = copy.deepcopy(data["incomplete_details"])
++        if calls:
++            assistant["tool_calls"] = copy.deepcopy(calls)
++        if status == "incomplete":
++            details = data.get("incomplete_details")
++            if not isinstance(details, dict) or not isinstance(details.get("reason"), str):
++                raise ValueError("Incomplete Responses output requires a reason")
++            finish = "length" if details["reason"] == "max_output_tokens" else details["reason"]
++        else:
++            finish = "tool_calls" if calls else "stop"
++        return data, visible, calls, assistant, finish
+diff --git a/expgym/poolact.py b/expgym/poolact.py
+index 0895a207a724b12f9fd660a16f18d7c8de7cec78..d6635638a3ac785813bc1648988060665001915e 100644
+--- a/expgym/poolact.py
++++ b/expgym/poolact.py
+@@ -37,7 +37,7 @@ from expgym.extras.parallel_cache import (
+     wrap_tools_with_poolact,
+ )
+ 
+-POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v3"
++POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v4"
+ 
+ 
+ @dataclass
+diff --git a/expgym/react_loop.py b/expgym/react_loop.py
+index 2569da6d7e2c7188f1ae5a5f602a90c4eca97fbc..3be8fe3d997cbfaa87b480d8ada5432fa42165a3 100644
+--- a/expgym/react_loop.py
++++ b/expgym/react_loop.py
+@@ -240,7 +240,12 @@ def run_react_loop(
+             message_allowance = max_context_tokens - schema_token_estimate
+             if message_allowance < 0:
+                 return None
+-            prepared = _trim_messages(messages, message_allowance)
++            # Signed/encrypted reasoning can be bound to earlier messages and
++            # tool results. Such backends require unchanged history: enforce
++            # the existing context cap by admission, without truncating or
++            # dropping content that a retained reasoning block depends on.
++            prepared = (messages if getattr(llm, "requires_immutable_history", False)
++                        else _trim_messages(messages, message_allowance))
+             if _estimate_tokens(prepared) + schema_token_estimate > max_context_tokens:
+                 return None
+         else:
+diff --git a/expgym/task_evidence_audit.py b/expgym/task_evidence_audit.py
+index 7eb2e96d0087e28124740dc52dbf71eec0af3381..4e69e7fe515e4409081247ff44cbc9cc96da71cd 100644
+--- a/expgym/task_evidence_audit.py
++++ b/expgym/task_evidence_audit.py
+@@ -263,7 +263,9 @@ def _build_context(
+         "For Entailment/Contradiction, identify the exact evidence segment IDs.",
+         "",
+         "Tool: human_feedback — verify your proposed evidence for a hypothesis. Can be called multiple times.",
+-        "  Input: {{\"nda_id\": \"...\", \"evidence_ids\": [segment_ids]}}",
++        ('  Input: {{"nda_id": "...", "evidence_ids": [segment_ids]}}'
++         if tool_protocol == "text" else
++         "  Input: use the supplied function schema for nda_id and evidence_ids."),
+         "",
+         "Use human feedback to improve the correctness of your labels and evidence IDs.",
+     ]
+@@ -272,7 +274,8 @@ def _build_context(
+             "",
+             ('Action: human_feedback {"nda_id": "nda-11", "evidence_ids": [3, 7]}'
+              if tool_protocol == "text" else
+-             'Call the human_feedback function with arguments {"nda_id": "nda-11", "evidence_ids": [3, 7]} using a native tool call.'),
++             "Choose whether and what to verify from the current document and hypotheses. "
++             "Make at most one native tool call per assistant turn, then wait for its result."),
+             "Answer: {\"nda-11\": {\"label\": \"...\", \"evidence_ids\": [...]}, ...}",
+             "Your final answer MUST include ALL {} hypotheses.".format(num_hyp),
+             "",
+diff --git a/scripts/run_paper_sweep.py b/scripts/run_paper_sweep.py
+index 592064f98cda1e2df4a3a06773e11e0118e13cc2..6ed352ada528cdf52beeb2b75b8a3573682fc98d 100644
+--- a/scripts/run_paper_sweep.py
++++ b/scripts/run_paper_sweep.py
+@@ -166,6 +166,7 @@ def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object
+             "top_k": getattr(args, "top_k", None),
+             "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+             "reasoning_effort": getattr(args, "reasoning_effort", None),
++            "api_protocol": getattr(args, "api_protocol", "chat"),
+             "max_steps": args.max_steps,
+             "max_evaluations": args.max_evals,
+         },
+@@ -463,6 +464,7 @@ def _namespace_for_job(
+     ns.top_k = getattr(args, "top_k", None)
+     ns.chat_template_kwargs = getattr(args, "chat_template_kwargs", None)
+     ns.reasoning_effort = getattr(args, "reasoning_effort", None)
++    ns.api_protocol = getattr(args, "api_protocol", "chat")
+     ns.missing_final_policy = getattr(args, "missing_final_policy", "error")
+     for name, value in _loop_options(args).items():
+         setattr(ns, name, value)
+@@ -523,6 +525,7 @@ def _resume_key(
+         "top_k": getattr(args, "top_k", None),
+         "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+         "reasoning_effort": getattr(args, "reasoning_effort", None),
++        "api_protocol": getattr(args, "api_protocol", "chat"),
+         "protocol": _loop_options(args),
+         "evaluation_identity": evaluation if evaluation is not None else _job_evaluation_identity(args, job),
+         "prompt_cache": _prompt_cache_config(args, job),
+@@ -676,6 +679,9 @@ def _run_job_with_evidence(
+             raise RuntimeError("effective prompt cache key metadata mismatch")
+         timeout = config.pop("timeout", None)
+         config.pop("system_prompt", None)
++        if getattr(llm, "api_protocol", "chat") != "chat":
++            config["api_protocol"] = llm.api_protocol
++            config["parameter_compatibility"] = llm.parameter_compatibility
+         extra_headers = config.pop("extra_headers", {}) or {}
+         max_retries = config.pop("max_retries", ns.max_retries)
+         retry_base_seconds = config.pop(
+@@ -978,6 +984,7 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
+         "top_k": getattr(args, "top_k", None),
+         "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+         "reasoning_effort": getattr(args, "reasoning_effort", None),
++        "api_protocol": getattr(args, "api_protocol", "chat"),
+         "protocol": _loop_options(args),
+         "max_steps": args.max_steps,
+         "max_evals": args.max_evals,
+diff --git a/scripts/run_study_queue.py b/scripts/run_study_queue.py
+index 357bb4fa419ea602e938262857c71f9dc98f24f4..79fba93c9cd5bef689bae4cb0465b11c92a7e51f 100644
+--- a/scripts/run_study_queue.py
++++ b/scripts/run_study_queue.py
+@@ -124,7 +124,9 @@ def make_plan(matrix, *, study_id, output_root, default_python, endpoints=()):
+                             terminal_evidence_dir=None, resume=False)
+             if runner == "expgym":
+                 # Fake has no API config/cache field; do not claim it sent one.
+-                job_args["prompt_cache_scope"] = "disabled" if args.backend == "fake" else "job"
++                job_args["prompt_cache_scope"] = (
++                    "disabled" if args.backend == "fake" or args.prompt_cache_scope == "disabled" else "job"
++                )
+             plan["jobs"].append({"job_id": job_id, "stage": label, "runner": runner,
+                                  "identity": identity, "args": job_args,
+                                  "selection": selection, "python": python,
+diff --git a/tests/test_audit_native_prompt.py b/tests/test_audit_native_prompt.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..61fbf9df207bbbd1ed74d38c3ddb4dfcd1d5acfe
+--- /dev/null
++++ b/tests/test_audit_native_prompt.py
+@@ -0,0 +1,171 @@
++"""CPU-only regression for task-owned Audit invocation guidance.
++
++No dataset, model endpoint or score is consulted. Keep the text-protocol prompt
++and caller-owned document/hypothesis text intact; native instructions must not
++turn the old fixed example into a required first action.
++"""
++from contextlib import contextmanager, ExitStack
++import json
++import os
++import unittest
++from unittest.mock import patch
++
++from expgym import task_evidence_audit as audit
++from expgym.llm_clients import OpenAICompatibleLLM
++from expgym.poolact import PoolActCoordinator
++from expgym.react_loop import run_react_loop
++from expgym.tool_protocol import resolve_tool_protocol
++
++
++OLD_NATIVE_COMMAND = (
++    'Call the human_feedback function with arguments '
++    '{"nda_id": "nda-11", "evidence_ids": [3, 7]} using a native tool call.'
++)
++OLD_TEXT_ACTION = 'Action: human_feedback {"nda_id": "nda-11", "evidence_ids": [3, 7]}'
++OLD_INPUT = '  Input: {{"nda_id": "...", "evidence_ids": [segment_ids]}}'
++LABELS = {
++    "hyp-fixture-a": {"short_description": "first", "hypothesis": "First hypothesis."},
++    "hyp-fixture-b": {"short_description": "second", "hypothesis": "Second hypothesis."},
++}
++DOCUMENT = audit.Document(
++    91, "synthetic.txt", [{"span_index": 0, "text": "Synthetic document segment."}],
++    {name: {"choice": "NotMentioned", "spans": []} for name in LABELS},
++)
++
++
++@contextmanager
++def fixture_data(document=DOCUMENT, labels=LABELS):
++    with ExitStack() as stack:
++        stack.enter_context(patch.object(audit, "_load_example", return_value=document))
++        stack.enter_context(patch.object(audit, "_get_doc", return_value=document))
++        stack.enter_context(patch.object(audit, "_get_labels", return_value=labels))
++        stack.enter_context(patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": ""}))
++        yield
++
++
++class AuditNativePromptTest(unittest.TestCase):
++    def assert_native_instructions(self, context):
++        instructions = context.split("Document segments:", 1)[0]
++        self.assertNotIn(OLD_NATIVE_COMMAND, instructions)
++        self.assertNotIn(OLD_TEXT_ACTION, instructions)
++        self.assertNotIn(OLD_INPUT, instructions)
++        self.assertNotIn('"evidence_ids": [3, 7]', instructions)
++        self.assertIn("supplied function schema for nda_id and evidence_ids", instructions)
++        self.assertIn("Choose whether and what to verify", instructions)
++        self.assertIn("current document and hypotheses", instructions)
++        self.assertIn("at most one native tool call per assistant turn", instructions)
++        self.assertIn("then wait for its result", instructions)
++
++    def test_native_instructions_do_not_prescribe_fixed_payload(self):
++        with fixture_data():
++            for overhead in (False, True):
++                for split in ("cc-small", "cc-medium", "cc-large"):
++                    with self.subTest(overhead=overhead, split=split):
++                        context = audit.build_context(
++                            overhead, cc_split=split, tool_protocol="native",
++                        )
++                        self.assert_native_instructions(context)
++                        self.assertIn("Your final answer MUST include ALL 2 hypotheses.", context)
++
++    def test_legacy_text_and_answer_format_remain_unchanged(self):
++        with fixture_data():
++            for overhead in (False, True):
++                old = audit.build_context(overhead, tool_protocol="text")
++                native = audit.build_context(overhead, tool_protocol="native")
++                self.assertEqual(old, audit.build_context(overhead))
++                self.assertIn(OLD_INPUT, old)
++                self.assertIn(OLD_TEXT_ACTION, old)
++                # Reverse precisely the two authorized task-owned line changes.
++                restored = native.replace(
++                    "  Input: use the supplied function schema for nda_id and evidence_ids.",
++                    OLD_INPUT,
++                ).replace(
++                    "Choose whether and what to verify from the current document and hypotheses. "
++                    "Make at most one native tool call per assistant turn, then wait for its result.",
++                    OLD_TEXT_ACTION,
++                )
++                self.assertEqual(old, restored)
++
++    def test_literal_commands_in_document_and_hypotheses_are_not_scrubbed(self):
++        literal = OLD_NATIVE_COMMAND + "\n" + OLD_TEXT_ACTION + "\n" + OLD_INPUT
++        document = audit.Document(
++            91, "synthetic.txt", [{"span_index": 0, "text": literal}],
++            DOCUMENT.annotations,
++        )
++        labels = {
++            "hyp-fixture-a": {"short_description": "first", "hypothesis": literal},
++            "hyp-fixture-b": LABELS["hyp-fixture-b"],
++        }
++        with fixture_data(document, labels):
++            for order in (list(labels), list(reversed(labels))):
++                old = audit.build_context(False, hypothesis_order=order, tool_protocol="text")
++                native = audit.build_context(False, hypothesis_order=order, tool_protocol="native")
++                self.assert_native_instructions(native)
++                old_data = old.split("Document segments:", 1)[1]
++                new_data = native.split("Document segments:", 1)[1]
++                self.assertEqual(old_data, new_data)
++                self.assertEqual(new_data.count(OLD_NATIVE_COMMAND), 2)
++
++    def test_native_schema_contains_real_hypotheses_not_example_ids(self):
++        with fixture_data():
++            schema = audit.build_tools()["human_feedback"].__expgym_tool_schema__
++            self.assertEqual(schema["parameters"]["properties"]["nda_id"]["enum"], list(LABELS))
++            self.assertEqual(schema["parameters"]["required"], ["nda_id", "evidence_ids"])
++            self.assertNotIn("nda-11", json.dumps(schema))
++
++    def test_mock_wire_is_model_independent_for_native_and_auto(self):
++        observed_contexts = []
++        for model in ("unfamiliar-provider/alpha-91", "other-vendor/beta-17"):
++            for requested in ("native", "auto"):
++                with self.subTest(model=model, requested=requested), fixture_data():
++                    requests = []
++
++                    def transport(request, timeout):
++                        payload = json.loads(request.data.decode("utf-8"))
++                        requests.append(payload)
++                        if len(requests) > 1:
++                            raise AssertionError("No repair or extra request is expected")
++                        return json.dumps({"choices": [{
++                            "message": {"role": "assistant", "content": 'Answer: {}'},
++                            "finish_reason": "stop",
++                        }], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}).encode()
++
++                    client = OpenAICompatibleLLM(
++                        api_key="offline-placeholder", model=model,
++                        base_url="http://offline.invalid/v1", transport=transport,
++                        max_retries=0,
++                    )
++                    resolved = resolve_tool_protocol(client, requested)
++                    context = audit.build_context(False, tool_protocol=resolved)
++                    result = run_react_loop(
++                        llm=client, tools=audit.build_tools(), context=context,
++                        system_prompt=audit.build_system_prompt(False),
++                        tool_protocol=resolved, max_steps=1,
++                    )
++                    self.assertEqual(result["answer"], "{}")
++                    self.assertEqual(len(requests), 1)
++                    request = requests[0]
++                    self.assertEqual(request["model"], model)
++                    self.assertEqual(request["tool_choice"], "auto")
++                    self.assertIs(request["parallel_tool_calls"], False)
++                    self.assert_native_instructions(request["messages"][1]["content"])
++                    observed_contexts.append(request["messages"])
++        self.assertTrue(all(messages == observed_contexts[0] for messages in observed_contexts))
++
++    def test_pool_graph_preserves_pending_action_without_fixed_task_command(self):
++        with fixture_data():
++            coordinator = PoolActCoordinator(n_agents=2)
++            runtime = coordinator.bind_tools(audit.build_tools(), 1)
++            payload = json.dumps({"nda_id": "hyp-fixture-a", "evidence_ids": []})
++            coordinator.graph.record_claim("human_feedback", payload, 0, start_time=0.0)
++            context = runtime.observation_augmenter(
++                audit.build_context(False, tool_protocol="native"),
++            )
++            self.assert_native_instructions(context)
++            self.assertIn("verify nda:hyp-fixture-a ev:[] [agent 0]", context)
++            self.assertIn("Select an action not listed above.", context)
++            self.assertNotIn(OLD_NATIVE_COMMAND, context)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_native_anthropic_client.py b/tests/test_native_anthropic_client.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..184284a3c915e91741e448862797a02ac5810332
+--- /dev/null
++++ b/tests/test_native_anthropic_client.py
+@@ -0,0 +1,231 @@
++import copy
++import json
++import os
++import tempfile
++import unittest
++import urllib.error
++from io import BytesIO
++from pathlib import Path
++from unittest import mock
++
++from expgym.llm_clients import APIClientError, APICompletionAbortedError
++from expgym.native_anthropic_client import NativeAnthropicLLM
++
++
++TOOLS = [{"type": "function", "function": {
++    "name": "lookup", "description": "Read an item", "parameters": {
++        "type": "object", "properties": {"item": {"type": "string"}},
++        "required": ["item"],
++    },
++}}]
++
++
++def response(content=None, stop="end_turn", usage=None):
++    value = {"id": "msg_test", "type": "message", "role": "assistant",
++             "model": "unfamiliar-provider-model", "content": content if content is not None else [
++                 {"type": "text", "text": "Answer: done"}],
++             "stop_reason": stop, "stop_sequence": None}
++    if usage is not None:
++        value["usage"] = usage
++    return value
++
++
++class Transport:
++    def __init__(self, *responses):
++        self.responses = list(responses)
++        self.requests = []
++
++    def __call__(self, request, timeout):
++        self.requests.append(request)
++        item = self.responses.pop(0)
++        if isinstance(item, Exception):
++            raise item
++        return item if isinstance(item, bytes) else json.dumps(item).encode()
++
++
++class NativeAnthropicClientTest(unittest.TestCase):
++    def client(self, transport, **kwargs):
++        return NativeAnthropicLLM(api_key="private-test-credential", model="unfamiliar-provider-model",
++                                  base_url="http://127.0.0.1:8080/v1", transport=transport,
++                                  max_retries=0, **kwargs)
++
++    def test_native_endpoint_default_effort_and_explicit_omissions(self):
++        transport = Transport(response())
++        client = self.client(transport, temperature=0.7, top_p=0.8, top_k=12,
++                             seed=12, prompt_cache_key="pool-a")
++        result = client.generate("question")
++        self.assertEqual(result.text, "Answer: done")
++        request = transport.requests[0]
++        self.assertEqual(request.full_url, "http://127.0.0.1:8080/v1/messages")
++        self.assertEqual(request.get_header("Anthropic-version"), "2023-06-01")
++        payload = json.loads(request.data)
++        self.assertEqual(payload["model"], "unfamiliar-provider-model")
++        self.assertEqual(payload["max_tokens"], 8192)
++        self.assertNotIn("thinking", payload)
++        self.assertNotIn("output_config", payload)
++        for field in ("temperature", "top_p", "top_k", "seed", "prompt_cache_key"):
++            self.assertNotIn(field, payload)
++        self.assertEqual(client.parameter_compatibility["effort"], "high")
++        self.assertEqual(client.parameter_compatibility["effort_source"], "provider_default")
++        self.assertEqual(client.parameter_compatibility["omitted_parameters"]["temperature"], 0.7)
++
++    def test_high_is_native_effort_not_legacy_thinking_budget(self):
++        transport = Transport(response())
++        client = self.client(transport, reasoning_effort="high", max_tokens=32768,
++                             thinking={"type": "adaptive"})
++        client.generate("question", tools=TOOLS)
++        payload = json.loads(transport.requests[0].data)
++        self.assertEqual(payload["output_config"], {"effort": "high"})
++        self.assertEqual(payload["thinking"], {"type": "adaptive"})
++        self.assertEqual(payload["max_tokens"], 32768)
++        self.assertEqual(payload["tool_choice"], {"type": "auto", "disable_parallel_tool_use": True})
++        self.assertEqual(payload["tools"][0]["input_schema"], TOOLS[0]["function"]["parameters"])
++        self.assertNotIn("reasoning_effort", payload)
++
++    def test_signature_only_redacted_tool_and_result_survive_full_roundtrip(self):
++        blocks = [{"type": "thinking", "thinking": "", "signature": "opaque-signature"},
++                  {"type": "redacted_thinking", "data": "opaque-redacted"},
++                  {"type": "text", "text": "Looking up the item."},
++                  {"type": "tool_use", "id": "toolu_real", "name": "lookup", "input": {"item": "A"}}]
++        transport = Transport(response(blocks, "tool_use"), response())
++        client = self.client(transport)
++        initial = [{"role": "system", "content": "Task protocol"},
++                   {"role": "user", "content": "question"}]
++        original_initial = copy.deepcopy(initial)
++        first = client.generate(initial, tools=TOOLS)
++        self.assertEqual(first.finish_reason, "tool_calls")
++        self.assertEqual(first.assistant_message["content"], blocks)
++        self.assertEqual(first.tool_calls[0]["id"], "toolu_real")
++        history = initial + [first.assistant_message,
++                             {"role": "tool", "tool_call_id": "toolu_real", "content": "observed A"},
++                             {"role": "user", "content": "Now answer."}]
++        before = copy.deepcopy(history)
++        client.generate(history, tools=TOOLS, tool_choice="none")
++        sent = json.loads(transport.requests[1].data)
++        self.assertEqual(sent["messages"][1], {"role": "assistant", "content": blocks})
++        self.assertEqual(sent["messages"][2]["content"], [
++            {"type": "tool_result", "tool_use_id": "toolu_real", "content": "observed A"},
++            {"type": "text", "text": "Now answer."},
++        ])
++        self.assertEqual(sent["tool_choice"], {"type": "none"})
++        self.assertEqual(sent["tools"], json.loads(transport.requests[0].data)["tools"])
++        self.assertEqual(history, before)
++        self.assertEqual(initial, original_initial)
++
++    def test_tool_only_and_normal_empty_length_decisions_are_not_retried(self):
++        cases = [
++            (response([{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}], "tool_use"), "tool_calls", 1),
++            (response([], "max_tokens"), "length", 0),
++            (response([], "end_turn"), "stop", 0),
++            (response([{"type": "thinking", "thinking": "", "signature": "opaque"}], "max_tokens"), "length", 0),
++            (response([{"type": "text", "text": ""}]), "stop", 0),
++        ]
++        for body, finish, count in cases:
++            with self.subTest(body=body):
++                transport = Transport(body)
++                result = self.client(transport).generate("question", tools=TOOLS)
++                self.assertEqual(result.finish_reason, finish)
++                self.assertEqual(len(result.tool_calls), count)
++                self.assertEqual(result.text, "")
++                self.assertEqual(len(transport.requests), 1)
++
++    def test_native_usage_is_raw_in_attempt_and_total_in_loop_counters(self):
++        usage = {"input_tokens": 100, "output_tokens": 30,
++                 "cache_read_input_tokens": 80, "cache_creation_input_tokens": 20,
++                 "cache_creation": {"ephemeral_5m_input_tokens": 20, "ephemeral_1h_input_tokens": 0},
++                 "output_tokens_details": {"thinking_tokens": 23}}
++        transport = Transport(response(usage=usage))
++        result = self.client(transport).generate("question")
++        self.assertEqual(result.prompt_tokens, 200)
++        self.assertEqual(result.completion_tokens, 30)
++        self.assertEqual(result.cached_prompt_tokens, 80)
++        self.assertEqual(result.cache_write_prompt_tokens, 20)
++        self.assertEqual(result.attempt_usage[0]["usage"], usage)
++        self.assertIsNone(result.attempt_usage[0]["http_status"])
++
++    def test_missing_accounting_stays_unknown(self):
++        for usage in (None, {}, {"input_tokens": 10, "output_tokens": 5},
++                      {"input_tokens": 10, "cache_read_input_tokens": None, "cache_creation_input_tokens": 0}):
++            with self.subTest(usage=usage):
++                result = self.client(Transport(response(usage=usage))).generate("question")
++                self.assertIsNone(result.prompt_tokens)
++
++    def test_all_attempts_dump_native_payload_response_and_redact_credentials(self):
++        error_usage = {"input_tokens": 4, "output_tokens": 2}
++        error = urllib.error.HTTPError("http://local", 503, "Unavailable", {}, BytesIO(json.dumps({
++            "error": "echo private-test-credential", "usage": error_usage,
++        }).encode()))
++        body = response([{"type": "text", "text": "private-test-credential"}])
++        transport = Transport(error, body)
++        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
++            client = NativeAnthropicLLM(api_key="private-test-credential", model="another-unfamiliar-model",
++                                        base_url="http://local/v1", transport=transport,
++                                        max_retries=1, retry_base_seconds=0, retry_max_seconds=0)
++            result = client.generate("question", tools=TOOLS)
++            dumps = [json.loads(path.read_text()) for path in Path(directory).rglob("*.json")]
++            self.assertEqual(len(dumps), 2)
++            self.assertEqual([a["state"] for a in result.attempt_usage], ["error", "success"])
++            self.assertEqual(result.attempt_usage[0]["usage"], error_usage)
++            for record in dumps:
++                self.assertNotIn("private-test-credential", json.dumps(record))
++                self.assertNotIn("temperature", record["request_payload"])
++                self.assertIn("input_schema", record["request_payload"]["tools"][0])
++                self.assertEqual(record["context"]["api_protocol"], "anthropic")
++                self.assertEqual(record["endpoint"], "http://local/v1/messages")
++            good = next(record for record in dumps if record["state"] == "success")
++            self.assertEqual(good["response_json"]["type"], "message")
++            self.assertIn("[REDACTED]", good["response_raw"])
++
++    def test_malformed_abort_and_invalid_usage_preserve_one_attempt(self):
++        cases = [
++            b"bad JSON", response([{"type": "text", "text": 2}]),
++            response([{"type": "thinking", "thinking": "missing signature"}]),
++            response([], "tool_use"),
++            response(usage={"input_tokens": 1, "cache_read_input_tokens": -1}),
++            response(usage={"output_tokens_details": {"thinking_tokens": True}}),
++        ]
++        for body in cases:
++            with self.subTest(body=body):
++                transport = Transport(body)
++                with self.assertRaises(APIClientError) as caught:
++                    self.client(transport).generate("question")
++                self.assertEqual(len(caught.exception.attempt_usage), 1)
++                self.assertEqual(len(transport.requests), 1)
++        transport = Transport(response(stop="abort", usage={"input_tokens": 2, "output_tokens": 1}))
++        with self.assertRaises(APICompletionAbortedError) as caught:
++            self.client(transport).generate("question")
++        self.assertEqual(caught.exception.attempt_usage[0]["usage"]["output_tokens"], 1)
++
++    def test_explicit_capability_can_allow_sampling_but_cannot_fake_seed(self):
++        transport = Transport(response())
++        client = self.client(transport, omitted_parameters=("seed", "prompt_cache_key"),
++                             temperature=0.3, top_p=0.96, top_k=40)
++        client.generate("question")
++        sent = json.loads(transport.requests[0].data)
++        self.assertEqual([sent[key] for key in ("temperature", "top_p", "top_k")], [0.3, 0.96, 40])
++        with self.assertRaisesRegex(ValueError, "seed has no native"):
++            self.client(Transport(), omitted_parameters=(), seed=1).generate("question")
++
++    def test_refuses_unsupported_configuration_and_unsigned_reasoning(self):
++        for kwargs in ({"api_protocol": "responses"}, {"reasoning": {"enabled": True}},
++                       {"chat_template_kwargs": {"enable_thinking": True}},
++                       {"omitted_parameters": "seed"}, {"omitted_parameters": ("max_tokens",)}):
++            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
++                self.client(Transport(), **kwargs)
++        client = self.client(Transport())
++        with self.assertRaisesRegex(ValueError, "unsigned"):
++            client.generate([{"role": "assistant", "content": "", "reasoning_content": "old reasoning"}])
++        with self.assertRaisesRegex(ValueError, "Mid-conversation"):
++            client.generate([{"role": "user", "content": "q"}, {"role": "system", "content": "later"}])
++
++    def test_native_tool_alias_cannot_change_original_blocks(self):
++        native = {"role": "assistant", "content": [
++            {"type": "tool_use", "id": "t", "name": "lookup", "input": {"item": "original"}}],
++            "tool_calls": [{"id": "t", "type": "function", "function": {
++                "name": "lookup", "arguments": '{"item":"changed"}'}}]}
++        with self.assertRaisesRegex(ValueError, "disagree"):
++            self.client(Transport()).generate([native])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_native_api_runner_options.py b/tests/test_native_api_runner_options.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..921cc9058297825fd5365bf4024fb8eb68488f62
+--- /dev/null
++++ b/tests/test_native_api_runner_options.py
+@@ -0,0 +1,56 @@
++"""Explicit native wire selection must survive runner and resume boundaries."""
++import argparse
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++
++from demo_experiment import build_llm
++from scripts import run_paper_sweep as sweep, run_poolact as pool
++from scripts.run_study_queue import make_plan
++
++
++class NativeRunnerOptionsTest(unittest.TestCase):
++    def test_both_runners_select_native_client_and_keep_nominal_controls(self):
++        for protocol in ("responses", "anthropic"):
++            with self.subTest(protocol=protocol):
++                args = sweep.parse_args([
++                    "--backend", "sub2api", "--models", "unfamiliar-model",
++                    "--api-protocol", protocol, "--max-tokens", "32768",
++                    "--reasoning-effort", "high", "--prompt-cache-scope", "disabled",
++                    "--base-url", "http://localhost:8080/v1",
++                ])
++                job = sweep._build_jobs(args)[0]
++                ns = sweep._namespace_for_job(args, job, "test-only-key")
++                client = build_llm("sub2api", [], ns)
++                self.assertEqual(client.api_protocol, protocol)
++                self.assertEqual(client.config.max_tokens, 32768)
++                self.assertIn("seed", client.parameter_compatibility["omitted_parameters"])
++                p_args = pool.parse_args([
++                    "--backend", "sub2api", "--model", "unfamiliar-model",
++                    "--api-protocol", protocol, "--base-url", "http://localhost:8080/v1",
++                ])
++                p_ns = pool._agent_namespace(p_args, "poolact", 0, "test-only-key")
++                self.assertEqual(build_llm("sub2api", [], p_ns).api_protocol, protocol)
++                self.assertEqual(pool._resolved_config(p_args, 1)["api_protocol"], protocol)
++
++    def test_protocol_changes_expgym_resume_identity(self):
++        args = sweep.parse_args(["--backend", "sub2api", "--models", "unfamiliar-model"])
++        job = sweep._build_jobs(args)[0]
++        one = sweep._resume_key(args, job, evaluation={"sha256": "frozen-test"})
++        args.api_protocol = "responses"
++        two = sweep._resume_key(args, job, evaluation={"sha256": "frozen-test"})
++        self.assertNotEqual(one, two)
++
++    def test_queue_preserves_explicit_disabled_prompt_cache(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            plan = make_plan({"stages": [{"label": "one", "runner": "expgym", "args": [
++                "--backend", "sub2api", "--models", "unfamiliar-model",
++                "--api-protocol", "responses", "--prompt-cache-scope", "disabled",
++                "--base-url", "http://localhost:8080/v1",
++            ]}]}, study_id="test", output_root=Path(tmp), default_python=sys.executable)
++            self.assertEqual(plan["jobs"][0]["args"]["prompt_cache_scope"], "disabled")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_native_react_loop.py b/tests/test_native_react_loop.py
+index f130eb1264fcb27cdd63fab0476bcbe97b5e6a80..21a8ad7d969c84530179e3724480125c46cff197 100644
+--- a/tests/test_native_react_loop.py
++++ b/tests/test_native_react_loop.py
+@@ -40,6 +40,62 @@ class NativeReplay:
+ 
+ 
+ class NativeLoopTest(unittest.TestCase):
++    def test_immutable_signed_history_stops_before_truncating_observations(self):
++        first = native(call())
++        first.assistant_message.pop("reasoning_content")
++        first.assistant_message["content"] = [
++            {"type": "thinking", "thinking": "", "signature": "opaque-signed-history"},
++            {"type": "tool_use", "id": "call_1", "name": "evaluate_config", "input": {"x": 1}},
++        ]
++        observation = "preserve-original-observation-" * 1000
++        llm = NativeReplay([first])
++        llm.requires_immutable_history = True
++        result = run_react_loop(
++            llm, {"evaluate_config": lambda _: (observation, .4, 2.)},
++            context="Tune x.", max_steps=3, max_context_tokens=1500,
++            capture_trace_v2=True,
++        )
++        self.assertEqual(len(llm.requests), 1)
++        self.assertEqual(result["termination_reason"], "Context token budget exceeded")
++        self.assertIsNone(result["answer"])
++        captured = result["_trace_v2_capture"]
++        self.assertEqual(captured["llm_calls"][0]["output_message"], first.assistant_message)
++        self.assertIn(observation, captured["tool_calls"][0]["observation"])
++        observed = next(message for message in result["messages"] if message["role"] == "tool")
++        self.assertIn(observation, observed["content"])
++        self.assertNotIn("truncated", observed["content"])
++        # The prior generic policy could fit this same history after truncation.
++        self.assertLess(_estimate_tokens(_trim_messages(result["messages"], 1500)), 1500)
++
++    def test_immutable_history_below_cap_keeps_normal_tool_lifecycle(self):
++        first = native(call())
++        first.assistant_message.pop("reasoning_content")
++        first.assistant_message["content"] = [
++            {"type": "thinking", "thinking": "", "signature": "opaque-signed-history"},
++            {"type": "tool_use", "id": "call_1", "name": "evaluate_config", "input": {"x": 1}},
++        ]
++        llm = NativeReplay([first, LLMOutput('Answer: {"x":1}')])
++        llm.requires_immutable_history = True
++        result = run_react_loop(llm, {"evaluate_config": lambda _: (.4, 2.)},
++                                context="Tune x.", max_steps=3, max_context_tokens=1500,
++                                capture_trace_v2=True)
++        self.assertEqual(result["answer_perf"], .4)
++        self.assertEqual(len(llm.requests), 2)
++        self.assertEqual(llm.requests[1][0][-2], first.assistant_message)
++        self.assertEqual(llm.requests[1][0][-1]["tool_call_id"], "call_1")
++        self.assertEqual(result["protocol_failures"], [])
++
++    def test_generic_native_client_keeps_existing_context_trimming_policy(self):
++        llm = NativeReplay([native(call()), LLMOutput('Answer: {"x":1}')])
++        observation = "original-observation-" * 1000
++        result = run_react_loop(
++            llm, {"evaluate_config": lambda _: (observation, .4, 2.)},
++            context="Tune x.", max_steps=3, max_context_tokens=1500,
++        )
++        self.assertEqual(result["answer_perf"], .4)
++        self.assertEqual(len(llm.requests), 2)
++        self.assertIn("[... truncated ...]", llm.requests[1][0][-1]["content"])
++
+     def test_tool_only_response_and_complete_history(self):
+         first = native(call())
+         llm = NativeReplay([first, LLMOutput('Answer: {"x":1}')])
+diff --git a/tests/test_native_responses_client.py b/tests/test_native_responses_client.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..24c1c9ebaedb570b626c745e6cd93732b2b8f2c8
+--- /dev/null
++++ b/tests/test_native_responses_client.py
+@@ -0,0 +1,235 @@
++import copy
++import json
++import os
++import tempfile
++import unittest
++import urllib.error
++from email.message import Message
++from io import BytesIO
++from pathlib import Path
++from unittest import mock
++
++from expgym.llm_clients import APIClientError, APICompletionAbortedError
++from expgym.native_responses_client import NativeResponsesLLM, OUTPUT_ITEMS_FIELD
++
++
++TOOLS = [{"type": "function", "function": {
++    "name": "lookup", "description": "Look up a value.",
++    "parameters": {"type": "object", "properties": {"key": {"type": "string"}},
++                   "required": ["key"]},
++}}]
++
++
++def response(output=None, **kwargs):
++    return {"id": "resp_fixture", "object": "response", "status": "completed",
++            "model": "unfamiliar-native-model", "output": output or [], **kwargs}
++
++
++def answer(text="Answer: 42", **kwargs):
++    return response([{"type": "message", "role": "assistant", "id": "msg_1",
++                      "status": "completed", "content": [
++                          {"type": "output_text", "text": text, "annotations": []},
++                      ]}], **kwargs)
++
++
++class Transport:
++    def __init__(self, *values):
++        self.values = list(values)
++        self.requests = []
++
++    def __call__(self, request, timeout):
++        self.requests.append(request)
++        value = self.values.pop(0)
++        if isinstance(value, Exception):
++            raise value
++        if isinstance(value, bytes):
++            return value
++        return json.dumps(value).encode("utf-8")
++
++    @property
++    def bodies(self):
++        return [json.loads(request.data) for request in self.requests]
++
++
++class NativeResponsesLLMTest(unittest.TestCase):
++    def test_explicit_parameters_wire_payload_and_native_usage(self):
++        usage = {"input_tokens": 40, "output_tokens": 17, "total_tokens": 57,
++                 "input_tokens_details": {"cached_tokens": 12, "cache_write_tokens": 3},
++                 "output_tokens_details": {"reasoning_tokens": 10}}
++        transport = Transport(answer(usage=usage))
++        client = NativeResponsesLLM(api_key="fixture-secret", model="unfamiliar-model",
++                                    base_url="http://localhost:8080/v1/chat/completions",
++                                    transport=transport, temperature=0.7, top_p=0.95,
++                                    top_k=20, seed=2200, max_tokens=32768,
++                                    reasoning_effort="medium", prompt_cache_key="local-scope")
++        result = client.generate("Hello", tools=TOOLS)
++        body = transport.bodies[0]
++        self.assertEqual(transport.requests[0].full_url, "http://localhost:8080/v1/responses")
++        self.assertEqual(body["input"], [{"role": "user", "content": "Hello"}])
++        self.assertEqual(body["reasoning"], {"effort": "medium"})
++        self.assertEqual(body["include"], ["reasoning.encrypted_content"])
++        self.assertFalse(body["store"])
++        self.assertFalse(body["stream"])
++        self.assertFalse(body["parallel_tool_calls"])
++        self.assertEqual(body["tool_choice"], "auto")
++        self.assertEqual(body["tools"][0], {"type": "function", **TOOLS[0]["function"]})
++        for field in ("temperature", "top_p", "seed", "top_k", "max_tokens", "max_output_tokens", "messages", "prompt_cache_key"):
++            self.assertNotIn(field, body)
++        self.assertEqual(client.parameter_compatibility["omitted_parameters"]["max_tokens"], 32768)
++        self.assertEqual(client.parameter_compatibility["omitted_parameters"]["prompt_cache_key"], "local-scope")
++        self.assertTrue(client.requires_immutable_history)
++        self.assertEqual((result.prompt_tokens, result.completion_tokens), (40, 17))
++        self.assertEqual((result.cached_prompt_tokens, result.cache_write_prompt_tokens), (12, 3))
++        self.assertEqual(result.attempt_usage[0]["usage"], usage)
++
++    def test_multiturn_preserves_complete_items_and_call_ids(self):
++        original_items = [
++            {"type": "reasoning", "id": "rs_1", "summary": [],
++             "encrypted_content": "opaque-encrypted-reasoning", "future_field": {"x": [1, 2]}},
++            {"type": "message", "role": "assistant", "id": "msg_comment", "phase": "commentary",
++             "content": [{"type": "output_text", "text": "Looking up", "annotations": []}]},
++            {"type": "function_call", "id": "fc_distinct_item_id", "call_id": "call_1",
++             "name": "lookup", "arguments": '{ "key": "x" }', "status": "completed"},
++        ]
++        transport = Transport(response(original_items), answer())
++        client = NativeResponsesLLM(api_key="fixture-secret", transport=transport)
++        first = client.generate([{"role": "system", "content": "Instructions"},
++                                 {"role": "user", "content": "Question"}], tools=TOOLS)
++        self.assertEqual(first.assistant_message[OUTPUT_ITEMS_FIELD], original_items)
++        self.assertEqual(first.tool_calls[0]["id"], "call_1")
++        self.assertEqual(first.tool_calls[0]["function"]["arguments"], '{ "key": "x" }')
++        messages = [{"role": "system", "content": "Instructions"},
++                    {"role": "user", "content": "Question"}, first.assistant_message,
++                    {"role": "tool", "tool_call_id": "call_1", "name": "lookup", "content": "42"},
++                    {"role": "user", "content": "Finish now"}]
++        frozen = copy.deepcopy(messages)
++        second = client.generate(messages, tools=TOOLS, tool_choice="none")
++        self.assertEqual(messages, frozen)
++        body = transport.bodies[1]
++        self.assertEqual(body["input"][2:5], original_items)
++        self.assertEqual(body["input"][5], {"type": "function_call_output", "call_id": "call_1", "output": "42"})
++        self.assertEqual(body["input"][6], {"role": "user", "content": "Finish now"})
++        self.assertEqual(body["tool_choice"], "none")
++        self.assertEqual(body["tools"], transport.bodies[0]["tools"])
++        self.assertEqual(second.text, "Answer: 42")
++
++    def test_reasoning_only_empty_and_length_are_delivered_without_retry(self):
++        items = [{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque", "summary": []}]
++        for payload, expected in ((response(items), "stop"), (response(), "stop"),
++                                  (response(items, status="incomplete", incomplete_details={"reason": "max_output_tokens"}), "length")):
++            with self.subTest(expected=expected, output=payload["output"]):
++                transport = Transport(payload)
++                result = NativeResponsesLLM(api_key="fixture-secret", transport=transport).generate("Hi")
++                self.assertEqual(result.text, "")
++                self.assertEqual(result.finish_reason, expected)
++                self.assertEqual(result.request_attempts, 1)
++                self.assertEqual(result.assistant_message[OUTPUT_ITEMS_FIELD], payload["output"])
++
++    def test_invalid_json_function_arguments_are_delivered_verbatim(self):
++        item = {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{broken"}
++        transport = Transport(response([item]))
++        output = NativeResponsesLLM(api_key="fixture-secret", transport=transport).generate("Hi", tools=TOOLS)
++        self.assertEqual(output.tool_calls[0]["function"]["arguments"], "{broken")
++        self.assertEqual(output.finish_reason, "tool_calls")
++        self.assertEqual(output.request_attempts, 1)
++
++    def test_provider_failed_or_cancelled_is_never_resampled(self):
++        for status in ("failed", "cancelled"):
++            usage = {"input_tokens": 5, "output_tokens": 3}
++            transport = Transport(response(status=status, usage=usage,
++                                           error={"code": "provider_abort", "message": "stopped"}))
++            with self.assertRaises(APICompletionAbortedError) as raised:
++                NativeResponsesLLM(api_key="fixture-secret", transport=transport).generate("Hi")
++            self.assertEqual(len(transport.requests), 1)
++            self.assertEqual(raised.exception.attempt_usage[0]["usage"], usage)
++            self.assertEqual(raised.exception.attempt_usage[0]["state"], "error")
++
++    def test_missing_usage_remains_unknown(self):
++        transport = Transport(answer())
++        output = NativeResponsesLLM(api_key="fixture-secret", transport=transport).generate("Hi")
++        self.assertIsNone(output.prompt_tokens)
++        self.assertIsNone(output.completion_tokens)
++        self.assertIsNone(output.attempt_usage[0]["usage"])
++
++    def test_malformed_terminal_response_and_usage_are_not_retried(self):
++        payloads = [b"broken", {"object": "response", "status": "in_progress"},
++                    response([{"type": "function_call", "call_id": "call_1", "name": "lookup"}]),
++                    answer(usage={"input_tokens": -1}),
++                    response(status="incomplete", incomplete_details={})]
++        for payload in payloads:
++            with self.subTest(payload=payload):
++                transport = Transport(payload)
++                with self.assertRaises(APIClientError) as raised:
++                    NativeResponsesLLM(api_key="fixture-secret", transport=transport).generate("Hi")
++                self.assertEqual(len(transport.requests), 1)
++                self.assertEqual(raised.exception.attempt_usage[0]["state"], "malformed_response")
++
++    def test_transport_retry_dumps_actual_wire_and_all_usage_without_credentials(self):
++        key = "fixture-secret-not-for-dump"
++        failed_usage = {"input_tokens": 9, "output_tokens": 1}
++        error_payload = {"error": {"message": "echo " + key, "api_key": key}, "usage": failed_usage}
++        failure = urllib.error.HTTPError("http://test/v1/responses", 429, "limited", Message(),
++                                         BytesIO(json.dumps(error_payload).encode()))
++        transport = Transport(failure, answer(usage={"input_tokens": 11, "output_tokens": 2}))
++        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {"EXPGYM_API_DUMP_DIR": directory}):
++            client = NativeResponsesLLM(api_key=key, transport=transport, seed=2200,
++                                       max_retries=1, retry_base_seconds=0)
++            output = client.generate("Hi", tools=TOOLS)
++            records = [json.loads(path.read_text()) for path in Path(directory).glob("*.json")]
++            serialized = json.dumps(records)
++            self.assertNotIn(key, serialized)
++            self.assertEqual(len(records), 2)
++            self.assertEqual(output.request_attempts, 2)
++            self.assertEqual(output.attempt_usage[0]["usage"], failed_usage)
++            self.assertEqual(output.attempt_usage[1]["usage"], {"input_tokens": 11, "output_tokens": 2})
++            self.assertEqual(transport.bodies[0], transport.bodies[1])
++            for record in records:
++                self.assertEqual(record["request_payload"], transport.bodies[0])
++                self.assertEqual(record["context"]["parameter_compatibility"]["omitted_parameters"]["seed"], 2200)
++                self.assertIsNotNone(record["response_raw"])
++            failed = next(record for record in records if record["state"] == "error")
++            self.assertEqual(failed["http_status"], 429)
++            self.assertEqual(failed["response_json"]["error"]["api_key"], "[REDACTED]")
++
++    def test_supported_output_limit_is_explicitly_mapped(self):
++        transport = Transport(answer())
++        client = NativeResponsesLLM(api_key="fixture-secret", transport=transport,
++                                    omitted_parameters=("seed", "top_k"), max_tokens=123,
++                                    temperature=0.5, top_p=0.8)
++        client.generate("Hi")
++        self.assertEqual(transport.bodies[0]["max_output_tokens"], 123)
++        self.assertEqual(transport.bodies[0]["temperature"], 0.5)
++        self.assertEqual(transport.bodies[0]["top_p"], 0.8)
++
++    def test_incompatible_configuration_or_unsigned_reasoning_fails_before_network(self):
++        for kwargs in ({"api_protocol": "chat"}, {"omitted_parameters": "seed"},
++                       {"omitted_parameters": ("unrecognized",)}, {"store": "false"},
++                       {"include": ()}, {"provider": {"order": ["x"]}},
++                       {"reasoning": {"enabled": True}},
++                       {"reasoning": {"effort": "low"}, "reasoning_effort": "high"}):
++            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
++                NativeResponsesLLM(api_key="fixture-secret", **kwargs)
++        transport = Transport(answer())
++        client = NativeResponsesLLM(api_key="fixture-secret", transport=transport,
++                                    omitted_parameters=(), seed=1)
++        with self.assertRaisesRegex(ValueError, "seed has no native"):
++            client.generate("Hi")
++        self.assertFalse(transport.requests)
++        client = NativeResponsesLLM(api_key="fixture-secret", transport=transport)
++        with self.assertRaisesRegex(ValueError, "Cannot replay Chat reasoning"):
++            client.generate([{"role": "assistant", "content": "Hi", "reasoning_content": "unsigned"}])
++        self.assertFalse(transport.requests)
++
++    def test_native_history_alias_mismatch_is_rejected(self):
++        transport = Transport(answer())
++        client = NativeResponsesLLM(api_key="fixture-secret", transport=transport)
++        message = {"role": "assistant", "content": None, OUTPUT_ITEMS_FIELD: [
++            {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
++        ]}
++        with self.assertRaisesRegex(ValueError, "aliases disagree"):
++            client.generate([message])
++        self.assertFalse(transport.requests)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_native_task_context.py b/tests/test_native_task_context.py
+index a1808602e97c02cc60023c0d5334d660fe01f741..13f1db3789aca014d4b7e4140af0d073f1a3ba10 100644
+--- a/tests/test_native_task_context.py
++++ b/tests/test_native_task_context.py
+@@ -116,11 +116,22 @@ class NativeTaskContextTest(unittest.TestCase):
+                         new = builder(overhead, tool_protocol="native", **kwargs).splitlines()
+                         self.assertEqual(len(old), len(new))
+                         changed = [(left, right) for left, right in zip(old, new) if left != right]
+-                        self.assertEqual(len(changed), 2 if name == "search" else 1)
++                        self.assertEqual(len(changed), 2 if name in ("search", "audit") else 1)
+                         for left, right in changed:
++                            if name == "audit" and left.startswith("  Input:"):
++                                self.assertEqual(
++                                    right,
++                                    "  Input: use the supplied function schema for nda_id and evidence_ids.",
++                                )
++                                continue
+                             self.assertIn("Action", left)
+                             self.assertNotIn("Action:", right)
+                             self.assertTrue("native tool call" in right or right == "Native tool invocation:")
++                            if name == "audit":
++                                self.assertIn("current document and hypotheses", right)
++                                self.assertIn("at most one native tool call per assistant turn", right)
++                                self.assertIn("wait for its result", right)
++                                self.assertNotIn('"nda_id": "nda-11"', right)
+ 
+     def test_literal_action_and_thought_dataset_text_is_unchanged(self):
+         with fixture_data():
+@@ -297,7 +308,14 @@ class NativeRunnerWireTest(unittest.TestCase):
+             self.assertIs(first["parallel_tool_calls"], False)
+             self.assertEqual(first["tools"][0]["function"]["name"], function)
+             context = first["messages"][1]["content"]
+-            self.assertIn("Call the " + function + " function", context)
++            if scenario_name == "evidence_audit":
++                self.assertIn("supplied function schema for nda_id and evidence_ids", context)
++                self.assertIn("Choose whether and what to verify from the current document", context)
++                self.assertIn("at most one native tool call per assistant turn", context)
++                self.assertIn("then wait for its result", context)
++                self.assertNotIn("Call the human_feedback function with arguments", context)
++            else:
++                self.assertIn("Call the " + function + " function", context)
+             self.assertIn("native tool call", context)
+             self.assertNotIn("Action format:", context)
+             self.assertNotIn("Action: " + function + " ", context)
+diff --git a/tests/test_poolact_graph_identity.py b/tests/test_poolact_graph_identity.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..26eae49b3c0e02b34f12689a465f71b4d338320d
+--- /dev/null
++++ b/tests/test_poolact_graph_identity.py
+@@ -0,0 +1,345 @@
++"""No-model regressions for full-configuration PoolAct graph identity.
++
++These synthetic NAS-like payloads deliberately share the first 80 canonical
++JSON characters. No evaluator, model, benchmark data, or saved run is used.
++"""
++import hashlib
++import json
++import unittest
++from unittest.mock import patch
++
++from expgym.extras.parallel_cache import _parse_evaluate_config
++from expgym.poolact import PoolActCoordinator, SharedExplorationGraph
++
++
++def nas_payload(variant):
++    config = {"edge_{}_{}".format(i, j): 1 if j == i + 1 else 0
++              for i in range(6) for j in range(i + 1, 7)}
++    config.update({"op_node_{}".format(i): "conv3x3-bn-relu"
++                   for i in range(1, 6)})
++    config["op_node_5"] = ("conv3x3-bn-relu", "conv1x1-bn-relu",
++                           "maxpool3x3")[variant]
++    return json.dumps(config, sort_keys=True, separators=(",", ":"))
++
++
++class EvaluationGraphIdentityTest(unittest.TestCase):
++    def setUp(self):
++        self.payloads = [nas_payload(i) for i in range(3)]
++        self.keys = self.payloads  # Already canonical, as required by the API.
++        self.displays = [_parse_evaluate_config(p, "0.5")[1]
++                         for p in self.payloads]
++        self.assertGreater(len(self.keys[0]), 80)
++        self.assertEqual(1, len({key[:80] for key in self.keys}))
++        self.assertEqual(3, len(set(self.keys)))
++
++    def record(self, graph, variant, agent_id=0, completion_time=0.0, perf=None):
++        graph.record_evaluate_config(
++            agent_id, self.keys[variant], self.displays[variant],
++            perf if perf is not None else 0.1 * (variant + 1), 1.0,
++            completion_time=completion_time,
++        )
++
++    def test_full_identity_is_stable_and_bounded_not_a_json_prefix(self):
++        graph = SharedExplorationGraph()
++        ids = [graph._eval_key(key) for key in self.keys]
++        self.assertEqual(3, len(set(ids)))
++        for key, node_id in zip(self.keys, ids):
++            self.assertEqual("E:sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest(),
++                             node_id)
++            self.assertEqual(73, len(node_id))
++            self.assertEqual(node_id, SharedExplorationGraph()._eval_key(key))
++        long_key = json.dumps({"text": "configuration" * 1000})
++        self.assertEqual(73, len(graph._eval_key(long_key)))
++
++    def test_distinct_long_configs_do_not_create_false_self_loops(self):
++        graph = SharedExplorationGraph(diversity_mode=True)
++        for i in range(3):
++            self.record(graph, i)
++        ids = [graph._eval_key(key) for key in self.keys]
++        self.assertEqual(3, graph.stats()["eval_nodes"])
++        self.assertEqual({(ids[0], ids[1]), (ids[1], ids[2])}, set(graph._edges))
++        self.assertEqual(2, graph.stats()["edges"])
++        self.assertTrue(all(src != dst for src, dst in graph._edges))
++
++    def test_repeating_the_same_config_keeps_real_self_loop(self):
++        graph = SharedExplorationGraph()
++        self.record(graph, 0)
++        self.record(graph, 0)
++        node_id = graph._eval_key(self.keys[0])
++        self.assertEqual(1, graph.stats()["eval_nodes"])
++        self.assertEqual(2, graph.stats()["total_visits"])
++        self.assertEqual({(node_id, node_id)}, set(graph._edges))
++        self.assertEqual(1, graph._edges[(node_id, node_id)].count)
++
++    def test_identical_transitions_merge_counts_not_distinct_nodes(self):
++        graph = SharedExplorationGraph()
++        for agent in (0, 1):
++            self.record(graph, 0, agent_id=agent)
++            self.record(graph, 1, agent_id=agent)
++        ids = [graph._eval_key(key) for key in self.keys]
++        self.assertEqual(2, graph.stats()["eval_nodes"])
++        self.assertNotEqual(ids[0], ids[1])
++        self.assertEqual({(ids[0], ids[1])}, set(graph._edges))
++        edge = graph._edges[(ids[0], ids[1])]
++        self.assertEqual(2, edge.count)
++        self.assertEqual({0, 1}, edge.agents)
++
++    def test_display_rows_bind_full_configs_to_the_path_ids(self):
++        for diversity in (False, True):
++            with self.subTest(diversity=diversity):
++                graph = SharedExplorationGraph(diversity_mode=diversity)
++                self.record(graph, 0)
++                self.record(graph, 1)
++                aliases = graph._eval_display_keys(graph._eval_nodes)
++                text = graph.format_for_injection()
++                for key, display in zip(self.keys[:2], self.displays[:2]):
++                    row = next(line for line in text.splitlines() if display in line)
++                    self.assertIn(aliases[graph._eval_key(key)], row)
++                if diversity:
++                    paths = text.split("== Exploration Paths ==", 1)[1].split(
++                        "== Coverage Gap ==", 1)[0]
++                    self.assertIn("{} --> {}".format(aliases[graph._eval_key(self.keys[0])],
++                                                     aliases[graph._eval_key(self.keys[1])]), paths)
++                    self.assertNotIn("edge_", paths)
++
++    def test_rebuilt_snapshot_preserves_ids_without_future_nodes_or_edges(self):
++        graph = SharedExplorationGraph(diversity_mode=True)
++        self.record(graph, 2, agent_id=1, completion_time=30, perf=0.987654)
++        self.record(graph, 0, completion_time=5)
++        self.record(graph, 1, completion_time=10)
++        self.record(graph, 0, completion_time=15, perf=0.876543)
++        aliases = graph._eval_display_keys(graph._eval_nodes)
++        ids = [aliases[graph._eval_key(key)] for key in self.keys]
++        early = graph.format_for_injection(visible_before=10, agent_id=2)
++        self.assertIn(ids[0], early)
++        self.assertIn(ids[1], early)
++        self.assertNotIn(ids[2], early)
++        self.assertIn("{} --> {}".format(ids[0], ids[1]), early)
++        self.assertNotIn("{} --> {}".format(ids[1], ids[0]), early)
++        self.assertNotIn("0.987654", early)
++        self.assertNotIn("0.876543", early)
++        later = graph.format_for_injection(visible_before=20)
++        self.assertIn("{} --> {}".format(ids[1], ids[0]), later)
++        self.assertNotIn(ids[2], later)
++        strict = graph.format_for_injection(visible_before=20, completion_before=10)
++        self.assertIn(ids[0], strict)
++        self.assertNotIn(ids[1], strict)
++        self.assertNotIn("-->", strict)
++
++    def test_end_nodes_still_hidden_from_time_gated_graph(self):
++        graph = SharedExplorationGraph(diversity_mode=True)
++        self.record(graph, 0, completion_time=1)
++        graph.record_end(0, "unpublished-final-answer")
++        visible = graph.format_for_injection(visible_before=100)
++        self.assertNotIn("END:", visible)
++        self.assertNotIn("unpublished-final-answer", visible)
++
++
++class EvaluationGraphCacheContractTest(unittest.TestCase):
++    def test_full_payload_cache_and_claim_semantics_survive_graph_fix(self):
++        calls = []
++
++        def evaluate(payload):
++            canonical = json.dumps(json.loads(payload), sort_keys=True,
++                                   separators=(",", ":"))
++            calls.append(canonical)
++            return (0.8 if canonical == nas_payload(0) else 0.9, 3.0)
++
++        coordinator = PoolActCoordinator(2)
++        first = coordinator.bind_tools({"evaluate_config": evaluate}, 0, time_budget=100)
++        second = coordinator.bind_tools({"evaluate_config": evaluate}, 1, time_budget=100)
++        for variant, expected in ((0, 0.8), (1, 0.9)):
++            payload = nas_payload(variant)
++            first.pre_tool_hook("evaluate_config", payload)
++            self.assertEqual((expected, 3.0), first.tools["evaluate_config"](payload))
++            first.clock.advance(3.0)  # The ReAct loop owns advancement.
++        second.clock.advance(10.0)
++        reordered = json.dumps(dict(reversed(list(json.loads(nas_payload(0)).items()))), indent=2)
++        second.pre_tool_hook("evaluate_config", reordered)
++        self.assertTrue(coordinator.graph.has_pending_claim("evaluate_config", nas_payload(0), 1))
++        self.assertEqual((0.8, 0.0), second.tools["evaluate_config"](reordered))
++        self.assertEqual([nas_payload(0), nas_payload(1)], calls)
++        self.assertEqual({"hits": 1, "misses": 2, "size": 2}, coordinator.cache.stats())
++        self.assertEqual(0, coordinator.graph.stats()["pending_claims"])
++        self.assertEqual(2, coordinator.graph.stats()["eval_nodes"])
++        self.assertEqual(3, coordinator.graph.stats()["total_visits"])
++        ids = [coordinator.graph._eval_key(nas_payload(i)) for i in (0, 1)]
++        self.assertNotEqual(*ids)
++        self.assertEqual({(ids[0], ids[1])}, set(coordinator.graph._edges))
++
++    def test_future_result_is_still_a_paid_miss_then_earliest_completion_wins(self):
++        coordinator = PoolActCoordinator(1)
++        payload = nas_payload(0)
++        coordinator.cache.put("evaluate_config", payload, (0.9, 2.0), completion_time=20)
++        calls = []
++
++        def evaluate(value):
++            calls.append(value)
++            return (0.4, 2.0)
++
++        runtime = coordinator.bind_tools({"evaluate_config": evaluate}, 0, time_budget=100)
++        self.assertEqual((0.4, 2.0), runtime.tools["evaluate_config"](payload))
++        runtime.clock.advance(2)
++        self.assertEqual((0.4, 0.0), runtime.tools["evaluate_config"](payload))
++        self.assertEqual([payload], calls)
++        self.assertEqual({"hits": 1, "misses": 1, "size": 1}, coordinator.cache.stats())
++        text = coordinator.graph.format_for_injection(visible_before=2)
++        self.assertIn("0.400000", text)
++        self.assertNotIn("0.900000", text)
++
++    def test_audit_feedback_rows_also_bind_distinct_full_payload_identities(self):
++        coordinator = PoolActCoordinator(1)
++        runtime = coordinator.bind_tools(
++            {"human_feedback": lambda payload: ("Evidence Correct", 1.0)},
++            0, time_budget=100,
++        )
++        keys = []
++        for nda_id in (1, 2):
++            payload = json.dumps({"evidence_ids": list(range(40)), "nda_id": nda_id},
++                                 sort_keys=True, separators=(",", ":"))
++            keys.append(payload)
++            runtime.tools["human_feedback"](payload)
++            runtime.clock.advance(1)
++        self.assertEqual(keys[0][:80], keys[1][:80])
++        aliases = coordinator.graph._eval_display_keys(coordinator.graph._eval_nodes)
++        ids = [aliases[coordinator.graph._eval_key(key)] for key in keys]
++        self.assertNotEqual(*ids)
++        text = runtime.observation_augmenter("Feedback retained.")
++        for nda_id, node_id in zip((1, 2), ids):
++            row = next(line for line in text.splitlines() if "nda:{} ".format(nda_id) in line)
++            self.assertIn(node_id, row)
++            self.assertIn("Evidence Correct", row)
++        self.assertIn("{} --> {}".format(*ids), text)
++        self.assertIn("2 NDAs attempted so far.", text)
++
++
++class CompactEvaluationDisplayTest(unittest.TestCase):
++    def test_short_audit_graph_is_byte_equivalent_to_legacy_display(self):
++        graph = SharedExplorationGraph(n_agents=2, diversity_mode=True)
++        for nda_id in (1, 2):
++            key = json.dumps({"evidence_ids": [1], "nda_id": nda_id},
++                             sort_keys=True, separators=(",", ":"))
++            graph.record_evaluate_config(0, key,
++                                         "nda:{}  ev:[1]  [Evidence Correct]".format(nda_id),
++                                         1.0, 1.0, completion_time=nda_id)
++        expected = "\n".join([
++            "[Parallel Exploration — Agent 1 of 2]",
++            "You are one of 2 agents solving this task in parallel.",
++            "Shared state below shows what other agents have explored and are exploring.",
++            "Use this to plan your next action — prioritize paths not yet explored.",
++            "", "== In Progress ==", "  None.", "", "== Already Explored ==",
++            "  nda:1  ev:[1]  [Evidence Correct] [agents 0]",
++            "  nda:2  ev:[1]  [Evidence Correct] [agents 0]",
++            "", "== Exploration Paths ==",
++            '  E:{"evidence_ids":[1],"nda_id":1} --> E:{"evidence_ids":[1],"nda_id":2} [agents 0]',
++            "", "== Coverage Gap ==", "  2 NDAs attempted so far.",
++        ])
++        self.assertEqual(expected, graph.format_for_injection(visible_before=2, agent_id=1))
++
++    def test_short_default_tuning_graph_is_byte_equivalent_to_legacy_display(self):
++        graph = SharedExplorationGraph(n_agents=2)
++        graph.record_evaluate_config(0, '{"x":1}', '{x:1}', 0.5, 2.0)
++        expected = "\n".join([
++            "[Shared Exploration Graph]", "You are one of 2 agents tuning in parallel.",
++            "Use this to avoid redundant configs and learn from others' results.",
++            "Cached evaluations cost 0s.", "", "=== Evaluated Configs ===",
++            "  {x:1} -> perf=0.500000, cost=2s (1x by [0])",
++            "", "=== Best So Far ===", "  perf=0.500000 {x:1} (by agent 0)",
++        ])
++        self.assertEqual(expected, graph.format_for_injection())
++
++    def test_80_character_boundary_and_mixed_short_long_paths(self):
++        graph = SharedExplorationGraph(diversity_mode=True)
++        keys = [json.dumps({"x": "a" * (length - 8)}, separators=(",", ":"))
++                for length in (80, 81)]
++        self.assertEqual([80, 81], list(map(len, keys)))
++        for key in keys:
++            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
++        aliases = graph._eval_display_keys(graph._eval_nodes)
++        self.assertEqual("E:" + keys[0], aliases[graph._eval_key(keys[0])])
++        long_alias = aliases[graph._eval_key(keys[1])]
++        self.assertEqual("E:h:" + hashlib.sha256(keys[1].encode()).hexdigest()[:12], long_alias)
++        text = graph.format_for_injection()
++        self.assertIn("\n  {} -> 0.500000".format(keys[0]), text)
++        self.assertIn("\n  {} {} -> 0.500000".format(long_alias, keys[1]), text)
++        self.assertIn("E:{} --> {}".format(keys[0], long_alias), text)
++
++    @staticmethod
++    def colliding_digest(_graph, key):
++        variant = [nas_payload(i) for i in range(3)].index(key)
++        return "E:sha256:" + "0" * 12 + str(variant) + "0" * 51
++
++    def test_colliding_prefixes_extend_all_aliases_independent_of_node_order(self):
++        with patch.object(SharedExplorationGraph, "_eval_key", self.colliding_digest):
++            maps = []
++            for order in ((0, 1, 2), (2, 1, 0)):
++                graph = SharedExplorationGraph(diversity_mode=True)
++                for i in order:
++                    graph.record_evaluate_config(0, nas_payload(i), "config {}".format(i), 0.5, 1.0)
++                aliases = graph._eval_display_keys(graph._eval_nodes)
++                self.assertEqual(3, len(set(aliases.values())))
++                self.assertTrue(all(len(alias) == 17 for alias in aliases.values()))
++                self.assertNotIn("E:h:" + "0" * 12, aliases.values())
++                text = graph.format_for_injection()
++                for i in order:
++                    self.assertIn("{} config {}".format(aliases[graph._eval_key(nas_payload(i))], i), text)
++                maps.append(aliases)
++            self.assertEqual(*maps)
++
++    def test_future_prefix_collision_does_not_change_past_visible_aliases(self):
++        with patch.object(SharedExplorationGraph, "_eval_key", self.colliding_digest):
++            graph = SharedExplorationGraph(diversity_mode=True)
++            graph.record_evaluate_config(0, nas_payload(0), "visible config", 0.5, 1.0,
++                                         completion_time=1)
++            before = graph.format_for_injection(visible_before=1)
++            graph.record_evaluate_config(0, nas_payload(1), "future config", 0.9, 1.0,
++                                         completion_time=10)
++            self.assertEqual(before, graph.format_for_injection(visible_before=1))
++            self.assertEqual(before, graph.format_for_injection(visible_before=10, completion_before=10))
++            after = graph.format_for_injection(visible_before=10)
++            old_alias = "E:h:" + "0" * 12
++            self.assertIn(old_alias + " visible config", before)
++            self.assertNotIn(old_alias + " ", after)
++            self.assertIn(old_alias + "0 visible config", after)
++            self.assertIn(old_alias + "1 future config", after)
++
++    def test_full_digest_collision_fails_before_graph_state_mutation(self):
++        graph = SharedExplorationGraph()
++        with patch.object(SharedExplorationGraph, "_eval_key", return_value="E:sha256:" + "0" * 64):
++            graph.record_evaluate_config(0, nas_payload(0), "first", 0.5, 1.0)
++            before = (graph.stats(), list(graph._observations), dict(graph._agent_last_node),
++                      dict(graph._eval_key_payloads))
++            with self.assertRaisesRegex(ValueError, "identity digest collision"):
++                graph.record_evaluate_config(0, nas_payload(1), "second", 0.8, 1.0)
++            after = (graph.stats(), list(graph._observations), dict(graph._agent_last_node),
++                     dict(graph._eval_key_payloads))
++            self.assertEqual(before, after)
++
++    def test_short_and_long_display_namespace_collision_is_not_silent(self):
++        # Normal canonical dict/list keys cannot start with 'h:'. Even direct
++        # library misuse must not silently create a short/long alias collision.
++        graph = SharedExplorationGraph()
++        long_key = nas_payload(0)
++        digest = hashlib.sha256(long_key.encode()).hexdigest()
++        short_key = "h:" + digest[:12]
++        for key in (short_key, long_key):
++            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
++        aliases = graph._eval_display_keys(graph._eval_nodes)
++        self.assertEqual("E:" + short_key, aliases[graph._eval_key(short_key)])
++        self.assertEqual("E:h:" + digest[:13], aliases[graph._eval_key(long_key)])
++        self.assertEqual(2, len(set(aliases.values())))
++
++    def test_full_width_display_namespace_collision_fails_closed(self):
++        graph = SharedExplorationGraph()
++        long_key = nas_payload(0)
++        digest = hashlib.sha256(long_key.encode()).hexdigest()
++        for width in range(12, 65):
++            key = "h:" + digest[:width]
++            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
++        graph.record_evaluate_config(0, long_key, long_key, 0.5, 1.0)
++        with self.assertRaisesRegex(ValueError, "distinct evaluation graph display IDs"):
++            graph.format_for_injection()
++
++
++if __name__ == "__main__":
++    unittest.main()
