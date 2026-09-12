@@ -650,6 +650,7 @@ class SharedExplorationGraph:
         self._fetch_nodes: Dict[int, FetchNode] = {}    # doc_id -> node
         self._end_nodes: Dict[str, EndNode] = {}        # answer -> node
         self._eval_nodes: Dict[str, EvalNode] = {}      # config_key -> node
+        self._eval_key_payloads: Dict[str, str] = {}    # digest identity -> full payload
 
         # Edges: (source_key, target_key) -> GraphEdge
         self._edges: Dict[Tuple[str, str], GraphEdge] = {}
@@ -869,9 +870,43 @@ class SharedExplorationGraph:
     def _eval_key(self, config_key: str) -> str:
         # Path identity must include the complete canonical payload. Truncating
         # JSON merges distinct long configurations into false transitions/loops.
-        # Keep paths bounded and bind this digest to the readable display row;
-        # cache, claim and observation dedup still use their full payload keys.
+        # This full digest is internal; visible paths use snapshot-local labels.
+        # Cache, claim and observation dedup still use their full payload keys.
         return "E:sha256:{}".format(hashlib.sha256(config_key.encode("utf-8")).hexdigest())
+
+    def _eval_display_keys(self, eval_nodes: Dict[str, EvalNode]) -> Dict[str, str]:
+        """Map full identities to compact IDs using only this visible snapshot.
+
+        Short canonical JSON retains its original readable path label. Long
+        keys use hash prefixes; all colliding prefixes expand together. These
+        aliases are snapshot-local, not a pool-global registry influenced by
+        observations that are still hidden from the receiving agent.
+        """
+        short = {}
+        long = {}
+        for config_key in eval_nodes:
+            identity = self._eval_key(config_key)
+            if len(config_key) <= 80:
+                short[identity] = "E:" + config_key
+            else:
+                long[identity] = 12
+        while True:
+            aliases = dict(short)
+            aliases.update({identity: "E:h:" + identity.rsplit(":", 1)[1][:width]
+                            for identity, width in long.items()})
+            by_alias: Dict[str, List[str]] = {}
+            for identity, alias in aliases.items():
+                by_alias.setdefault(alias, []).append(identity)
+            conflicts = [identities for identities in by_alias.values()
+                         if len(identities) > 1]
+            if not conflicts:
+                return aliases
+            for identities in conflicts:
+                expandable = [identity for identity in identities if identity in long]
+                if not expandable or any(long[identity] >= 64 for identity in expandable):
+                    raise ValueError("Cannot assign distinct evaluation graph display IDs")
+                for identity in expandable:
+                    long[identity] += 1
 
     def _add_edge(self, source: str, target: str, agent_id: int) -> None:
         """Add or increment an edge. Caller must hold _lock."""
@@ -1022,11 +1057,15 @@ class SharedExplorationGraph:
             completion_time: Simulated time when this eval completed.
         """
         with self._lock:
+            ekey = self._eval_key(config_key)
+            previous_payload = self._eval_key_payloads.get(ekey)
+            if previous_payload is not None and previous_payload != config_key:
+                raise ValueError("Evaluation graph identity digest collision")
             completion_time = self._remember_observation(
                 "record_evaluate_config",
                 (agent_id, config_key, config_display, perf, cost), completion_time,
             )
-            ekey = self._eval_key(config_key)
+            self._eval_key_payloads[ekey] = config_key
             if config_key not in self._eval_nodes:
                 self._eval_nodes[config_key] = EvalNode(
                     config_key=config_key,
@@ -1129,6 +1168,12 @@ class SharedExplorationGraph:
                 and not pending_claims:
             return ""
 
+        # Render from the filtered snapshot only. Keep internal edge identities
+        # untouched, and use the same alias map in observation rows and paths.
+        eval_display_keys = self._eval_display_keys(eval_nodes)
+        edges = {(eval_display_keys.get(src, src), eval_display_keys.get(tgt, tgt)): edge
+                 for (src, tgt), edge in edges.items()}
+
         # Diversity mode: unified coverage-map format for all scenarios
         if self._diversity_mode:
             return self._format_unified(
@@ -1136,11 +1181,13 @@ class SharedExplorationGraph:
                 end_nodes, edges,
                 agent_id=agent_id,
                 pending_claims=pending_claims,
+                eval_display_keys=eval_display_keys,
             )
 
         # Non-diversity mode: original formats
         if eval_nodes and not search_nodes and not fetch_nodes:
-            return self._format_tuning_default(eval_nodes, end_nodes, edges)
+            return self._format_tuning_default(eval_nodes, end_nodes, edges,
+                                               eval_display_keys=eval_display_keys)
         return self._format_default(
             search_nodes, fetch_nodes, end_nodes, edges,
         )
@@ -1259,6 +1306,7 @@ class SharedExplorationGraph:
         *,
         agent_id: Optional[int] = None,
         pending_claims: Optional[List[ActionClaim]] = None,
+        eval_display_keys: Dict[str, str],
     ) -> str:
         """Unified coverage-map format for all scenarios in diversity mode.
 
@@ -1342,20 +1390,22 @@ class SharedExplorationGraph:
             for node in sorted_nodes:
                 who = sorted(node.visited_by)
                 marker = " (you)" if agent_id in who else ""
+                display = node.config_display
+                if len(node.config_key) > 80:
+                    display = "{} {}".format(eval_display_keys[self._eval_key(node.config_key)],
+                                             display)
                 if is_audit:
                     lines.append(
-                        "  {} {} [agents {}]{}".format(
-                            self._eval_key(node.config_key),
-                            node.config_display,
+                        "  {} [agents {}]{}".format(
+                            display,
                             ",".join(str(a) for a in who), marker,
                         )
                     )
                 else:
                     perf_str = "{:.6f}".format(node.perf) if node.perf is not None else "INVALID"
                     lines.append(
-                        "  {} {} -> {} [agents {}]{}".format(
-                            self._eval_key(node.config_key),
-                            node.config_display, perf_str,
+                        "  {} -> {} [agents {}]{}".format(
+                            display, perf_str,
                             ",".join(str(a) for a in who), marker,
                         )
                     )
@@ -1441,6 +1491,8 @@ class SharedExplorationGraph:
         eval_nodes: Dict[str, EvalNode],
         end_nodes: Dict[str, EndNode],
         edges: Dict[Tuple[str, str], GraphEdge],
+        *,
+        eval_display_keys: Dict[str, str],
     ) -> str:
         """Default format for tuning: show all configs with perf + cost."""
         lines = [
@@ -1463,10 +1515,13 @@ class SharedExplorationGraph:
 
         for node in sorted_nodes:
             perf_str = "perf={:.6f}".format(node.perf) if node.perf is not None else "INVALID"
+            display = node.config_display
+            if len(node.config_key) > 80:
+                display = "{} {}".format(eval_display_keys[self._eval_key(node.config_key)],
+                                         display)
             lines.append(
-                "  {} {} -> {}, cost={:.0f}s ({}x by [{}])".format(
-                    self._eval_key(node.config_key),
-                    node.config_display,
+                "  {} -> {}, cost={:.0f}s ({}x by [{}])".format(
+                    display,
                     perf_str,
                     node.cost,
                     node.visits,

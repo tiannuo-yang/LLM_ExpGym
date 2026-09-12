@@ -6,6 +6,7 @@ JSON characters. No evaluator, model, benchmark data, or saved run is used.
 import hashlib
 import json
 import unittest
+from unittest.mock import patch
 
 from expgym.extras.parallel_cache import _parse_evaluate_config
 from expgym.poolact import PoolActCoordinator, SharedExplorationGraph
@@ -89,15 +90,16 @@ class EvaluationGraphIdentityTest(unittest.TestCase):
                 graph = SharedExplorationGraph(diversity_mode=diversity)
                 self.record(graph, 0)
                 self.record(graph, 1)
+                aliases = graph._eval_display_keys(graph._eval_nodes)
                 text = graph.format_for_injection()
                 for key, display in zip(self.keys[:2], self.displays[:2]):
                     row = next(line for line in text.splitlines() if display in line)
-                    self.assertIn(graph._eval_key(key), row)
+                    self.assertIn(aliases[graph._eval_key(key)], row)
                 if diversity:
                     paths = text.split("== Exploration Paths ==", 1)[1].split(
                         "== Coverage Gap ==", 1)[0]
-                    self.assertIn("{} --> {}".format(graph._eval_key(self.keys[0]),
-                                                     graph._eval_key(self.keys[1])), paths)
+                    self.assertIn("{} --> {}".format(aliases[graph._eval_key(self.keys[0])],
+                                                     aliases[graph._eval_key(self.keys[1])]), paths)
                     self.assertNotIn("edge_", paths)
 
     def test_rebuilt_snapshot_preserves_ids_without_future_nodes_or_edges(self):
@@ -106,7 +108,8 @@ class EvaluationGraphIdentityTest(unittest.TestCase):
         self.record(graph, 0, completion_time=5)
         self.record(graph, 1, completion_time=10)
         self.record(graph, 0, completion_time=15, perf=0.876543)
-        ids = [graph._eval_key(key) for key in self.keys]
+        aliases = graph._eval_display_keys(graph._eval_nodes)
+        ids = [aliases[graph._eval_key(key)] for key in self.keys]
         early = graph.format_for_injection(visible_before=10, agent_id=2)
         self.assertIn(ids[0], early)
         self.assertIn(ids[1], early)
@@ -198,7 +201,8 @@ class EvaluationGraphCacheContractTest(unittest.TestCase):
             runtime.tools["human_feedback"](payload)
             runtime.clock.advance(1)
         self.assertEqual(keys[0][:80], keys[1][:80])
-        ids = [coordinator.graph._eval_key(key) for key in keys]
+        aliases = coordinator.graph._eval_display_keys(coordinator.graph._eval_nodes)
+        ids = [aliases[coordinator.graph._eval_key(key)] for key in keys]
         self.assertNotEqual(*ids)
         text = runtime.observation_augmenter("Feedback retained.")
         for nda_id, node_id in zip((1, 2), ids):
@@ -207,6 +211,134 @@ class EvaluationGraphCacheContractTest(unittest.TestCase):
             self.assertIn("Evidence Correct", row)
         self.assertIn("{} --> {}".format(*ids), text)
         self.assertIn("2 NDAs attempted so far.", text)
+
+
+class CompactEvaluationDisplayTest(unittest.TestCase):
+    def test_short_audit_graph_is_byte_equivalent_to_legacy_display(self):
+        graph = SharedExplorationGraph(n_agents=2, diversity_mode=True)
+        for nda_id in (1, 2):
+            key = json.dumps({"evidence_ids": [1], "nda_id": nda_id},
+                             sort_keys=True, separators=(",", ":"))
+            graph.record_evaluate_config(0, key,
+                                         "nda:{}  ev:[1]  [Evidence Correct]".format(nda_id),
+                                         1.0, 1.0, completion_time=nda_id)
+        expected = "\n".join([
+            "[Parallel Exploration — Agent 1 of 2]",
+            "You are one of 2 agents solving this task in parallel.",
+            "Shared state below shows what other agents have explored and are exploring.",
+            "Use this to plan your next action — prioritize paths not yet explored.",
+            "", "== In Progress ==", "  None.", "", "== Already Explored ==",
+            "  nda:1  ev:[1]  [Evidence Correct] [agents 0]",
+            "  nda:2  ev:[1]  [Evidence Correct] [agents 0]",
+            "", "== Exploration Paths ==",
+            '  E:{"evidence_ids":[1],"nda_id":1} --> E:{"evidence_ids":[1],"nda_id":2} [agents 0]',
+            "", "== Coverage Gap ==", "  2 NDAs attempted so far.",
+        ])
+        self.assertEqual(expected, graph.format_for_injection(visible_before=2, agent_id=1))
+
+    def test_short_default_tuning_graph_is_byte_equivalent_to_legacy_display(self):
+        graph = SharedExplorationGraph(n_agents=2)
+        graph.record_evaluate_config(0, '{"x":1}', '{x:1}', 0.5, 2.0)
+        expected = "\n".join([
+            "[Shared Exploration Graph]", "You are one of 2 agents tuning in parallel.",
+            "Use this to avoid redundant configs and learn from others' results.",
+            "Cached evaluations cost 0s.", "", "=== Evaluated Configs ===",
+            "  {x:1} -> perf=0.500000, cost=2s (1x by [0])",
+            "", "=== Best So Far ===", "  perf=0.500000 {x:1} (by agent 0)",
+        ])
+        self.assertEqual(expected, graph.format_for_injection())
+
+    def test_80_character_boundary_and_mixed_short_long_paths(self):
+        graph = SharedExplorationGraph(diversity_mode=True)
+        keys = [json.dumps({"x": "a" * (length - 8)}, separators=(",", ":"))
+                for length in (80, 81)]
+        self.assertEqual([80, 81], list(map(len, keys)))
+        for key in keys:
+            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
+        aliases = graph._eval_display_keys(graph._eval_nodes)
+        self.assertEqual("E:" + keys[0], aliases[graph._eval_key(keys[0])])
+        long_alias = aliases[graph._eval_key(keys[1])]
+        self.assertEqual("E:h:" + hashlib.sha256(keys[1].encode()).hexdigest()[:12], long_alias)
+        text = graph.format_for_injection()
+        self.assertIn("\n  {} -> 0.500000".format(keys[0]), text)
+        self.assertIn("\n  {} {} -> 0.500000".format(long_alias, keys[1]), text)
+        self.assertIn("E:{} --> {}".format(keys[0], long_alias), text)
+
+    @staticmethod
+    def colliding_digest(_graph, key):
+        variant = [nas_payload(i) for i in range(3)].index(key)
+        return "E:sha256:" + "0" * 12 + str(variant) + "0" * 51
+
+    def test_colliding_prefixes_extend_all_aliases_independent_of_node_order(self):
+        with patch.object(SharedExplorationGraph, "_eval_key", self.colliding_digest):
+            maps = []
+            for order in ((0, 1, 2), (2, 1, 0)):
+                graph = SharedExplorationGraph(diversity_mode=True)
+                for i in order:
+                    graph.record_evaluate_config(0, nas_payload(i), "config {}".format(i), 0.5, 1.0)
+                aliases = graph._eval_display_keys(graph._eval_nodes)
+                self.assertEqual(3, len(set(aliases.values())))
+                self.assertTrue(all(len(alias) == 17 for alias in aliases.values()))
+                self.assertNotIn("E:h:" + "0" * 12, aliases.values())
+                text = graph.format_for_injection()
+                for i in order:
+                    self.assertIn("{} config {}".format(aliases[graph._eval_key(nas_payload(i))], i), text)
+                maps.append(aliases)
+            self.assertEqual(*maps)
+
+    def test_future_prefix_collision_does_not_change_past_visible_aliases(self):
+        with patch.object(SharedExplorationGraph, "_eval_key", self.colliding_digest):
+            graph = SharedExplorationGraph(diversity_mode=True)
+            graph.record_evaluate_config(0, nas_payload(0), "visible config", 0.5, 1.0,
+                                         completion_time=1)
+            before = graph.format_for_injection(visible_before=1)
+            graph.record_evaluate_config(0, nas_payload(1), "future config", 0.9, 1.0,
+                                         completion_time=10)
+            self.assertEqual(before, graph.format_for_injection(visible_before=1))
+            self.assertEqual(before, graph.format_for_injection(visible_before=10, completion_before=10))
+            after = graph.format_for_injection(visible_before=10)
+            old_alias = "E:h:" + "0" * 12
+            self.assertIn(old_alias + " visible config", before)
+            self.assertNotIn(old_alias + " ", after)
+            self.assertIn(old_alias + "0 visible config", after)
+            self.assertIn(old_alias + "1 future config", after)
+
+    def test_full_digest_collision_fails_before_graph_state_mutation(self):
+        graph = SharedExplorationGraph()
+        with patch.object(SharedExplorationGraph, "_eval_key", return_value="E:sha256:" + "0" * 64):
+            graph.record_evaluate_config(0, nas_payload(0), "first", 0.5, 1.0)
+            before = (graph.stats(), list(graph._observations), dict(graph._agent_last_node),
+                      dict(graph._eval_key_payloads))
+            with self.assertRaisesRegex(ValueError, "identity digest collision"):
+                graph.record_evaluate_config(0, nas_payload(1), "second", 0.8, 1.0)
+            after = (graph.stats(), list(graph._observations), dict(graph._agent_last_node),
+                     dict(graph._eval_key_payloads))
+            self.assertEqual(before, after)
+
+    def test_short_and_long_display_namespace_collision_is_not_silent(self):
+        # Normal canonical dict/list keys cannot start with 'h:'. Even direct
+        # library misuse must not silently create a short/long alias collision.
+        graph = SharedExplorationGraph()
+        long_key = nas_payload(0)
+        digest = hashlib.sha256(long_key.encode()).hexdigest()
+        short_key = "h:" + digest[:12]
+        for key in (short_key, long_key):
+            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
+        aliases = graph._eval_display_keys(graph._eval_nodes)
+        self.assertEqual("E:" + short_key, aliases[graph._eval_key(short_key)])
+        self.assertEqual("E:h:" + digest[:13], aliases[graph._eval_key(long_key)])
+        self.assertEqual(2, len(set(aliases.values())))
+
+    def test_full_width_display_namespace_collision_fails_closed(self):
+        graph = SharedExplorationGraph()
+        long_key = nas_payload(0)
+        digest = hashlib.sha256(long_key.encode()).hexdigest()
+        for width in range(12, 65):
+            key = "h:" + digest[:width]
+            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
+        graph.record_evaluate_config(0, long_key, long_key, 0.5, 1.0)
+        with self.assertRaisesRegex(ValueError, "distinct evaluation graph display IDs"):
+            graph.format_for_injection()
 
 
 if __name__ == "__main__":

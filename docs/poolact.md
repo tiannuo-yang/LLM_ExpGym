@@ -152,19 +152,31 @@ Graph views are built from completion events visible at the receiving agent's
 simulated time. Feedback withheld at the strict budget boundary is not published
 through graph/cache or reintroduced into a forced-final prompt.
 
-Evaluation path IDs use `E:sha256:<64 hex digits>` computed from the complete
-canonical configuration/feedback payload. The same ID prefixes each existing
-readable configuration or Audit-feedback row, so paths can be matched to their
-observations without repeating long JSON in every edge. This replaces v3's
-first-80-character payload IDs, which could merge distinct configurations into
-false transitions or self-loops. Full SHA-256 is a practical collision-resistant
-identifier, not a mathematical uniqueness guarantee. Exact payload keys still
-govern cache hits, claims, and merged observation nodes; time visibility, costs,
-scores, and the repeated graph-snapshot history policy are unchanged. A genuine
-repeat of the same configuration still records a self-loop. This fix covers
-`E:` nodes only: legacy `END:` display IDs are unchanged and remain hidden in
-clock-bound graph views. It does not claim to reduce model-token/context use;
-the new IDs also appear in observation rows and must be measured in real runs.
+Internal evaluation node IDs use `E:sha256:<64 hex digits>` computed from the
+complete canonical configuration/feedback payload. This replaces v3's
+first-80-character identities, which could merge distinct configurations into
+false transitions or self-loops. Full SHA-256 is collision-resistant, not a
+mathematical uniqueness guarantee; a full-digest collision between different
+payloads raises an error before changing graph nodes, edges or history.
+
+Model-facing path labels preserve the old `E:<canonical JSON>` form for keys of
+at most 80 characters, without adding an ID to their existing observation row.
+Longer keys use `E:h:<hash prefix>`, starting at 12 hex digits, with the same
+label on their readable configuration/feedback row and path endpoints. Aliases
+are computed **only from the time/budget-visible snapshot**. Colliding prefixes
+are explicitly extended for every conflicting long-key alias; an unresolved
+full-width display collision raises an error, never silently merges nodes.
+These labels are snapshot-local: a prefix may lengthen when a new colliding key
+becomes visible, and an older snapshot retains its own mapping. Future/hidden
+keys cannot alter a current label. No global ordinal-ID registry is used.
+
+Exact payload keys still govern cache hits, claims, and merged observation
+nodes; time visibility, costs, scores, and repeated graph-snapshot history are
+unchanged. A genuine repeat of the same configuration still records a self-loop.
+This fix covers `E:` nodes only: legacy `END:` display IDs are unchanged and
+remain hidden in clock-bound graph views. The compact renderer avoids printing
+full hashes repeatedly, but is not a graph-history/context-policy fix; actual
+token/context costs must still be measured for the receiving model.
 
 The ReAct loop, not the wrapper, advances each agent's virtual clock. Wrappers
 only calculate the future completion timestamp used by the shared cache and

@@ -5,7 +5,7 @@ description: Run, debug, validate, or adapt ExpGym and PoolAct experiments, incl
 
 # ExpGym Runner
 
-Treat ExpGym and PoolAct as one system with two runners. Preserve the user's experiment settings and distinguish framework correctness from model performance.
+Treat ExpGym and PoolAct as one system with two runners. Apply this workflow to new models and scenarios without inheriting historical case-study counts or desired trends. Preserve the user's experiment settings and distinguish framework correctness from model performance. GPU allocation/model runs and Git push each require user authorization; a request to edit or report does not grant either.
 
 ## Pick the relevant path
 
@@ -50,6 +50,8 @@ Only completed, time-visible observations are cache hits. Withheld budget feedba
 
 Separate `execution_complete`, `score_complete` and task performance.
 
+For real serving, distinguish execution integrity from task-representative native/output fidelity and from scientific performance. Successful HTTP/JSON, complete artifacts or a passing score check do not by themselves establish that native calls, IDs/history and task output survived the serving path faithfully. Concrete garbling or output-corruption evidence at smoke requires diagnosis before calling the deployment reliable; preserve the evidence and unresolved scope. A valid wrong answer or low score alone is not a serving fault. Do not filter scores or retry for favorable outputs to satisfy this check, and do not infer a fix from the model name or CPU validation alone.
+
 - Sequential scored results need matching source/config/data/evaluator identities, a valid trace and repository score validation.
 - PoolAct needs all expected agent files, validated individual and aggregate results, matching identities, a consistent summary and zero pending claims.
 - Under explicit `task-abstention-v1`, a normal missing Search/Audit answer preserves raw null and scores the empty prediction through the original evaluator. A missing HPO configuration is unscorable; full-pool MI/BoN stays unknown if a required agent is missing. Do not require finite performance for a legitimately recorded unscorable endpoint.
@@ -64,9 +66,9 @@ When asked to produce a full report, use this sequence with the actual study set
 
 1. Bind the existing data/source/config identities, explicit analysis inputs and actual matrix; do not confuse a retrospective run manifest with preregistration.
 2. Generate all-setting absolute scores, clearly oriented comparisons and relevant repeat/task tables. Preserve item/pool/order units, denominators, unknowns and all positive/negative values; do not inherit case-study model names, counts or repeats.
-3. Organize the report around the user's questions: budget degradation, cache/coordination gains where relevant, and actual resource tradeoffs. Keep material limitations near the claims they affect; an anomaly list is not a substitute for the main report.
-4. Include the complete raw-dump and analysis index in the report: fixed links, source/member/shard mapping, existing hash/size evidence, all-attempt costs and restoration entry points. Distinguish metadata checks from new content verification.
-5. Perform one post-draft independent numerical/logical review, correct affected parts, and publish only the scanned delta if authorized. Stop at the agreed report/index acceptance; no implicit model reruns, rescoring, full raw restoration or repeated audit ladders.
+3. Deliver a concise main report around exactly three questions: budget degradation; cache and PoolAct coordination gains or losses; and model-ranking reshuffles across task families and Free-to-Tight budgets. Explain recorded resource tradeoffs alongside the comparisons. Mark unanswerable comparisons rather than expanding the study. Describe setting/deployment dependence, not OOD generalization by default. Keep full settings, tables and diagnostics in a separate detailed report; do not replace the main questions with an anomaly list.
+4. Both reports must link directly to original dumps, CSVs and the full archive index: fixed links, source/member/shard mapping, existing hash/size evidence, all-attempt costs and restoration entry points. Share the existing index rather than duplicating archives. Preserve historical source/scoring identities, null versus zero, and any explicitly authorized Gap=0 sensitivity as a separately labelled alternative, never a rewrite of the primary endpoint.
+5. After the reports and analysis are drafted, perform one independent final numerical/logical review across both reports, correct affected parts, and publish only the scanned delta if authorized. Earlier engineering checks do not replace it. Stop at the agreed report/index acceptance; no implicit model reruns, rescoring, full raw restoration or repeated audit ladders.
 
 Keep detailed acceptance and artifact-layout guidance in the linked workflow. Its historical generators are study-specific examples, not general CLIs for arbitrary models or matrices.
 
@@ -76,8 +78,8 @@ During development, run focused tests for changed behavior. For runner/execution
 
 Use the recorded interpreter for an existing study; never reinstall a frozen environment to make a check pass. `scripts/check.sh` bootstraps a missing environment, so verify `EXPGYM_VENV/bin/python` exists before invoking it. ParamNet requires the verified legacy environment; fake or skipped tests do not establish that real path.
 
-New or changed model-facing/execution paths require an authorized representative real smoke before a full experiment. If this task is code-only or no GPU/API run is requested, finish the static/fake work and state that real smoke remains unperformed; do not acquire resources automatically.
+New or changed model-facing/execution paths require an authorized task-representative real smoke before a full experiment; select relevant native/tool/history/forced-final paths, not just a synthetic echo. For old/new validation, retain the recorded original task, sampling, reasoning/output and budget settings on both sides except for the explicitly tested change. Do not turn a case-specific shorter cap into a universal validation rule. If this task is code-only or no GPU/API run is requested, finish the static/fake work and state that real smoke remains unperformed; do not acquire resources automatically. An ongoing GPU validation remains pending, not a resolved serving issue.
 
-Keep one plan, one execution record and one report per meaningful revision. Reuse immutable input inventories and completed checks; do not recursively create reviews of reviews, re-extract every raw file for metadata-only work, or repeat full scans for unchanged report text. Retain necessary safety scans, score-integrity checks, failed-attempt costs and the user's requested independent post-report review.
+Keep one plan, one execution record and one report package (main plus detailed report) per meaningful revision. Reuse immutable input inventories and completed checks; do not recursively create reviews of reviews, re-extract every raw file for metadata-only work, or repeat full scans for unchanged report text. Retain necessary safety scans, score-integrity checks, failed-attempt costs and the user's requested independent post-report review.
 
 Report the actual scope, changed behavior, tests, source/result locations, remaining limitations and whether code was pushed or merged. Finite tests do not prove “no bugs,” and desired performance trends are not an acceptance criterion for a bug fix.
