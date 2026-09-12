@@ -37,7 +37,7 @@ from expgym.extras.parallel_cache import (
     wrap_tools_with_poolact,
 )
 
-POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v3"
+POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v4"
 
 
 @dataclass

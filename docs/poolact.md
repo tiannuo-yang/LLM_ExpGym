@@ -12,7 +12,7 @@ objects:
    decision's pending claim are one serialized critical section.
 
 The serialized result identifies this contract as
-`paper-graph-lock-v3` (`expgym.poolact.POOLACT_PROTOCOL_VERSION`). This is the
+`paper-graph-lock-v4` (`expgym.poolact.POOLACT_PROTOCOL_VERSION`). This is the
 coordination protocol version, separate from the trace-v2 schema version.
 
 After the claim is recorded, the lock is released and the tool executes in
@@ -151,6 +151,20 @@ parallel timeline.
 Graph views are built from completion events visible at the receiving agent's
 simulated time. Feedback withheld at the strict budget boundary is not published
 through graph/cache or reintroduced into a forced-final prompt.
+
+Evaluation path IDs use `E:sha256:<64 hex digits>` computed from the complete
+canonical configuration/feedback payload. The same ID prefixes each existing
+readable configuration or Audit-feedback row, so paths can be matched to their
+observations without repeating long JSON in every edge. This replaces v3's
+first-80-character payload IDs, which could merge distinct configurations into
+false transitions or self-loops. Full SHA-256 is a practical collision-resistant
+identifier, not a mathematical uniqueness guarantee. Exact payload keys still
+govern cache hits, claims, and merged observation nodes; time visibility, costs,
+scores, and the repeated graph-snapshot history policy are unchanged. A genuine
+repeat of the same configuration still records a self-loop. This fix covers
+`E:` nodes only: legacy `END:` display IDs are unchanged and remain hidden in
+clock-bound graph views. It does not claim to reduce model-token/context use;
+the new IDs also appear in observation rows and must be measured in real runs.
 
 The ReAct loop, not the wrapper, advances each agent's virtual clock. Wrappers
 only calculate the future completion timestamp used by the shared cache and

@@ -14,6 +14,7 @@ Provides:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -866,7 +867,11 @@ class SharedExplorationGraph:
         return 'END:"{}"'.format(short)
 
     def _eval_key(self, config_key: str) -> str:
-        return "E:{}".format(config_key[:80])
+        # Path identity must include the complete canonical payload. Truncating
+        # JSON merges distinct long configurations into false transitions/loops.
+        # Keep paths bounded and bind this digest to the readable display row;
+        # cache, claim and observation dedup still use their full payload keys.
+        return "E:sha256:{}".format(hashlib.sha256(config_key.encode("utf-8")).hexdigest())
 
     def _add_edge(self, source: str, target: str, agent_id: int) -> None:
         """Add or increment an edge. Caller must hold _lock."""
@@ -1339,7 +1344,8 @@ class SharedExplorationGraph:
                 marker = " (you)" if agent_id in who else ""
                 if is_audit:
                     lines.append(
-                        "  {} [agents {}]{}".format(
+                        "  {} {} [agents {}]{}".format(
+                            self._eval_key(node.config_key),
                             node.config_display,
                             ",".join(str(a) for a in who), marker,
                         )
@@ -1347,7 +1353,8 @@ class SharedExplorationGraph:
                 else:
                     perf_str = "{:.6f}".format(node.perf) if node.perf is not None else "INVALID"
                     lines.append(
-                        "  {} -> {} [agents {}]{}".format(
+                        "  {} {} -> {} [agents {}]{}".format(
+                            self._eval_key(node.config_key),
                             node.config_display, perf_str,
                             ",".join(str(a) for a in who), marker,
                         )
@@ -1457,7 +1464,8 @@ class SharedExplorationGraph:
         for node in sorted_nodes:
             perf_str = "perf={:.6f}".format(node.perf) if node.perf is not None else "INVALID"
             lines.append(
-                "  {} -> {}, cost={:.0f}s ({}x by [{}])".format(
+                "  {} {} -> {}, cost={:.0f}s ({}x by [{}])".format(
+                    self._eval_key(node.config_key),
                     node.config_display,
                     perf_str,
                     node.cost,
