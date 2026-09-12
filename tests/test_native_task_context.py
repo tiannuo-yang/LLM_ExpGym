@@ -116,11 +116,22 @@ class NativeTaskContextTest(unittest.TestCase):
                         new = builder(overhead, tool_protocol="native", **kwargs).splitlines()
                         self.assertEqual(len(old), len(new))
                         changed = [(left, right) for left, right in zip(old, new) if left != right]
-                        self.assertEqual(len(changed), 2 if name == "search" else 1)
+                        self.assertEqual(len(changed), 2 if name in ("search", "audit") else 1)
                         for left, right in changed:
+                            if name == "audit" and left.startswith("  Input:"):
+                                self.assertEqual(
+                                    right,
+                                    "  Input: use the supplied function schema for nda_id and evidence_ids.",
+                                )
+                                continue
                             self.assertIn("Action", left)
                             self.assertNotIn("Action:", right)
                             self.assertTrue("native tool call" in right or right == "Native tool invocation:")
+                            if name == "audit":
+                                self.assertIn("current document and hypotheses", right)
+                                self.assertIn("at most one native tool call per assistant turn", right)
+                                self.assertIn("wait for its result", right)
+                                self.assertNotIn('"nda_id": "nda-11"', right)
 
     def test_literal_action_and_thought_dataset_text_is_unchanged(self):
         with fixture_data():
@@ -297,7 +308,14 @@ class NativeRunnerWireTest(unittest.TestCase):
             self.assertIs(first["parallel_tool_calls"], False)
             self.assertEqual(first["tools"][0]["function"]["name"], function)
             context = first["messages"][1]["content"]
-            self.assertIn("Call the " + function + " function", context)
+            if scenario_name == "evidence_audit":
+                self.assertIn("supplied function schema for nda_id and evidence_ids", context)
+                self.assertIn("Choose whether and what to verify from the current document", context)
+                self.assertIn("at most one native tool call per assistant turn", context)
+                self.assertIn("then wait for its result", context)
+                self.assertNotIn("Call the human_feedback function with arguments", context)
+            else:
+                self.assertIn("Call the " + function + " function", context)
             self.assertIn("native tool call", context)
             self.assertNotIn("Action format:", context)
             self.assertNotIn("Action: " + function + " ", context)

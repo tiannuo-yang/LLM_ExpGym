@@ -263,7 +263,9 @@ def _build_context(
         "For Entailment/Contradiction, identify the exact evidence segment IDs.",
         "",
         "Tool: human_feedback — verify your proposed evidence for a hypothesis. Can be called multiple times.",
-        "  Input: {{\"nda_id\": \"...\", \"evidence_ids\": [segment_ids]}}",
+        ('  Input: {{"nda_id": "...", "evidence_ids": [segment_ids]}}'
+         if tool_protocol == "text" else
+         "  Input: use the supplied function schema for nda_id and evidence_ids."),
         "",
         "Use human feedback to improve the correctness of your labels and evidence IDs.",
     ]
@@ -272,7 +274,8 @@ def _build_context(
             "",
             ('Action: human_feedback {"nda_id": "nda-11", "evidence_ids": [3, 7]}'
              if tool_protocol == "text" else
-             'Call the human_feedback function with arguments {"nda_id": "nda-11", "evidence_ids": [3, 7]} using a native tool call.'),
+             "Choose whether and what to verify from the current document and hypotheses. "
+             "Make at most one native tool call per assistant turn, then wait for its result."),
             "Answer: {\"nda-11\": {\"label\": \"...\", \"evidence_ids\": [...]}, ...}",
             "Your final answer MUST include ALL {} hypotheses.".format(num_hyp),
             "",

@@ -181,6 +181,42 @@ is no automatic fallback, resubmission or failover. All four replicas need their
 own authorized native smoke before admission. Capacity, backend compatibility,
 throughput and request-seed behavior are not established by CPU/mock tests.
 
+## Native request and replay fidelity
+
+Inspect the complete task-owned request, not only system instructions and tool
+schemas. A literal call with fixed task IDs/evidence, without an example label,
+can contradict otherwise correct native/one-call instructions. Prefer guidance
+to choose arguments from the current task; label any necessary schematic example
+clearly. Change the owning prompt builder, preserving task data, legacy paths
+and scoring unless those changes were separately requested. A prompt-only edit
+changes source/prompt identity, not the PoolAct coordination protocol version.
+
+Validate the response as a whole: two calls can each satisfy their JSON schema
+and still violate the runner's one-call-per-decision contract.
+`parallel_tool_calls=false` expresses that request constraint; it does not prove
+that the selected backend's grammar/parser enforces it. Record observed behavior
+and unresolved violations. Correct schemas or a prompt fix alone do not establish
+backend enforcement, and no model-name heuristic substitutes for that evidence.
+
+Keep three identities distinct when constructing a smoke or replay harness:
+
+- **Canonical JSON equivalence:** a hash under explicitly chosen normalization
+  rules; useful for structured comparisons, not proof of identical model input.
+- **Wire identity:** the original serialized request bytes, including nested
+  object-key order. Preserve those bytes when available; an order-preserving
+  reconstruction is not automatically a byte-exact replay.
+- **Rendered identity:** the actual template-rendered text/tokens for the pinned
+  serving configuration. Record what was verified; without rendering evidence,
+  equality remains unverified rather than inferred from semantic JSON equality.
+
+In particular, serializing a canonical snapshot with `sort_keys=True` can reorder
+tool-schema properties before the serving template renders them and change the
+model-visible prompt. Retain original nested key order and list order in replay
+inputs; keep canonical hashing separate from the transport path. Reuse these
+facts in the existing smoke record rather than creating another acceptance chain.
+Any old/new comparison still holds original task and generation settings fixed
+except for the explicitly tested change; these checks do not authorize new calls.
+
 ## Connect the dynamic experiment queue
 
 After an authorized native multi-turn/tool/forced-final smoke through **every**
