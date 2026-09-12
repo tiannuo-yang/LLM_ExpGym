@@ -68,12 +68,19 @@ They are accepted as explicit values for any served model, not automatically
 enabled by its name or by the pipeline profile. Acceptance by this planner is
 not proof that the selected SGLang version/hardware supports a value.
 
-If shared-library setup is required, pass `--runtime-env /absolute/runtime.sh`.
+For nonsecret runtime initialization, pass `--runtime-env /absolute/runtime.sh`.
 This script must contain only nonsecret runtime setup, not credential values.
 It is sourced on each rank; rank-specific compilation/module cache locations are
 then set under `/tmp/expgym_JOB_replicaR_rankK_*`. These are serving caches, not
 PoolAct observations. Record and freeze the runtime setup/checkpoint identity
 with the study; copying the launcher does not snapshot the external runtime.
+
+Where the pinned SGLang source supports the initialization flag, an explicit
+deployment candidate can put `export SGLANG_OPT_USE_MULTI_STREAM_OVERLAP=0` in
+that runtime script before server startup. Record the source support and effective
+setting. This is a checkpoint/hardware/runtime-specific serving experiment, not
+a model-specific evaluation/scoring fix or a new global default. Do not change
+an active runtime or infer general reliability from one candidate's early checks.
 
 For the cluster's Pyxis runtime, the previously exercised optional flags are
 `--container-image /absolute/image.sqsh` and repeatable `--container-mount
@@ -114,6 +121,13 @@ ranks; there is no silent retry. `launcher_exit.json` explicitly does not claim
 that server requests drained. Before a planned `scancel JOB_ID`, stop new
 experiment dispatch and verify in-flight clients have completed. A forced stop
 is infrastructure failure evidence, not a reason to silently replace results.
+
+Budget the allocation for startup/loading, qualification, measured workload at
+the planned reasoning/output effort and concurrency, then drain and a stated
+margin. Allocation wall time is not available task time. If an authorized
+continuation is needed, preserve superseded attempts/costs and separate cohort
+identities even on the same hardware; do not silently relaunch unfinished work
+or merge it as if there had been one uninterrupted run.
 
 ## Explicit single-replica TP8 × PP4 profile
 
@@ -216,6 +230,19 @@ inputs; keep canonical hashing separate from the transport path. Reuse these
 facts in the existing smoke record rather than creating another acceptance chain.
 Any old/new comparison still holds original task and generation settings fixed
 except for the explicitly tested change; these checks do not authorize new calls.
+
+Separate workload readiness from output fidelity: completing representative tasks
+does not by itself rule out fragmented-character garble or sustained repetition.
+Inspect the pinned health/readiness handler before using it; some handlers perform
+a small generation, even one token, and are not metadata-only observations.
+
+For a runtime candidate, preselect a bounded initial and late check on the same
+saved inputs/settings, with the representative workload between them. Preserve
+wire order and all outcomes; do not add trials for particular bad responses until
+a favorable sample appears. Report coherence, garble, repetition, protocol errors
+and pending classifications separately. Early improvement is candidate evidence,
+not a guarantee of late stability, full-workload fidelity or scientific gains.
+Use the existing smoke record and final report review, not a new audit ladder.
 
 ## Connect the dynamic experiment queue
 

@@ -40,6 +40,8 @@ Branch on explicit capabilities, protocol or observed response shape, not model-
 
 Load credentials without printing them; never serialize real keys into traces, plans, logs or Git.
 
+Treat source-supported initialization switches as explicit checkpoint/hardware/runtime deployment candidates through the existing nonsecret `--runtime-env`, not model-name scoring adapters or global defaults. Keep original-source, our portability changes and diagnostic-harness faults separately attributed; retain corrected diagnostic versions and their original evidence.
+
 ## Preserve task and PoolAct semantics
 
 Keep historical `legacy` tuning final selection and Audit scoring/voting unless the user requests a separately identified endpoint. `submitted` and `task-abstention-v1` are explicit study policies; do not enable them silently for one model.
@@ -83,5 +85,7 @@ Use the recorded interpreter for an existing study; never reinstall a frozen env
 New or changed model-facing/execution paths require an authorized task-representative real smoke before a full experiment; select relevant native/tool/history/forced-final paths, not just a synthetic echo. For old/new validation, retain the recorded original task, sampling, reasoning/output and budget settings on both sides except for the explicitly tested change. Do not turn a case-specific shorter cap into a universal validation rule. If this task is code-only or no GPU/API run is requested, finish the static/fake work and state that real smoke remains unperformed; do not acquire resources automatically. An ongoing GPU validation remains pending, not a resolved serving issue.
 
 Keep one plan, one execution record and one report package (main plus detailed report) per meaningful revision. Reuse immutable input inventories and completed checks; do not recursively create reviews of reviews, re-extract every raw file for metadata-only work, or repeat full scans for unchanged report text. Retain necessary safety scans, score-integrity checks, failed-attempt costs and the user's requested independent post-report review.
+
+Keep workload completion separate from output fidelity. For runtime investigations, preselect initial/late same-input checks rather than adding per-outcome trials; record garble and sustained repetition separately, and inspect whether a health check itself generates tokens. Allocate startup plus measured planned-effort workload plus drain time. Preserve superseded costs and distinct continuation cohorts, even on the same hardware. See `docs/serving.md`; these checks do not change scoring or add an audit chain.
 
 Report the actual scope, changed behavior, tests, source/result locations, remaining limitations and whether code was pushed or merged. Finite tests do not prove “no bugs,” and desired performance trends are not an acceptance criterion for a bug fix.
