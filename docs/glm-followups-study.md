@@ -91,8 +91,15 @@ hypothesis, not an execution or publication acceptance condition.
 
 Use a clean integrated code revision, the fixed checkpoint/runtime/data
 identities, isolated outputs and caches, and native multi-turn pilot validation.
-The planned serving topology is 32 H200 GPUs in two independent TP16 replicas;
-one pool stays on one replica. The pilot reads concrete trajectories and checks
+The initial pilot uses 32 H200 GPUs in two independent TP16 replicas. The
+user-authorized formal deployment expands to eight nodes and 64 H200 GPUs in
+four TP16 replicas; one pool stays on one replica. Formal queues run in the
+order Low, ablation, then scaling, each with 16 invocation workers and exclusive
+phase ownership. A group must naturally drain before the next starts; a closed
+failure remains recorded without canceling the other groups or automatically
+retrying. These scheduling changes preserve all scientific slots and parameters,
+but can change serving contention, wall time, and within-pool timing. The pilot
+reads concrete trajectories and checks
 parameter transmission, scoring, forced final, strict budget visibility, N8
 concurrency, and all new context mechanisms. ParamNet requires the verified
 legacy evaluator environment.
@@ -105,8 +112,10 @@ multiple-submission guards. It forwards the entire original answer suffix to
 the unchanged evaluator; trailing explanations are not removed to improve a
 score. The original pilot and its outcomes remain unchanged. Before formal
 admission, the corrected source receives the fixed Audit Low N1 and Audit Max
-`peer_context` N4 qualification on separate replicas, with new study/output/cache
-identities. Formal execution uses the v2 study namespaces; the unexecuted v1
+`peer_context` N4 qualification on the two added replicas, with new study/output/cache
+identities. These two executions qualify both the corrected source and the added
+serving replicas; they are not a single-variable causal comparison with the old
+pilot. Formal execution uses the v2 study namespaces; the unexecuted v1
 formal plans remain archived as superseded planning records.
 
 Resume only valid completed outputs or first-execute unstarted jobs. Preserve
