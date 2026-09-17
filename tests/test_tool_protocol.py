@@ -201,6 +201,57 @@ class TextActionTests(unittest.TestCase):
 
 
 class LegacyTextAnswerTests(unittest.TestCase):
+    def test_empty_introductory_label_does_not_shadow_line_final(self):
+        payload = '{\n  "x": 1\n}'
+        for prefix in ('Here is my final answer:\n\n',
+                       'I can now give my answer:\n'):
+            with self.subTest(prefix=prefix):
+                text = prefix + 'Answer: ' + payload
+                self.assertEqual(extract_text_answer(text), payload)
+                self.assertEqual(json.loads(structured_final_answer(text)), {'x': 1})
+
+    def test_empty_intro_preserves_trailing_explanation_verbatim(self):
+        payload = '{"x":1}\n\nKey reasoning:\n- The recorded evidence supports this.'
+        text = 'Here is my final answer:\n\nAnswer: ' + payload
+        self.assertEqual(extract_text_answer(text), payload)
+        self.assertIsNone(structured_final_answer(text))
+        with self.assertRaises(ValueError):
+            parse_json_answer(extract_text_answer(text))
+
+    def test_intro_exception_does_not_discard_candidate_payloads(self):
+        for body in ('{"x":2}', 'another candidate', '"quoted candidate"',
+                     '`code candidate`', '```json\n{"x":2}\n```'):
+            text = 'Thought: consider Answer: ' + body + '\nAnswer: {"x":1}'
+            with self.subTest(body=body):
+                self.assertIsNone(extract_text_answer(text))
+                self.assertIsNone(structured_final_answer(text))
+
+    def test_intro_exception_preserves_actual_submission_order(self):
+        prefix = 'Here is my final answer:\n\n'
+        for first_payload in ('', '{"x":2}'):
+            suffix = first_payload + '\nAnswer: {"x":1}'
+            text = prefix + 'Answer: ' + suffix
+            with self.subTest(first_payload=first_payload):
+                self.assertEqual(extract_text_answer(text), suffix.strip())
+                self.assertIsNone(structured_final_answer(text))
+        inline_then_line = 'Thought: done.Answer: {"x":2}\nAnswer: {"x":1}'
+        self.assertIsNone(extract_text_answer(inline_then_line))
+        self.assertIsNone(structured_final_answer(inline_then_line))
+
+    def test_intro_exception_does_not_recover_blocked_contexts(self):
+        for text in ('Example: here is my final answer:\nAnswer: {"x":1}',
+                     'Do not submit Answer:\nAnswer: {"x":1}',
+                     '> Here is my final answer:\nAnswer: {"x":1}',
+                     '"Do not submit "Answer:\nAnswer: {"x":1}',
+                     'Thought: "Do not submit "Answer:\nAnswer: {"x":1}',
+                     'Thought: `Do not submit` Answer:\nAnswer: {"x":1}',
+                     'Thought: Example:\nHere is my final answer:\nAnswer: {"x":1}',
+                     '<think>Here is my final answer:\nAnswer: {"x":1}',
+                     '<think>Here is my final answer:\nAnswer: {"x":1}</think>'):
+            with self.subTest(text=text):
+                self.assertIsNone(extract_text_answer(text))
+                self.assertIsNone(structured_final_answer(text))
+
     def test_line_final_preserves_original_payload_format_and_legacy_markdown(self):
         payload = '{\n  "x": 1\n}'
         self.assertEqual(extract_text_answer('Thought: done\nAnswer: ' + payload), payload)

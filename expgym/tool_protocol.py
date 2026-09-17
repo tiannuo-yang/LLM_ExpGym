@@ -196,10 +196,35 @@ def _content_start(text: str, end: int) -> int:
     return end + match.end()
 
 
+def _answer_labels(text: str, view: str) -> List[re.Match]:
+    """Keep submissions, ignoring empty unquoted introductory label mentions."""
+    labels = [match for match in _LABEL.finditer(view)
+              if re.fullmatch(r"(?:final\s+)?answer", match.group("label"), re.I)]
+    retained = []
+    for index, match in enumerate(labels):
+        if (index + 1 < len(labels)
+                and not _directive_boundary(text, view, match.start())
+                and not text[match.end():labels[index + 1].start()].strip()):
+            line_start = view.rfind("\n", 0, match.start()) + 1
+            before = view[line_start:match.start()]
+            original_before = text[line_start:match.start()]
+            # "Here is my final answer:\n\nAnswer: ..." has one
+            # submission. Do not extend this exception to quoted prefixes,
+            # examples, negation, or mentions carrying any candidate payload.
+            if (before.strip()
+                    and before == original_before
+                    and not original_before.lstrip().startswith(">")
+                    and not _EXAMPLE_OR_NEGATION.search(before)
+                    and not _unfinished_example(text[:line_start], view[:line_start])):
+                continue
+        retained.append(match)
+    return retained
+
+
 def structured_final_answer(text: str) -> Optional[str]:
     """Recognize a complete structured final, including an inline Answer label.
 
-    Only one visible final label is allowed, outside quoted examples and closed
+    Only one submitted final label is allowed, outside quoted examples and closed
     reasoning regions. Its entire suffix must be a finite JSON object or list.
     Callers still prefer explicit actions over textual answers in legacy mode.
     """
@@ -214,8 +239,7 @@ def structured_final_answer(text: str) -> Optional[str]:
         pass
     else:
         return json.dumps(value, ensure_ascii=False, allow_nan=False) if isinstance(value, (dict, list)) else None
-    labels = [match for match in _LABEL.finditer(view)
-              if re.fullmatch(r"(?:final\s+)?answer", match.group("label"), re.I)]
+    labels = _answer_labels(text, view)
     if len(labels) != 1:
         return None
     match = labels[0]
@@ -251,8 +275,7 @@ def extract_text_answer(text: str) -> Optional[str]:
     view = _protocol_view(text)
     if view is None:
         return None
-    labels = [match for match in _LABEL.finditer(view)
-              if re.fullmatch(r"(?:final\s+)?answer", match.group("label"), re.I)]
+    labels = _answer_labels(text, view)
     if labels:
         first = labels[0]
         line_start = view.rfind("\n", 0, first.start()) + 1

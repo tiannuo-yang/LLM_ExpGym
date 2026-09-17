@@ -43,6 +43,32 @@ class NativeReplay:
 
 
 class NativeLoopTest(unittest.TestCase):
+    def test_empty_answer_intro_forwards_full_suffix_without_forced_retry(self):
+        suffix = '{"x":1}\n\nKey reasoning:\n- The recorded evidence supports this.'
+        text = 'Here is my final answer:\n\nAnswer: ' + suffix
+        original = {'role': 'assistant', 'content': text,
+                    'reasoning_content': 'Answer: {"x":9} is only private reasoning.'}
+        llm = NativeReplay([LLMOutput(text=text, assistant_message=original,
+                                     finish_reason='stop')])
+        scored = []
+
+        def evaluator(answer):
+            scored.append(answer)
+            return 0.0
+
+        result = run_react_loop(llm, {}, context='Submit the result.', max_steps=2,
+                                answer_evaluator=evaluator, capture_trace_v2=True)
+        self.assertEqual(scored, [suffix])
+        self.assertEqual(result['answer'], suffix)
+        self.assertEqual(result['answer_perf'], 0.0)
+        self.assertEqual(result['api_calls'], 1)
+        self.assertEqual(result['termination_reason'], 'Natural answer')
+        self.assertEqual(result['protocol_failures'], [])
+        self.assertEqual(llm.requests[0][1]['tool_choice'], 'auto')
+        record = result['_trace_v2_capture']['llm_calls'][0]
+        self.assertFalse(record['forced'])
+        self.assertEqual(record['output_message'], original)
+
     def test_text_actions_replay_signed_history_through_each_native_wire(self):
         action = '  Action: lookup {"key":"Ada"}  '
         final = "Answer: Ada"

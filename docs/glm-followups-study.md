@@ -13,8 +13,9 @@ does not rerun a new 417-trace Max ExpGym arm.
 | Total formal execution | 917 | 2,729 |
 
 These counts exclude a separate 19-execution, 58-trajectory technical pilot,
-transport attempts, and offline subset computations. Historical Max contributes
-417 existing comparison records without new model calls.
+a two-execution, five-trajectory qualification after the parser correction
+described below, transport attempts, and offline subset computations. Historical
+Max contributes 417 existing comparison records without new model calls.
 
 ## Scaling
 
@@ -95,6 +96,18 @@ one pool stays on one replica. The pilot reads concrete trajectories and checks
 parameter transmission, scoring, forced final, strict budget visibility, N8
 concurrency, and all new context mechanisms. ParamNet requires the verified
 legacy evaluator environment.
+
+The initial pilot identified a final-answer parser defect: an empty introductory
+phrase such as "Here is my final answer:" could hide the subsequent line-start
+`Answer:` submission. The correction ignores only empty, unquoted introductory
+label mentions while retaining the existing example, negation, reasoning, and
+multiple-submission guards. It forwards the entire original answer suffix to
+the unchanged evaluator; trailing explanations are not removed to improve a
+score. The original pilot and its outcomes remain unchanged. Before formal
+admission, the corrected source receives the fixed Audit Low N1 and Audit Max
+`peer_context` N4 qualification on separate replicas, with new study/output/cache
+identities. Formal execution uses the v2 study namespaces; the unexecuted v1
+formal plans remain archived as superseded planning records.
 
 Resume only valid completed outputs or first-execute unstarted jobs. Preserve
 begun failures and all attempts; do not silently resample valid zero scores,
