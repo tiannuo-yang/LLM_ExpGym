@@ -1,12 +1,18 @@
 # LLM ExpGym
 
-**最终报告与轻量数据发布（固定于 `ad03e8c`）**
+**Gemini OpenRouter 补充实验与轻量数据发布**
+
+[补充实验入口](results/gemini-openrouter-20260917/README.zh.md) · [补齐 16 个缺项的主实验报告](results/gemini-openrouter-20260917/main/README.zh.md) · [六模型 Whois 预算报告](results/gemini-openrouter-20260917/whois/README.zh.md) · [接口与设置对应关系](results/gemini-openrouter-20260917/SETTINGS.zh.md)
+
+新版主实验保留原 4,682 个完成结果，只补 Gemini 的 16 个缺项，执行完成 4,698/4,698，严格评分完整 4,687。Whois sweep 新增 Gemini β=1、5、15、20 各 39 题；β10 复用原 39 份结果，没有重跑。新项使用 OpenRouter，历史 Gemini 使用 Sub2 API，报告中标明混合来源。只读数值重建和独立复核见补充实验入口。原 `ad03e8c` 报告及其数据仍保留原字节，以下为冻结版入口。
+
+**冻结报告与原数据（`ad03e8c`）**
 
 [中文报告](results/paper-analysis-20260916/README.zh.md) · [数据与方法附件](results/paper-analysis-20260916/APPENDIX.zh.md) · [完整合并比较 CSV](results/paper-ad03e8c-delivery-20260916/csv/COMPARISON.csv) · [72 行主比较](results/paper-ad03e8c-delivery-20260916/csv/MAIN_COMPARISON.csv) · [数据入口与来源索引](results/paper-ad03e8c-delivery-20260916/README.zh.md)
 
-本版本仅保留这份六模型报告所用的冻结分析表、来源索引、工具及仓库运行代码。报告与分析数据按指定提交保留，重复副本合并到唯一文件；失败实验、被替换运行和中间结果的材料留在本地归档。公开索引仍记录缺失状态及 369 个整池替换，便于解释最终采用关系。原始 API dump 和完整 trajectory 未公开。
+冻结版保留这份六模型报告所用的分析表、来源索引和工具。报告与分析数据按指定提交保留，重复副本合并到唯一文件；失败实验、被替换运行和中间结果的材料留在本地归档。原公开索引仍记录当时的缺失状态及 369 个整池替换；补齐后的采用关系见新版逐项来源表。原始 API dump 和完整 trajectory 未公开。
 
-在仓库根目录运行 `python3 tools/verify_lightweight.py` 可校验轻量包；文件身份见 [LIGHTWEIGHT_MANIFEST.json](LIGHTWEIGHT_MANIFEST.json) 和 [SHA256SUMS](SHA256SUMS)。[来源说明](results/paper-ad03e8c-delivery-20260916/provenance/README.zh.md) 区分当前文件、历史构建脚本与完整本地交付。本次整理没有重跑实验或重评分；关于 `expected_units` 与 Audit 调用计数的两处说明已补充到 [CSV 字典](results/paper-ad03e8c-delivery-20260916/csv/CSV_DICTIONARY.zh.md)，冻结报告及数值保持原样。
+在仓库根目录运行 `python3 tools/verify_lightweight.py` 可校验轻量包所有文件身份及原冻结版的计数；文件身份见 [LIGHTWEIGHT_MANIFEST.json](LIGHTWEIGHT_MANIFEST.json) 和 [SHA256SUMS](SHA256SUMS)。[来源说明](results/paper-ad03e8c-delivery-20260916/provenance/README.zh.md) 区分冻结文件、历史构建脚本与完整本地交付。冻结版整理没有重跑实验或重评分；新增实验只进入独立补充目录。关于 `expected_units` 与 Audit 调用计数的两处说明已补充到 [CSV 字典](results/paper-ad03e8c-delivery-20260916/csv/CSV_DICTIONARY.zh.md)，冻结报告及数值保持原样。
 
 获取轻量主分支时，请限定分支下载：
 
@@ -14,9 +20,9 @@
 git clone --single-branch --branch main https://github.com/tiannuo-yang/LLM_ExpGym.git
 ```
 
-其他保留分支可能仍引用旧实验历史；下载所有分支不属于轻量主分支的体积范围。
+2026-09-17 的轻量整理已将当时的旧分支完整留在本地 Git 归档。本次补充只更新 `main`；其他并行研究分支的内容不属于本轻量发布。
 
-以下为仓库保留的运行与安装说明。代码沿用报告发布时的版本，其来源记录在轻量清单中；这些说明不代表对历史实验重新运行或对后续修补版本的承诺。
+以下为仓库保留的运行与安装说明。根目录运行代码仍沿用冻结报告发布时的版本，其来源记录在轻量清单中；本次 OpenRouter 补跑使用独立运行时，版本与设置见补充实验目录。
 
 One repository, two experiment paths:
 
