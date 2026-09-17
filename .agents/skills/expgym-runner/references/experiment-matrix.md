@@ -30,7 +30,7 @@ The nine tuning tasks are:
 - NASBench-101 A, B, and C;
 - NASBench-201 cifar10-valid, cifar100, and imagenet16-120.
 
-`scripts/run_full.sh --part expgym` selects the correct item/repetition/regime count for one model, but the current runner defaults to 10 steps unless overridden inside the lower-level command. The paper states a 30-step common limit. Check resolved configuration before calling any run exact.
+`scripts/run_full.sh --part expgym` selects this item/repetition/regime count for one model; the current full wrapper and sweep default to 30 steps. Historical snapshots used different defaults. Check the actual resolved configuration, protocol, final-answer policy and paper version before calling a run exact.
 
 ## PoolAct main fixed-parallelism table
 
@@ -65,7 +65,7 @@ The current repository-full PoolAct preset is a deliberate superset for one mode
 = 2,052 agent traces per model
 ```
 
-It includes cost-free PoolAct, all 35 search questions, and all nine HPO tasks. Do not use that count to estimate the main PoolAct table or describe it as paper exact.
+It includes cost-free PoolAct, all 35 search questions, and all nine HPO tasks. This count assumes `--repeats 1`; independent outer repeats multiply the agent-trace count and reset the shared pool. Do not use that count to estimate the main PoolAct table or describe it as paper exact.
 
 ## Separate analyses
 

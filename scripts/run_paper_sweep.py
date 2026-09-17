@@ -33,7 +33,11 @@ if str(REPO_ROOT) not in sys.path:
 from demo_experiment import (  # noqa: E402
     COST_REGIMES,
     _SCENARIOS,
+    _add_generation_arguments,
+    _generation_options,
+    _loop_options,
     _call_scenario,
+    _resolve_context,
     _resolve_system_prompt,
     _resolve_answer_evaluator,
     _resolve_tools,
@@ -41,7 +45,14 @@ from demo_experiment import (  # noqa: E402
     resolve_base_cost,
     resolve_cost_regime,
 )
-from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
+from expgym.react_loop import _parse_tool_return, build_system_prompt, run_react_loop  # noqa: E402
+from expgym.task_tuning import InvalidConfigurationError  # noqa: E402
+from expgym.terminal_evidence import TerminalEvidence  # noqa: E402
+from expgym.missing_final import (  # noqa: E402
+    POLICY as MISSING_FINAL_POLICY, mark_loop_return, is_policy_missing, score_missing,
+    finish_score, terminal_publishable,
+)
+from expgym.evaluation_identity import bind_evaluation_identity, evaluation_identity  # noqa: E402
 from expgym.trace_v2 import (  # noqa: E402
     build_trace_v2,
     load_trace_v2,
@@ -150,9 +161,16 @@ def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object
         "job": asdict(job),
         "generation": {
             "temperature": temperature,
+            "max_tokens": getattr(args, "max_tokens", None),
+            "top_p": getattr(args, "top_p", 1.0),
+            "top_k": getattr(args, "top_k", None),
+            "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+            "reasoning_effort": getattr(args, "reasoning_effort", None),
             "max_steps": args.max_steps,
             "max_evaluations": args.max_evals,
         },
+        "protocol": _loop_options(args),
+        "missing_final_policy": getattr(args, "missing_final_policy", "error"),
     }
     canonical = json.dumps(
         identity,
@@ -407,7 +425,7 @@ def _format_result_summary(result: Dict[str, Any], path: Path) -> str:
         f"model={job.get('model_id', 'unknown')}",
         f"cost_regime={job.get('cost_regime', 'unknown')}",
         f"answer_perf={_format_number(result.get('answer_perf'))}",
-        f"score_check={'ok' if (result.get('score_check') or {}).get('ok') else 'failed'}",
+        f"score_check={'ok' if (result.get('score_check') or {}).get('ok') else 'unknown' if (result.get('terminal_status') or {}).get('execution_complete') else 'failed'}",
         f"evaluations={result.get('evaluations')}",
         f"api_calls={result.get('api_calls')}",
         f"cached_prompt_tokens={result.get('cached_prompt_tokens', 0)}",
@@ -440,6 +458,19 @@ def _namespace_for_job(
         else args.temperature_eval
     )
     ns.seed = job.seed
+    ns.max_tokens = getattr(args, "max_tokens", None)
+    ns.top_p = getattr(args, "top_p", 1.0)
+    ns.top_k = getattr(args, "top_k", None)
+    ns.chat_template_kwargs = getattr(args, "chat_template_kwargs", None)
+    ns.reasoning_effort = getattr(args, "reasoning_effort", None)
+    ns.missing_final_policy = getattr(args, "missing_final_policy", "error")
+    for name, value in _loop_options(args).items():
+        setattr(ns, name, value)
+    ns._api_dump_context = {
+        "runner": "expgym",
+        "job": asdict(job),
+        "trace_path": str(_trace_path(args.output_dir, job, getattr(args, "trace_format", "v1"))),
+    }
     ns.base_url = args.base_url
     ns.prompt_cache = _prompt_cache_config(args, job)
     ns.prompt_cache_key = ns.prompt_cache["key"]
@@ -467,7 +498,14 @@ def _namespace_for_job(
     return ns
 
 
-def _resume_key(args: argparse.Namespace, job: Job) -> str:
+def _job_evaluation_identity(args: argparse.Namespace, job: Job) -> Dict[str, Any]:
+    return evaluation_identity(_namespace_for_job(args, job, None), REPO_ROOT)
+
+
+def _resume_key(
+    args: argparse.Namespace, job: Job,
+    *, evaluation: Optional[Dict[str, Any]] = None,
+) -> str:
     identity = {
         "source_tree_sha256": source_tree_sha256(REPO_ROOT),
         "backend": args.backend,
@@ -480,6 +518,13 @@ def _resume_key(args: argparse.Namespace, job: Job) -> str:
         ),
         "max_steps": args.max_steps,
         "max_evals": args.max_evals,
+        "max_tokens": getattr(args, "max_tokens", None),
+        "top_p": getattr(args, "top_p", 1.0),
+        "top_k": getattr(args, "top_k", None),
+        "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+        "reasoning_effort": getattr(args, "reasoning_effort", None),
+        "protocol": _loop_options(args),
+        "evaluation_identity": evaluation if evaluation is not None else _job_evaluation_identity(args, job),
         "prompt_cache": _prompt_cache_config(args, job),
         "transport": {
             "timeout": getattr(args, "request_timeout", 600.0),
@@ -502,15 +547,48 @@ def _resume_trace_is_valid(path: Path, args: argparse.Namespace, job: Job) -> bo
     try:
         if args.trace_format == "v2":
             trace = load_trace_v2(path)
-            return trace.get("run", {}).get("resume_key") == _resume_key(args, job)
-        result = json.loads(path.read_text(encoding="utf-8"))
-        return (
-            result.get("job") == asdict(job)
-            and result.get("_resume_key") == _resume_key(args, job)
-            and (result.get("score_check") or {}).get("ok") is True
-        )
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            run = trace.get("run")
+            if not isinstance(run, dict):
+                return False
+            identity = _job_evaluation_identity(args, job)
+            if run.get("evaluation_identity") != identity or run.get("resume_key") != _resume_key(args, job, evaluation=identity):
+                return False
+            from expgym.trace_v2 import result_for_score_check
+
+            result = result_for_score_check(trace)
+        else:
+            result = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(result, dict):
+                return False
+            identity = _job_evaluation_identity(args, job)
+            check = result.get("score_check")
+            if not (
+                result.get("job") == asdict(job)
+                and result.get("evaluation_identity") == identity
+                and result.get("_resume_key") == _resume_key(args, job, evaluation=identity)
+                and isinstance(check, dict) and terminal_publishable(result)
+            ):
+                return False
+        ns = _namespace_for_job(args, job, None)
+        if result.get("missing_final_policy", "error") != getattr(ns, "missing_final_policy", "error"):
+            return False
+        if result.get("tuning_final_policy") != ns.tuning_final_policy:
+            return False
+        bind_evaluation_identity(identity)
+        scenario = _SCENARIOS[job.scenario]
+        tools = _resolve_tools(scenario, ns)
+        evaluator = _resolve_answer_evaluator(scenario, ns)
+        return terminal_publishable(result, _score_check(result, tools, evaluator))
+    except (KeyError, OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
+
+
+def _job_evidence_root(args: argparse.Namespace, job: Job) -> Path:
+    path = _trace_path(args.output_dir, job, getattr(args, "trace_format", "v1"))
+    explicit = getattr(args, "terminal_evidence_dir", None)
+    if explicit is not None:
+        return Path(explicit) / path.relative_to(args.output_dir)
+    return path.parent / "_terminal_evidence" / path.name
 
 
 def _run_job(
@@ -518,7 +596,23 @@ def _run_job(
     job: Job,
     api_key: Optional[str],
 ) -> Dict[str, Any]:
+    with TerminalEvidence(
+        _job_evidence_root(args, job) / "execution",
+        owner={"runner": "expgym", "scope": "loop_score", "job": asdict(job)},
+        source_root=REPO_ROOT,
+    ) as evidence:
+        return _run_job_with_evidence(args, job, api_key, evidence)
+
+
+def _run_job_with_evidence(
+    args: argparse.Namespace,
+    job: Job,
+    api_key: Optional[str],
+    evidence: TerminalEvidence,
+) -> Dict[str, Any]:
     ns = _namespace_for_job(args, job, api_key)
+    input_identity = evaluation_identity(ns, REPO_ROOT)
+    bind_evaluation_identity(input_identity)
     random.seed(ns.seed)
     scenario = _SCENARIOS[job.scenario]
     c_base = resolve_base_cost(job.scenario, ns)
@@ -536,12 +630,13 @@ def _run_job(
         else []
     )
     llm = build_llm(ns.backend, fake_plan, ns, system_prompt=system_prompt)
-    context = _call_scenario(scenario["build_context"], include_overhead, ns)
+    context = _resolve_context(scenario, include_overhead, ns, llm)
     instruction_notes = _call_scenario(
         scenario["build_instruction_notes"], include_overhead, ns
     )
     answer_evaluator = _resolve_answer_evaluator(scenario, ns)
-    result = run_react_loop(
+    result = evidence.loop(
+        run_react_loop,
         llm=llm,
         tools=tools,
         time_budget=time_budget,
@@ -554,14 +649,22 @@ def _run_job(
         include_cost_in_observation=include_cost,
         answer_evaluator=answer_evaluator,
         capture_trace_v2=ns.trace_format == "v2",
+        **_loop_options(ns),
     )
     result["job"] = asdict(job)
+    result["protocol_config"] = _loop_options(ns)
+    # Readable in legacy v1; v2 additionally records the actual client config.
+    result["generation_options"] = _generation_options(ns)
+    result["evaluation_identity"] = input_identity
     result["cost_regime_resolved"] = {
         "mode": mode,
         "c_base": c_base,
         "time_budget": time_budget,
     }
-    result["score_check"] = _score_result(result, tools, answer_evaluator)
+    mark_loop_return(result, job.scenario, getattr(ns, "missing_final_policy", "error"))
+    result["score_check"] = evidence.score(_score_result, result, tools, answer_evaluator)
+    if evaluation_identity(ns, REPO_ROOT) != input_identity:
+        raise RuntimeError("Evaluation inputs/dependencies changed during the run; refusing to publish a score")
     if ns.trace_format == "v2":
         config = asdict(llm.config) if hasattr(llm, "config") else {}
         auth_configured = bool(config.pop("api_key", None))
@@ -584,7 +687,8 @@ def _run_job(
         )
         result["_trace_v2_runtime"] = {
             "run": {
-                "resume_key": _resume_key(args, job),
+                "resume_key": _resume_key(args, job, evaluation=input_identity),
+                "evaluation_identity": input_identity,
                 "seed": ns.seed,
                 "backend": {
                     "name": ns.backend,
@@ -594,6 +698,7 @@ def _run_job(
                 },
                 "model": {"id": model},
                 "generation": config,
+                "protocol": _loop_options(ns),
                 "prompt_cache": prompt_cache,
                 "transport": {
                     "timeout_seconds": timeout,
@@ -610,36 +715,19 @@ def _run_job(
                 "max_context_tokens": None,
             },
         }
+        dump_metadata = getattr(llm, "dump_metadata", None)
+        if dump_metadata is not None:
+            result["_trace_v2_runtime"]["run"]["api_dump"] = dict(dump_metadata)
     else:
-        result["_resume_key"] = _resume_key(args, job)
+        result["_resume_key"] = _resume_key(args, job, evaluation=input_identity)
     return result
 
 
 def _parse_tool_perf(tool_result: Any) -> Optional[float]:
-    if isinstance(tool_result, tuple) and len(tool_result) == 2:
-        first, _second = tool_result
-        return float(first) if isinstance(first, (int, float)) else None
-    if isinstance(tool_result, tuple) and len(tool_result) == 3:
-        _output, perf, _overhead = tool_result
-        return float(perf) if perf is not None else None
-    return None
-
-
-def _is_zero_score_tool_result(tool_result: Any) -> bool:
-    if not isinstance(tool_result, tuple) or len(tool_result) not in {2, 3}:
-        return False
-    output = tool_result[0]
-    if not isinstance(output, str):
-        return False
-    text = output.lower()
-    zero_markers = [
-        "invalid",
-        "degenerate",
-        "out of range",
-        "missing",
-        "tool error",
-    ]
-    return any(marker in text for marker in zero_markers)
+    # Offline/resume checks use the same return contract as online execution,
+    # including finite performance and non-negative finite tool cost.
+    performance, _cost, _output = _parse_tool_return(tool_result)
+    return performance
 
 
 def _score_check(
@@ -647,6 +735,9 @@ def _score_check(
     tools: Dict[str, Callable[[str], Any]],
     answer_evaluator: Optional[Callable[..., Any]],
 ) -> Dict[str, Any]:
+    if is_policy_missing(result):
+        return score_missing(result, answer_evaluator, commit=False,
+                             float_close=_float_close, metrics_close=_metrics_close)
     answer = result.get("answer")
     if not answer:
         return {"ok": False, "reason": "missing answer"}
@@ -674,6 +765,8 @@ def _score_check(
             recomputed = answer_evaluator(answer)
         if isinstance(recomputed, dict):
             metrics = result.get("answer_metrics") or {}
+            if not isinstance(metrics, dict):
+                return {"ok": False, "reason": "reported metrics are not an object"}
             ok = _metrics_close(metrics, recomputed)
             primary = recomputed.get("label_acc")
             if primary is not None:
@@ -684,7 +777,7 @@ def _score_check(
                 "reported_metrics": metrics,
                 "reported_perf": result.get("answer_perf"),
             }
-        ok = _float_close(result.get("answer_perf"), recomputed)
+        ok = recomputed is not None and _float_close(result.get("answer_perf"), recomputed)
         return {
             "ok": ok,
             "recomputed_perf": recomputed,
@@ -697,14 +790,15 @@ def _score_check(
     try:
         tool_result = tool(answer)
         recomputed = _parse_tool_perf(tool_result)
+    except InvalidConfigurationError as exc:
+        return {
+            "ok": _float_close(result.get("answer_perf"), 0.0),
+            "recomputed_perf": 0.0,
+            "reported_perf": result.get("answer_perf"),
+            "invalid_configuration": str(exc),
+        }
     except Exception as exc:
         return {"ok": False, "reason": f"tool recompute failed: {exc}"}
-    if (
-        recomputed is None
-        and _float_close(result.get("answer_perf"), 0.0)
-        and _is_zero_score_tool_result(tool_result)
-    ):
-        recomputed = 0.0
     if recomputed is None or result.get("answer_perf") is None:
         return {
             "ok": False,
@@ -720,24 +814,27 @@ def _score_check(
     }
 
 
-def _score_result(
+def _legacy_score_result(
     result: Dict[str, Any],
     tools: Dict[str, Callable[[str], Any]],
     answer_evaluator: Optional[Callable[..., Any]],
 ) -> Dict[str, Any]:
-    """Verify a score and fill a final tuning score when feedback was withheld.
+    """Verify the final score without feeding offline evaluation back to a model.
 
-    An over-budget tool result is deliberately absent from ``eval_records`` so
-    the model cannot benefit from it. The submitted configuration still needs
-    an offline outcome score for the experiment matrix. This does not add a
-    model-visible observation, a tool-call count, or simulated run cost.
+    The submitted policy uniformly scores the model's final configuration,
+    whether it previously received feedback or not. Legacy preserves the old
+    no-visible-evaluations-only fill behavior for historical comparisons.
+    Infrastructure errors must never become semantic zero scores.
     """
     check = _score_check(result, tools, answer_evaluator)
     recomputed = check.get("recomputed_perf")
     if (
         answer_evaluator is None
         and result.get("answer_perf") is None
-        and not result.get("eval_records")
+        and (
+            result.get("tuning_final_policy", "legacy") == "submitted"
+            or not result.get("eval_records")
+        )
         and isinstance(recomputed, (int, float))
         and not isinstance(recomputed, bool)
         and math.isfinite(float(recomputed))
@@ -748,12 +845,43 @@ def _score_result(
     return check
 
 
+def _score_result(result, tools, answer_evaluator):
+    if is_policy_missing(result):
+        score_missing(result, answer_evaluator, commit=True,
+                      float_close=_float_close, metrics_close=_metrics_close)
+        # Independent second evaluation; the model interaction has finished.
+        check = _score_check(result, tools, answer_evaluator)
+    else:
+        check = _legacy_score_result(result, tools, answer_evaluator)
+    return finish_score(result, check)
+
+
+def validate_terminal_result(result, tools, answer_evaluator, *, scenario, missing_final_policy=MISSING_FINAL_POLICY):
+    """Independent task recheck; no model call or result mutation.
+
+    Caller still verifies source/config/data/raw/artifact identities separately.
+    An evaluator/tool exception propagates; unknown tuning invokes neither.
+    """
+    identity_ok = (type(result) is dict and result.get("missing_final_policy", "error") == missing_final_policy
+                   and (missing_final_policy == "error" or result.get("terminal_scenario") == scenario))
+    check = _score_check(result, tools, answer_evaluator) if identity_ok else {"ok": False, "reason": "terminal_policy_or_scenario_mismatch"}
+    complete = identity_ok and terminal_publishable(result, check)
+    return {"schema_version": "expgym.independent-terminal-check.v1", "execution_complete": bool(complete),
+            "score_complete": bool(complete and check.get("ok") is True), "score_check": check,
+            "terminal_classification": (result.get("terminal_status", {}).get("terminal_classification", "completed_scored")
+                                        if complete else "integrity_failure"),
+            "raw_and_artifact_integrity_checked": False}
+
+
 def _float_close(actual: Any, expected: Any) -> bool:
     if actual is None or expected is None:
         return actual == expected
     try:
-        return math.isclose(float(actual), float(expected), rel_tol=1e-9, abs_tol=1e-9)
-    except (TypeError, ValueError):
+        if isinstance(actual, bool) or isinstance(expected, bool):
+            return False
+        first, second = float(actual), float(expected)
+        return math.isfinite(first) and math.isfinite(second) and math.isclose(first, second, rel_tol=1e-9, abs_tol=1e-9)
+    except (TypeError, ValueError, OverflowError):
         return False
 
 
@@ -842,6 +970,18 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
     print("ExpGym sweep dry-run")
     print(f"output_dir: {args.output_dir}")
     print(f"jobs: {len(jobs)}")
+    print("generation: " + json.dumps({
+        "temperature_tuning": args.temperature_tuning,
+        "temperature_eval": args.temperature_eval,
+        "max_tokens": getattr(args, "max_tokens", None),
+        "top_p": getattr(args, "top_p", 1.0),
+        "top_k": getattr(args, "top_k", None),
+        "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+        "reasoning_effort": getattr(args, "reasoning_effort", None),
+        "protocol": _loop_options(args),
+        "max_steps": args.max_steps,
+        "max_evals": args.max_evals,
+    }, sort_keys=True))
     for scenario in SCENARIOS:
         print(f"- {scenario}: {counts.get(scenario, 0)}")
     print()
@@ -852,8 +992,11 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
         print(json.dumps(preview, sort_keys=True))
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    _add_generation_arguments(parser)
+    parser.add_argument("--terminal-evidence-dir", type=Path, default=None,
+                        help="Optional separate evidence root, preserving each job trace's relative path.")
     parser.add_argument(
         "--backend",
         choices=["fake", "openai", "openrouter", "sub2api"],
@@ -906,7 +1049,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--search-reps", type=int, default=1)
     parser.add_argument("--audit-reps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=1206)
-    parser.add_argument("--max-steps", type=int, default=10)
+    parser.add_argument("--max-steps", type=int, default=30)
     parser.add_argument("--max-evals", type=int, default=30)
     parser.add_argument("--temperature-tuning", type=float, default=0.7)
     parser.add_argument("--temperature-eval", type=float, default=0.0)
@@ -950,11 +1093,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--shuffle", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(args=None, *, selected_job=None) -> int:
+    """Run the CLI matrix, or one frozen Job selected by the study queue."""
+    args = parse_args() if args is None else args
     if not args.models.strip():
         args.models = _backend_model(args.backend)
     if args.base_url is None:
@@ -977,7 +1121,7 @@ def main() -> int:
         if getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be at least 1")
     try:
-        jobs = _build_jobs(args)
+        jobs = _build_jobs(args) if selected_job is None else [selected_job]
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     if args.dry_run:
@@ -1004,24 +1148,32 @@ def main() -> int:
             if _resume_trace_is_valid(path, args, job):
                 print(f"[{idx}/{len(jobs)}] skip verified {path}")
                 continue
+            if args.missing_final_policy == MISSING_FINAL_POLICY:
+                raise RuntimeError("Existing terminal artifact failed exact resume validation; refusing model resampling")
             print(f"[{idx}/{len(jobs)}] rerun stale/invalid {path}")
         print(f"[{idx}/{len(jobs)}] run {job.scenario} {job.model_alias} {job.cost_regime}")
         start = time.time()
         try:
-            result = _run_job(args, job, api_key)
-            result["wall_time_seconds"] = time.time() - start
-            if not result["score_check"].get("ok"):
-                raise RuntimeError(f"score check failed: {result['score_check']}")
-            if args.trace_format == "v2":
-                artifact = build_trace_v2(result, repo_root=REPO_ROOT)
-                write_trace_v2(path, artifact)
-            else:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(
-                    json.dumps(result, indent=2, default=str), encoding="utf-8"
-                )
-            print(f"  wrote {path} score_check=ok")
-            print(f"  {_format_result_summary(result, path)}")
+            with TerminalEvidence(
+                _job_evidence_root(args, job) / "runner",
+                owner={"runner": "expgym", "scope": "finalize", "job": asdict(job)},
+                source_root=REPO_ROOT, stage="runner_finalize",
+            ):
+                result = _run_job(args, job, api_key)
+                result["wall_time_seconds"] = time.time() - start
+                if not terminal_publishable(result):
+                    raise RuntimeError(f"score check failed: {result['score_check']}")
+                if args.trace_format == "v2":
+                    artifact = build_trace_v2(result, repo_root=REPO_ROOT)
+                    write_trace_v2(path, artifact)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(
+                        json.dumps(result, indent=2, default=str), encoding="utf-8"
+                    )
+                print(f"  wrote {path} score_check={'ok' if result['score_check'].get('ok') else 'unknown'} "
+                      f"execution_complete=true score_complete={result['score_check'].get('ok') is True}")
+                print(f"  {_format_result_summary(result, path)}")
         except Exception as exc:
             failures.append((job, str(exc)))
             print(f"  ERROR: {exc}", file=sys.stderr)

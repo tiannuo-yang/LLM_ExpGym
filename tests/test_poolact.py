@@ -131,6 +131,7 @@ class PoolActClaimLifecycleTest(unittest.TestCase):
         runtime = coordinator.bind_tools(
             {"evaluate_config": lambda payload: (0.5, 10.0)},
             agent_id=0,
+            time_budget=100.0,
         )
         llm = SequenceLLM(
             [

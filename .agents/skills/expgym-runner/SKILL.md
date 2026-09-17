@@ -1,113 +1,83 @@
 ---
 name: expgym-runner
-description: Run, reproduce, validate, debug, or adapt the ExpGym and PoolAct research codebase. Use when an agent must set up datasets, choose the paper-exact versus repository-full experiment matrix, run fake or paid real-model tests (especially local Sub2API/Codex), operate HPOBench through Docker, resume sweeps, validate traces/results, estimate run scope, diagnose backend/data/platform failures, or add models, backends, tasks, scenarios, and PoolAct-compatible behavior.
+description: Run, debug, validate, or adapt ExpGym and PoolAct experiments, including self-serving and tool/runtime compatibility; turn frozen results into full-setting reports with reproducible tables and archive indexes.
 ---
 
 # ExpGym Runner
 
-Treat ExpGym and PoolAct as one evaluation system with two runners. Establish the requested scope before running anything expensive, then verify both execution and result integrity.
+Treat ExpGym and PoolAct as one system with two runners. Preserve the user's experiment settings and distinguish framework correctness from model performance.
 
-## Locate and inspect the project
+## Pick the relevant path
 
-1. Prefer the current directory when it contains `scripts/run_paper_sweep.py`, `scripts/run_poolact.py`, and `expgym/`.
-2. Otherwise honor `EXPGYM_REPO`, then search the current workspace for `LLM_ExpGym`.
-3. Work from the repository root. Read `README.MD`, `docs/poolact.md`, runner `--help`, and `git status --short` before modifying or launching a large run.
-4. If paper fidelity matters, locate the paper source and confirm which version is current. In this project it may be a sibling `paper/` repository; do not infer historical settings solely from current script defaults.
+Locate the requested repository (honor `EXPGYM_REPO`) and inspect `git status --short` before edits. Preserve unrelated changes and frozen run artifacts. For initial orientation, read `README.MD` and `docs/poolact.md`; inspect the relevant runner's `--help` before changing its invocation, not before every metadata-only check.
 
-Preserve unrelated user changes. Generated datasets and run outputs are local artifacts and should not be committed unless explicitly requested.
+Label work as **Static/fake validation**, **Real smoke validation**, **Current repository full matrix**, **Paper-exact reproduction**, or **Custom study**.
 
-## Classify the requested run
+- For paper claims or matrix design, read [experiment-matrix.md](references/experiment-matrix.md) and confirm the actual paper version. `run_full.sh` is a superset, not automatically paper-exact.
+- For setup, provider transport, HPO runtimes, CLI examples or failure diagnosis, read the relevant sections of [runbook.md](references/runbook.md).
+- For scientific endpoints, study registration and descriptive analysis, read `docs/portable-study.md`. It does not implement confirmatory inference.
+- For a completed study's full-setting report or archive index, read [the report workflow](../../../docs/full-setting-report.md). Use frozen exports; a request to locate or explain results does not itself request a rewrite or publication.
+- For normal missing answers versus execution failures, read `docs/task-abstention-v5.md`; for explicit provider aborts, read `docs/provider-abort-v4.md`.
+- For analysis packaging, Git publication or restoration, read `docs/efficient-delivery.md`. Use explicit input inventories and `scripts/package_run.py`; stream-verify archives and restore only needed inputs. Local-only sealing is not public clearance. Reuse unchanged archive identities and scan the actual publication delta.
+- For new concurrent/HPC runs, read `docs/scheduling.md` and `docs/serving.md`. Prefer the flat `run_study_queue.py` queue; independent invocations use separate processes/output/dump/cache namespaces, without stage/repeat barriers. `run_full.sh` remains the older sequential wrapper.
 
-Use exactly one of these labels in the work log or response:
+The serving default is **per model 4 nodes × 8 GPUs, two TP16 replicas, account k2p**. Model checkpoint/runtime/parser and generation settings remain explicit. `serve_slurm.py` is plan-only unless `--submit` is requested; a written deployment file is not proof of readiness. Queue concurrency defaults to 8 invocations per queue, not 8 requests or guaranteed GPU saturation. Keep each PoolAct pool on one replica. Queue resume only verifies already-complete jobs but can first-execute unstarted jobs; it is not a global read-only command. Failed begun jobs require explicit recovery, never silent resampling.
 
-- **Static/fake validation**: free, deterministic code-path testing. It is necessary but does not validate a real provider.
-- **Real smoke validation**: a tiny paid/API-backed run that proves transport, response parsing, scenario execution, scoring, and persistence.
-- **Current repository full matrix**: the deliberate superset produced by `scripts/run_full.sh` for one model.
-- **Paper-exact reproduction**: the precise paper version's models, scenarios, regimes, repeats, agent count, temperature, and step limit.
-- **Custom study**: any deliberate deviation; list the deviations.
+A status question needs current process/artifact evidence and an answer, not a restart of the entire validation ladder.
 
-Never call `run_full.sh` “paper exact” without comparing it to the current paper. Read [references/experiment-matrix.md](references/experiment-matrix.md) for the known ICLR 2026 distinction and trace counts.
+## Make compatibility fixes portable
 
-## Execute the validation ladder
+Branch on explicit capabilities, protocol or observed response shape, not model-name guesses. Keep necessary model/provider adapters explicit and recorded: template/parser, thinking and sampling settings are configuration, not permission to alter scoring or resample failures. Test fixes with unfamiliar model IDs and native/text/tool-only/reasoning-only/malformed envelopes as applicable.
 
-1. Run the no-cost preflight:
+- Preserve complete native assistant messages, tool calls, reasoning, tool-result IDs, finish reasons and every attempt's usage. Empty `content` with tool calls can be valid.
+- Normal native decisions send real tool schemas and `tool_choice=auto`; forced final uses `none` while retaining schemas/history. Fake text runs cannot verify this native transport path.
+- Inspect task-owned system **and user** instructions. Change incompatible protocol examples at their source; do not scrub question/document text or model history globally.
+- Do not recover rejected reasoning, quoted examples or partial tool messages through a catch-all final-answer fallback.
+- Delivered empty/length/malformed decisions are not free HTTP retries. Keep normal step-bounded protocol repair separate from configured transient transport retries. Explicit aborts remain failures.
+- Record effective request parameters and observed seed behavior. A seed flag is not proof of independent or repeatable generation.
 
-   ```bash
-   bash scripts/setup.sh --with-data
-   bash scripts/check.sh
-   .venv/bin/python scripts/download_data.py --check
-   ```
+Load credentials without printing them; never serialize real keys into traces, plans, logs or Git.
 
-2. Resolve the intended command with `--dry-run`. Report models, scenarios, item ranges, regimes, repetitions, strategies, agents, maximum steps/evaluations, and the resulting job or agent-trace count before a large external run.
-3. When the user asks for real verification, use a real backend. Do not stop after fake runs. Start with one item per relevant scenario/regime and the smallest useful agent count; use the exact target model in at least one preflight because provider access differs by model.
-4. Inspect outputs using the integrity rules below. A process exit code alone is insufficient.
-5. Launch the requested matrix with `--resume` and a stable output directory. Re-running the same command should skip only verified compatible results.
-6. Summarize evidence: commands, actual matrix, result paths, validation status, failures/retries, and explicit deviations from the paper.
+## Preserve task and PoolAct semantics
 
-Use [references/runbook.md](references/runbook.md) for commands, Sub2API handling, Docker/HPOBench, validation queries, and troubleshooting.
+Keep historical `legacy` tuning final selection and Audit scoring/voting unless the user requests a separately identified endpoint. `submitted` and `task-abstention-v1` are explicit study policies; do not enable them silently for one model.
 
-## Judge results correctly
+For PoolAct, retain one fresh coordinator/cache/graph per independent pool and one runtime/clock per agent. Agent states within a pool may be shared according to the algorithm, but independent repetitions must not share mutable state. Bind the same budget and overhead scale in the runtime and ReAct loop.
 
-For ExpGym, require:
+Only completed, time-visible observations are cache hits. Withheld budget feedback must not leak through graph views, cached observations or forced-final prompts. Preserve the reasoning/claim critical section while environment tools run concurrently; close pending claims on completion and exceptions. Record the actual `POOLACT_PROTOCOL_VERSION`, not a guessed historical label.
 
-- process exit status 0;
-- a schema-valid trace;
-- `outcome.validation.passed == true` with repository score recomputation in trace v2, plus the runner's `score_check=ok` message;
-- configuration and source fingerprints matching the current run.
+## Verify the right outcome
 
-For PoolAct, require for every selected item and strategy:
+Separate `execution_complete`, `score_complete` and task performance.
 
-- `result.json` and all expected per-agent JSON files;
-- every `agent_results[].score_check.ok == true`;
-- finite aggregate performance;
-- `shared_state.pending_claims == 0` when shared state exists;
-- a current configuration and implementation hash;
-- a valid item/batch `summary.json`.
+- Sequential scored results need matching source/config/data/evaluator identities, a valid trace and repository score validation.
+- PoolAct needs all expected agent files, validated individual and aggregate results, matching identities, a consistent summary and zero pending claims.
+- Under explicit `task-abstention-v1`, a normal missing Search/Audit answer preserves raw null and scores the empty prediction through the original evaluator. A missing HPO configuration is unscorable; full-pool MI/BoN stays unknown if a required agent is missing. Do not require finite performance for a legitimately recorded unscorable endpoint.
+- Transport, tool, scorer and persistence exceptions remain failures, not abstentions or successful zero scores.
+- Valid wrong answers, zero scores, normal missing answers and negative effects remain in the planned accounting. Do not retry or exclude them to improve results.
 
-A score of zero can be a valid but wrong model answer. Distinguish **runner/integrity success** from **semantic task performance**. Search F1 of zero, a valid NASBench configuration scoring poorly, or a budget stop is not automatically a software failure.
+Use identity-checked resume. An integrity-only check must forbid model calls rather than silently rerun a stale result. A hash-bound receipt is evidence for its stated scope, not independent proof of scientific truth.
 
-## Handle real APIs safely
+## Report a completed study
 
-- Load credentials from environment files without printing them. Never echo, serialize, commit, or paste API keys.
-- For local Sub2API, require `SUB2API_API_KEY` and `SUB2API_BASE_URL`; `SUB2API_MODEL` is optional. Use the model ID requested by the user and preflight it explicitly.
-- Treat HTTP 200 with null/empty assistant content as a transient malformed response. The existing OpenAI-compatible client retries bounded malformed responses, 429, 500, 502, 503, 504, connection failures, and timeouts.
-- Do not estimate subscription or token consumption from visible trace length alone. Provider-side reasoning tokens and retried attempts may dominate. Measure a representative real pilot from Sub2API usage, then extrapolate from observed calls and charged usage with a safety margin.
-- A model can be account- or plan-gated even when the endpoint works for another model. Report the provider error verbatim but never include secrets.
-- When Sub2API runs inside Docker, use the repository wrapper; it rewrites localhost to `host.docker.internal`.
+When asked to produce a full report, use this sequence with the actual study settings:
 
-## Preserve ExpGym and PoolAct semantics when adapting
+1. Bind the existing data/source/config identities, explicit analysis inputs and actual matrix; do not confuse a retrospective run manifest with preregistration.
+2. Generate all-setting absolute scores, clearly oriented comparisons and relevant repeat/task tables. Preserve item/pool/order units, denominators, unknowns and all positive/negative values; do not inherit case-study model names, counts or repeats.
+3. Organize the report around the user's questions: budget degradation, cache/coordination gains where relevant, and actual resource tradeoffs. Keep material limitations near the claims they affect; an anomaly list is not a substitute for the main report.
+4. Include the complete raw-dump and analysis index in the report: fixed links, source/member/shard mapping, existing hash/size evidence, all-attempt costs and restoration entry points. Distinguish metadata checks from new content verification.
+5. Perform one post-draft independent numerical/logical review, correct affected parts, and publish only the scanned delta if authorized. Stop at the agreed report/index acceptance; no implicit model reruns, rescoring, full raw restoration or repeated audit ladders.
 
-When adding or changing a model/backend:
+Keep detailed acceptance and artifact-layout guidance in the linked workflow. Its historical generators are study-specific examples, not general CLIs for arbitrary models or matrices.
 
-1. Extend the existing client factory and CLI/environment resolution instead of bypassing `expgym/llm_clients.py`.
-2. Normalize message/content and usage fields, bounded retries, timeout behavior, reasoning controls, and secret redaction.
-3. Add fake/unit coverage and one authorized real smoke for the exact provider/model.
+## Validate proportionately and stop
 
-When adding or changing a scenario/task:
+During development, run focused tests for changed behavior. For runner/execution changes, run the full no-cost suite and fake runner integration once per coherent revision before delivery; reuse its result for unchanged code. Report-only adapters/generators need schema/aggregation fixtures, deterministic recomputation and the post-draft numerical review, not the full runner suite unless an execution dependency changed. Documentation-only changes need link/schema review, not a new model run.
 
-1. Follow the scenario interface registered through `_SCENARIOS`: context, system prompt/instruction notes, tools, fake plan, answer evaluator, and base cost.
-2. Update selectors and validation consistently in `demo_experiment.py`, both runners, trace v2, summarization, and PoolAct aggregation/coverage logic.
-3. Make environment feedback deterministic or snapshot-pinned. Record hashes and test score recomputation.
-4. Add fake tests, data integrity tests, sequential real smoke, and PoolAct real smoke when PoolAct supports the scenario.
+Use the recorded interpreter for an existing study; never reinstall a frozen environment to make a check pass. `scripts/check.sh` bootstraps a missing environment, so verify `EXPGYM_VENV/bin/python` exists before invoking it. ParamNet requires the verified legacy environment; fake or skipped tests do not establish that real path.
 
-When changing PoolAct:
+New or changed model-facing/execution paths require an authorized representative real smoke before a full experiment. If this task is code-only or no GPU/API run is requested, finish the static/fake work and state that real smoke remains unperformed; do not acquire resources automatically.
 
-- Preserve one runtime and simulated clock per agent.
-- Cache only completed observations at zero simulated cost; in-flight work is not a completed cache hit.
-- Keep the exploration graph and serialized LLM decision/pending-claim step while allowing environment tools to execute concurrently.
-- Close pending claims on success and exception, and force final-answer locking when the protocol requires it.
-- Treat protocol-v2 outputs as current-corrected behavior, not byte-for-byte historical CARC output.
+Keep one plan, one execution record and one report per meaningful revision. Reuse immutable input inventories and completed checks; do not recursively create reviews of reviews, re-extract every raw file for metadata-only work, or repeat full scans for unchanged report text. Retain necessary safety scans, score-integrity checks, failed-attempt costs and the user's requested independent post-report review.
 
-After any adaptation, run the complete no-cost check and an authorized real smoke through every changed path.
-
-## Communicate scope without ambiguity
-
-Always state:
-
-- whether the run is fake, real smoke, repository-full, paper-exact, or custom;
-- the exact scenario/regime/model subset actually verified;
-- whether HPOBench ran natively or in Docker;
-- whether validation proves infrastructure only or includes meaningful statistical reproduction;
-- what remains unrun.
-
-Do not claim “no bugs” from a finite test suite. Say which checks and real paths passed and identify residual provider stochasticity, quota, platform, or unexecuted-matrix risk.
+Report the actual scope, changed behavior, tests, source/result locations, remaining limitations and whether code was pushed or merged. Finite tests do not prove “no bugs,” and desired performance trends are not an acceptance criterion for a bug fix.

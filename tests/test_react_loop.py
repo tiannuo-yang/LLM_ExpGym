@@ -2,10 +2,31 @@ import unittest
 from typing import Tuple
 
 from expgym.react_loop import FakeLLM, LLMBackend, LLMOutput, run_react_loop
+from expgym.errors import ToolInputError, InvalidConfigurationError
 from expgym.tools_experiment import CONFIGS, run_config
 
 
 class RunReactLoopTest(unittest.TestCase):
+    def test_fake_llm_answers_when_first_evaluation_exceeds_budget(self) -> None:
+        from scripts.run_paper_sweep import _score_result
+
+        tools = {"evaluate_config": lambda _: (0.75, 100.0)}
+        llm = FakeLLM(
+            plan=[("evaluate_config", '{"x": 1}'), ("evaluate_config", '{"x": 2}')],
+            final_answer='{"x": 2}',
+        )
+        result = run_react_loop(llm=llm, tools=tools, time_budget=10.0, max_steps=4)
+        self.assertEqual(result["evaluations"], 1)
+        self.assertEqual(result["api_calls"], 2)
+        self.assertEqual(result["eval_records"], [])
+        self.assertEqual(result["answer"], '{"x": 2}')
+        self.assertIsNone(result["answer_perf"])
+        # The withheld observation stays hidden; only offline validation may
+        # assign the submitted configuration's outcome score.
+        self.assertTrue(_score_result(result, tools, None)["ok"])
+        self.assertEqual(result["answer_score_source"], "offline_final_answer")
+        self.assertEqual(result["answer_perf"], 0.75)
+
     def test_fake_llm_produces_answer_and_observations(self) -> None:
         config_ids = list(CONFIGS.keys())[:3]
         llm = FakeLLM(config_ids=config_ids, probes=2)
@@ -265,7 +286,7 @@ class RunReactLoopTest(unittest.TestCase):
         self.assertEqual(result["answer"], '{"x": 1}')
 
     def test_tool_error_returns_observation_instead_of_crash(self) -> None:
-        """Tool exceptions should be caught and returned as observations."""
+        """Only explicitly classified model input errors become observations."""
 
         class SingleToolLLM(LLMBackend):
             def __init__(self) -> None:
@@ -280,7 +301,7 @@ class RunReactLoopTest(unittest.TestCase):
                 return LLMOutput(text="Answer: fallback")
 
         def crashing_tool(_: str):
-            raise ValueError("bad JSON or whatever")
+            raise ToolInputError("bad JSON payload")
 
         result = run_react_loop(
             llm=SingleToolLLM(),
@@ -368,12 +389,8 @@ class TuningJsonErrorTest(unittest.TestCase):
 
     def test_evaluate_config_action_bad_json(self) -> None:
         from expgym.task_tuning import evaluate_config_action
-        result = evaluate_config_action("not valid json{{{")
-        # Should return error string, not crash
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
-        self.assertIn("Invalid JSON", str(result[0]))
-        self.assertEqual(result[1], 0.0)
+        with self.assertRaisesRegex(InvalidConfigurationError, "Invalid JSON"):
+            evaluate_config_action("not valid json{{{")
 
 
 class ExtractAnswerTest(unittest.TestCase):
@@ -382,6 +399,39 @@ class ExtractAnswerTest(unittest.TestCase):
     def setUp(self) -> None:
         from expgym.react_loop import _extract_answer
         self._extract = _extract_answer
+
+    def test_letter_protocol_quote_does_not_override_final_answer(self) -> None:
+        # Real Kimi-K3 Letter/free/naive agent 3 quoted the protocol in its
+        # reasoning before submitting this valid final configuration.
+        expected = (
+            '{"average_units_per_layer_log2": 8.0, "batch_size_log2": 5.5, '
+            '"dropout_0": 0.25, "dropout_1": 0.25, '
+            '"final_lr_fraction_log2": -2.0, "initial_lr_log10": -4.0, '
+            '"num_layers": 5, "shape_parameter_1": 0.5}'
+        )
+        block = (
+            'The rule says "When confident in your final answer, reply with '
+            'ONLY: Answer: <your answer>". I\'m not fully confident, but the '
+            'system is forcing no tool calls this turn.\n\n'
+            'Answer: ' + expected
+        )
+        self.assertEqual(self._extract(block), expected)
+
+    def test_body_only_answer_reference_is_not_a_final_answer(self) -> None:
+        block = 'Thought: The instruction says "Answer: <your answer>".'
+        self.assertIsNone(self._extract(block))
+
+        class QuotingLLM(LLMBackend):
+            def __init__(self) -> None:
+                self.outputs = iter([block, "Answer: forced_choice"])
+
+            def generate(self, messages) -> LLMOutput:
+                return LLMOutput(text=next(self.outputs))
+
+        result = run_react_loop(llm=QuotingLLM(), tools={}, max_steps=3)
+        self.assertTrue(result["aborted"])
+        self.assertEqual(result["api_calls"], 2)
+        self.assertEqual(result["answer"], "forced_choice")
 
     def test_single_line_answer(self) -> None:
         """Single-line answer after Thought should return just the answer."""
@@ -628,7 +678,7 @@ class ContextTokenAbortTest(unittest.TestCase):
     """Test graceful abort when conversation approaches context token limit."""
 
     def test_aborts_when_context_exceeds_limit(self):
-        """Agent should be aborted and forced to answer when context is full."""
+        """An unfit protected history must not be sent, even for forced final."""
 
         class VerboseLLM(LLMBackend):
             """LLM that produces long outputs to fill context quickly."""
@@ -660,8 +710,8 @@ class ContextTokenAbortTest(unittest.TestCase):
         )
 
         self.assertTrue(result["aborted"])
-        # Should have the forced answer
-        self.assertEqual(result["answer"], '{"x": 1}')
+        # The forced prompt is also subject to the request context bound.
+        self.assertIsNone(result["answer"])
         # Should NOT have run all 50 steps
         self.assertLess(result["api_calls"], 10)
         # Steps should contain the abort note
