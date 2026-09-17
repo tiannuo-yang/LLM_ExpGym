@@ -3,17 +3,21 @@
 Provides:
 - SharedObservationCache: thread-safe exact-match cache (zero-cost dedup)
 - SharedExplorationLedger: records all observations for context injection
+- SharedPeerContext: full completed observations from other agents
 - SharedExplorationGraph: graph-based representation of parallel exploration
 - wrap_tools_with_cache: caching-only tool wrapper
+- wrap_tools_with_peer_context: caching plus complete peer observations
 - wrap_tools_with_poolact: paper implementation (cache + graph + claims)
 - wrap_tools_with_polact: backwards-compatible alias for the paper implementation
 - wrap_tools_with_ledger: legacy flat-ledger experiment
 - make_ledger_augmenter: creates observation_augmenter for react_loop
 - make_graph_augmenter: creates observation_augmenter with graph injection
+- make_peer_context_augmenter: appends an untruncated peer-observation snapshot
 """
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -197,6 +201,127 @@ class SharedObservationCache:
                 "hits": self._hits,
                 "misses": self._misses,
                 "size": len(self._cache),
+            }
+
+
+# ---------------------------------------------------------------------------
+# Complete peer observations (the flat-context PoolAct ablation)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PeerObservation:
+    """Immutable transport strings for one physically completed tool call."""
+
+    sequence: int
+    agent_id: int
+    tool_name: str
+    payload: str
+    result: str
+    cache_hit: bool
+    completion_time: float
+
+
+class SharedPeerContext:
+    """Thread-safe, append-only observations without graph or pending claims.
+
+    Unlike the legacy display ledger, this store never summarizes, truncates,
+    deduplicates, or limits records. Each result is frozen as its complete
+    string transport representation, including every tool-return tuple field.
+    Private reasoning and actions still in progress are never recorded.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: List[PeerObservation] = []
+
+    def record(
+        self,
+        agent_id: int,
+        tool_name: str,
+        payload: Any,
+        result: Any,
+        *,
+        cache_hit: bool = False,
+        completion_time: float = 0.0,
+    ) -> PeerObservation:
+        """Freeze a completed observation before appending it atomically.
+
+        The wrapper validates tool results/costs before calling this method.
+        Converting to immutable strings outside the lock also keeps later
+        caller mutation of a mutable output from changing the shared record.
+        """
+        completion_time = _finite_nonnegative(completion_time, "peer completion time")
+        tool_name, payload, result = str(tool_name), str(payload), str(result)
+        with self._lock:
+            entry = PeerObservation(
+                sequence=len(self._entries), agent_id=agent_id,
+                tool_name=tool_name, payload=payload, result=result,
+                cache_hit=bool(cache_hit), completion_time=completion_time,
+            )
+            self._entries.append(entry)
+            return entry
+
+    def snapshot(
+        self,
+        *,
+        agent_id: int,
+        visible_before: Optional[float] = None,
+        completion_before: Optional[float] = None,
+    ) -> Tuple[PeerObservation, ...]:
+        """Return immutable visible peer entries in physical insertion order."""
+        if visible_before is not None:
+            visible_before = _finite_nonnegative(visible_before, "peer visibility time")
+        if completion_before is not None:
+            completion_before = _finite_nonnegative(completion_before, "peer budget")
+        with self._lock:
+            return tuple(
+                entry for entry in self._entries
+                if entry.agent_id != agent_id
+                and (visible_before is None or entry.completion_time <= visible_before)
+                and (completion_before is None or entry.completion_time < completion_before)
+            )
+
+    def format_for_injection(
+        self,
+        *,
+        agent_id: int,
+        visible_before: Optional[float] = None,
+        completion_before: Optional[float] = None,
+    ) -> str:
+        """Serialize every visible peer action and full result as a snapshot."""
+        entries = self.snapshot(
+            agent_id=agent_id, visible_before=visible_before,
+            completion_before=completion_before,
+        )
+        if not entries:
+            return ""
+        records = [
+            {
+                "sequence": entry.sequence,
+                "agent_id": entry.agent_id,
+                "action": {"tool": entry.tool_name, "payload": entry.payload},
+                "result": entry.result,
+                "cache_hit": entry.cache_hit,
+                "completion_time": entry.completion_time,
+            }
+            for entry in entries
+        ]
+        return (
+            "[BEGIN FULL PEER OBSERVATIONS]\n"
+            "Completed tool actions and results from other agents; "
+            "each result is the complete tool-return string.\n"
+            + json.dumps(records, ensure_ascii=False, indent=2)
+            + "\n[END FULL PEER OBSERVATIONS]"
+        )
+
+    def stats(self) -> Dict[str, int]:
+        """Return physical publication counts, independent of a viewer clock."""
+        with self._lock:
+            return {
+                "total_entries": len(self._entries),
+                "unique_entries": sum(not entry.cache_hit for entry in self._entries),
+                "cached_entries": sum(entry.cache_hit for entry in self._entries),
+                "agents": len({entry.agent_id for entry in self._entries}),
             }
 
 
@@ -445,6 +570,130 @@ def _make_cached_wrapper(
 
 
 # ---------------------------------------------------------------------------
+# Cache plus complete peer observations, without a graph or action claims
+# ---------------------------------------------------------------------------
+
+def wrap_tools_with_peer_context(
+    tools: Dict[str, Callable],
+    cache: SharedObservationCache,
+    peer_context: SharedPeerContext,
+    agent_id: int,
+    *,
+    clock: Optional[AgentClock] = None,
+    overhead_scale: float = 1.0,
+    time_budget: Optional[float] = None,
+) -> Dict[str, Callable]:
+    """Keep cache timing/cost semantics and publish full completed results.
+
+    The ReAct loop still owns each independent agent clock. This wrapper
+    predicts completion without advancing that clock, and neither publishes
+    pending work nor acquires a decision-stage reasoning lock. Observations
+    at or beyond a finite budget remain private for accounting purposes.
+    """
+    if time_budget is not None and clock is None:
+        raise ValueError("time_budget requires an AgentClock in simulated seconds")
+    overhead_scale = _finite_nonnegative(overhead_scale, "overhead_scale")
+    if time_budget is not None:
+        time_budget = _finite_nonnegative(time_budget, "time_budget")
+    validate_execution_contracts(
+        tools=tools, agent_clock=clock, observation_augmenter=None, pre_tool_hook=None,
+        time_budget=time_budget, overhead_scale=overhead_scale,
+    )
+    if clock is not None:
+        bind_execution_contract(clock, clock=clock, time_budget=time_budget,
+                                overhead_scale=overhead_scale)
+    return {
+        tool_name: _make_peer_context_wrapper(
+            tool_name, func, cache, peer_context, agent_id,
+            clock=clock, overhead_scale=overhead_scale, time_budget=time_budget,
+        )
+        for tool_name, func in tools.items()
+    }
+
+
+def _make_peer_context_wrapper(
+    tool_name: str,
+    original_fn: Callable,
+    cache: SharedObservationCache,
+    peer_context: SharedPeerContext,
+    agent_id: int,
+    *,
+    clock: Optional[AgentClock],
+    overhead_scale: float,
+    time_budget: Optional[float],
+) -> Callable:
+    @wraps(original_fn)
+    def wrapper(payload: str) -> Any:
+        # Import lazily to share the exact loop contract without a module
+        # cycle. Valid overhead alone does not make an observation valid:
+        # malformed performance fields must never reach another agent.
+        from expgym.react_loop import _parse_tool_return
+
+        vb = clock.now if clock is not None else None
+        cached = cache.get(tool_name, payload, visible_before=vb,
+                           completion_before=time_budget)
+        if cached is not None:
+            # Validate the original cached cost before zeroing it, which
+            # otherwise could conceal a malformed tool-return tuple.
+            _parse_tool_return(cached)
+            result = _zero_overhead(cached)
+            completion_time = _completion_time(clock, 0.0, overhead_scale)
+            if time_budget is None or completion_time < time_budget:
+                peer_context.record(
+                    agent_id, tool_name, payload, result, cache_hit=True,
+                    completion_time=completion_time,
+                )
+            return result
+
+        # Physical completion and the full loop contract precede publication.
+        result = original_fn(payload)
+        _perf, raw_overhead, _output = _parse_tool_return(result)
+        completion_time = _completion_time(clock, raw_overhead, overhead_scale)
+        if time_budget is None or completion_time < time_budget:
+            # Freeze before publishing the mutable return through the cache.
+            # SharedPeerContext stores only strings, never a reference to it.
+            result_text = str(result)
+            cache.put(tool_name, payload, result, completion_time=completion_time)
+            peer_context.record(
+                agent_id, tool_name, payload, result_text, cache_hit=False,
+                completion_time=completion_time,
+            )
+        return result
+    bind_execution_contract(wrapper, clock=clock, time_budget=time_budget,
+                            overhead_scale=overhead_scale)
+    return wrapper
+
+
+def make_peer_context_augmenter(
+    peer_context: SharedPeerContext,
+    *,
+    agent_id: int,
+    clock: Optional[AgentClock] = None,
+    time_budget: Optional[float] = None,
+) -> Callable[[str], str]:
+    """Append the full current peer snapshot, preserving the own observation.
+
+    ``last_snapshot`` identifies the exact snapshot appended on the latest
+    call, including the empty case. The loop uses ``requires_complete_context``
+    to reject requests whose normal context preparation drops/truncates it;
+    the augmenter itself never changes history or reduces the snapshot.
+    """
+    def augmenter(observation: str) -> str:
+        vb = clock.now if clock is not None else None
+        snapshot = peer_context.format_for_injection(
+            agent_id=agent_id, visible_before=vb, completion_before=time_budget,
+        )
+        augmenter.last_snapshot = snapshot
+        if snapshot:
+            return "{}\n\n{}".format(observation, snapshot)
+        return observation
+    augmenter.requires_complete_context = True
+    augmenter.last_snapshot = ""
+    bind_execution_contract(augmenter, clock=clock, time_budget=time_budget)
+    return augmenter
+
+
+# ---------------------------------------------------------------------------
 # Legacy ledger wrapper
 # ---------------------------------------------------------------------------
 
@@ -649,6 +898,7 @@ class SharedExplorationGraph:
         self._fetch_nodes: Dict[int, FetchNode] = {}    # doc_id -> node
         self._end_nodes: Dict[str, EndNode] = {}        # answer -> node
         self._eval_nodes: Dict[str, EvalNode] = {}      # config_key -> node
+        self._eval_key_payloads: Dict[str, str] = {}    # digest identity -> full payload
 
         # Edges: (source_key, target_key) -> GraphEdge
         self._edges: Dict[Tuple[str, str], GraphEdge] = {}
@@ -866,7 +1116,45 @@ class SharedExplorationGraph:
         return 'END:"{}"'.format(short)
 
     def _eval_key(self, config_key: str) -> str:
-        return "E:{}".format(config_key[:80])
+        # Path identity must include the complete canonical payload. Truncating
+        # JSON merges distinct long configurations into false transitions/loops.
+        # This full digest is internal; visible paths use snapshot-local labels.
+        # Cache, claim and observation dedup still use their full payload keys.
+        return "E:sha256:{}".format(hashlib.sha256(config_key.encode("utf-8")).hexdigest())
+
+    def _eval_display_keys(self, eval_nodes: Dict[str, EvalNode]) -> Dict[str, str]:
+        """Map full identities to compact IDs using only this visible snapshot.
+
+        Short canonical JSON retains its original readable path label. Long
+        keys use hash prefixes; all colliding prefixes expand together. These
+        aliases are snapshot-local, not a pool-global registry influenced by
+        observations that are still hidden from the receiving agent.
+        """
+        short = {}
+        long = {}
+        for config_key in eval_nodes:
+            identity = self._eval_key(config_key)
+            if len(config_key) <= 80:
+                short[identity] = "E:" + config_key
+            else:
+                long[identity] = 12
+        while True:
+            aliases = dict(short)
+            aliases.update({identity: "E:h:" + identity.rsplit(":", 1)[1][:width]
+                            for identity, width in long.items()})
+            by_alias: Dict[str, List[str]] = {}
+            for identity, alias in aliases.items():
+                by_alias.setdefault(alias, []).append(identity)
+            conflicts = [identities for identities in by_alias.values()
+                         if len(identities) > 1]
+            if not conflicts:
+                return aliases
+            for identities in conflicts:
+                expandable = [identity for identity in identities if identity in long]
+                if not expandable or any(long[identity] >= 64 for identity in expandable):
+                    raise ValueError("Cannot assign distinct evaluation graph display IDs")
+                for identity in expandable:
+                    long[identity] += 1
 
     def _add_edge(self, source: str, target: str, agent_id: int) -> None:
         """Add or increment an edge. Caller must hold _lock."""
@@ -1017,11 +1305,15 @@ class SharedExplorationGraph:
             completion_time: Simulated time when this eval completed.
         """
         with self._lock:
+            ekey = self._eval_key(config_key)
+            previous_payload = self._eval_key_payloads.get(ekey)
+            if previous_payload is not None and previous_payload != config_key:
+                raise ValueError("Evaluation graph identity digest collision")
             completion_time = self._remember_observation(
                 "record_evaluate_config",
                 (agent_id, config_key, config_display, perf, cost), completion_time,
             )
-            ekey = self._eval_key(config_key)
+            self._eval_key_payloads[ekey] = config_key
             if config_key not in self._eval_nodes:
                 self._eval_nodes[config_key] = EvalNode(
                     config_key=config_key,
@@ -1124,6 +1416,12 @@ class SharedExplorationGraph:
                 and not pending_claims:
             return ""
 
+        # Render from the filtered snapshot only. Keep internal edge identities
+        # untouched, and use the same alias map in observation rows and paths.
+        eval_display_keys = self._eval_display_keys(eval_nodes)
+        edges = {(eval_display_keys.get(src, src), eval_display_keys.get(tgt, tgt)): edge
+                 for (src, tgt), edge in edges.items()}
+
         # Diversity mode: unified coverage-map format for all scenarios
         if self._diversity_mode:
             return self._format_unified(
@@ -1131,11 +1429,13 @@ class SharedExplorationGraph:
                 end_nodes, edges,
                 agent_id=agent_id,
                 pending_claims=pending_claims,
+                eval_display_keys=eval_display_keys,
             )
 
         # Non-diversity mode: original formats
         if eval_nodes and not search_nodes and not fetch_nodes:
-            return self._format_tuning_default(eval_nodes, end_nodes, edges)
+            return self._format_tuning_default(eval_nodes, end_nodes, edges,
+                                               eval_display_keys=eval_display_keys)
         return self._format_default(
             search_nodes, fetch_nodes, end_nodes, edges,
         )
@@ -1254,6 +1554,7 @@ class SharedExplorationGraph:
         *,
         agent_id: Optional[int] = None,
         pending_claims: Optional[List[ActionClaim]] = None,
+        eval_display_keys: Dict[str, str],
     ) -> str:
         """Unified coverage-map format for all scenarios in diversity mode.
 
@@ -1337,10 +1638,14 @@ class SharedExplorationGraph:
             for node in sorted_nodes:
                 who = sorted(node.visited_by)
                 marker = " (you)" if agent_id in who else ""
+                display = node.config_display
+                if len(node.config_key) > 80:
+                    display = "{} {}".format(eval_display_keys[self._eval_key(node.config_key)],
+                                             display)
                 if is_audit:
                     lines.append(
                         "  {} [agents {}]{}".format(
-                            node.config_display,
+                            display,
                             ",".join(str(a) for a in who), marker,
                         )
                     )
@@ -1348,7 +1653,7 @@ class SharedExplorationGraph:
                     perf_str = "{:.6f}".format(node.perf) if node.perf is not None else "INVALID"
                     lines.append(
                         "  {} -> {} [agents {}]{}".format(
-                            node.config_display, perf_str,
+                            display, perf_str,
                             ",".join(str(a) for a in who), marker,
                         )
                     )
@@ -1434,6 +1739,8 @@ class SharedExplorationGraph:
         eval_nodes: Dict[str, EvalNode],
         end_nodes: Dict[str, EndNode],
         edges: Dict[Tuple[str, str], GraphEdge],
+        *,
+        eval_display_keys: Dict[str, str],
     ) -> str:
         """Default format for tuning: show all configs with perf + cost."""
         lines = [
@@ -1456,9 +1763,13 @@ class SharedExplorationGraph:
 
         for node in sorted_nodes:
             perf_str = "perf={:.6f}".format(node.perf) if node.perf is not None else "INVALID"
+            display = node.config_display
+            if len(node.config_key) > 80:
+                display = "{} {}".format(eval_display_keys[self._eval_key(node.config_key)],
+                                         display)
             lines.append(
                 "  {} -> {}, cost={:.0f}s ({}x by [{}])".format(
-                    node.config_display,
+                    display,
                     perf_str,
                     node.cost,
                     node.visits,

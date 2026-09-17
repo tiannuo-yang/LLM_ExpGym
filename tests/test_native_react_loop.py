@@ -4,6 +4,9 @@ import json
 import unittest
 
 from expgym.errors import ToolInputError
+from expgym.native_anthropic_client import NativeAnthropicLLM
+from expgym.native_gemini_client import CONTENT_FIELD, NativeGeminiLLM
+from expgym.native_responses_client import OUTPUT_ITEMS_FIELD, NativeResponsesLLM
 from expgym.poolact import PoolActCoordinator
 from expgym.react_loop import (
     LLMOutput, FakeLLM, run_react_loop, _estimate_tokens, _trim_messages,
@@ -40,6 +43,154 @@ class NativeReplay:
 
 
 class NativeLoopTest(unittest.TestCase):
+    def test_text_actions_replay_signed_history_through_each_native_wire(self):
+        action = '  Action: lookup {"key":"Ada"}  '
+        final = "Answer: Ada"
+        responses_items = [
+            {"type": "reasoning", "id": "rs_fixture", "summary": [],
+             "encrypted_content": "opaque-encrypted-fixture"},
+            {"type": "message", "role": "assistant", "id": "msg_fixture",
+             "status": "completed", "content": [
+                 {"type": "output_text", "text": action, "annotations": []}]},
+        ]
+        anthropic_blocks = [
+            {"type": "thinking", "thinking": "", "signature": "opaque-signature-fixture"},
+            {"type": "redacted_thinking", "data": "opaque-redacted-fixture"},
+            {"type": "text", "text": action},
+        ]
+        gemini_content = {"role": "model", "parts": [
+            {"thought": True, "text": "", "thoughtSignature": "opaque-thought-fixture"},
+            {"text": action, "thoughtSignature": "opaque-text-fixture"},
+        ]}
+        fixtures = [
+            (NativeResponsesLLM, {
+                "object": "response", "status": "completed", "output": responses_items,
+            }, {
+                "object": "response", "status": "completed", "output": [
+                    {"type": "message", "role": "assistant", "content": [
+                        {"type": "output_text", "text": final, "annotations": []}]}],
+            }),
+            (NativeAnthropicLLM, {
+                "type": "message", "role": "assistant", "content": anthropic_blocks,
+                "stop_reason": "end_turn",
+            }, {
+                "type": "message", "role": "assistant", "content": [{"type": "text", "text": final}],
+                "stop_reason": "end_turn",
+            }),
+            (NativeGeminiLLM, {
+                "candidates": [{"content": gemini_content, "finishReason": "STOP"}],
+            }, {
+                "candidates": [{"content": {"role": "model", "parts": [{"text": final}]},
+                                "finishReason": "STOP"}],
+            }),
+        ]
+        for client_type, first, last in fixtures:
+            # Cover both another normal decision and the historical forced
+            # final call after the agent has exhausted its step horizon.
+            for max_steps in (1, 3):
+                with self.subTest(provider=client_type.__name__, max_steps=max_steps):
+                    pending = [copy.deepcopy(first), copy.deepcopy(last)]
+                    bodies = []
+
+                    def transport(request, timeout):
+                        bodies.append(json.loads(request.data))
+                        return json.dumps(pending.pop(0)).encode("utf-8")
+
+                    llm = client_type(
+                        api_key="fixture-only-key", model="unfamiliar-provider-model",
+                        base_url="http://fixture.invalid/v1", transport=transport, max_retries=0,
+                    )
+                    seen = []
+                    result = run_react_loop(
+                        llm, {"lookup": lambda payload: seen.append(payload) or ("Ada", 2.)},
+                        context="Find the name.", max_steps=max_steps, tool_protocol="text",
+                        answer_evaluator=lambda answer: 1. if answer == "Ada" else 0.,
+                        capture_trace_v2=True,
+                    )
+                    self.assertEqual(seen, ['{"key":"Ada"}'])
+                    self.assertEqual((result["answer"], result["answer_perf"]), ("Ada", 1.))
+                    self.assertEqual((result["evaluations"], result["total_overhead"], result["api_calls"]),
+                                     (1, 2., 2))
+                    self.assertEqual(result["protocol_failures"], [])
+                    self.assertEqual(result["tool_protocol"], "text")
+                    calls = result["_trace_v2_capture"]["llm_calls"]
+                    self.assertEqual(calls[1]["forced"], max_steps == 1)
+                    original = calls[0]["output_message"]
+                    self.assertEqual(calls[1]["input_messages"][2], original)
+                    self.assertEqual(result["messages"][2], original)
+                    self.assertEqual(calls[1]["input_messages"][3]["role"], "user")
+                    self.assertIn("Observation: Ada", calls[1]["input_messages"][3]["content"])
+                    self.assertNotIn("tools", bodies[1])
+                    if client_type is NativeResponsesLLM:
+                        self.assertEqual(original[OUTPUT_ITEMS_FIELD], responses_items)
+                        self.assertEqual(bodies[1]["input"][2:4], responses_items)
+                        self.assertIn("Observation: Ada", bodies[1]["input"][4]["content"])
+                    elif client_type is NativeAnthropicLLM:
+                        self.assertEqual(original["content"], anthropic_blocks)
+                        self.assertEqual(bodies[1]["messages"][1],
+                                         {"role": "assistant", "content": anthropic_blocks})
+                        self.assertIn("Observation: Ada", bodies[1]["messages"][2]["content"][0]["text"])
+                    else:
+                        self.assertEqual(original[CONTENT_FIELD], gemini_content)
+                        self.assertEqual(bodies[1]["contents"][1], gemini_content)
+                        self.assertIn("Observation: Ada", bodies[1]["contents"][2]["parts"][0]["text"])
+
+    def test_immutable_signed_history_stops_before_truncating_observations(self):
+        first = native(call())
+        first.assistant_message.pop("reasoning_content")
+        first.assistant_message["content"] = [
+            {"type": "thinking", "thinking": "", "signature": "opaque-signed-history"},
+            {"type": "tool_use", "id": "call_1", "name": "evaluate_config", "input": {"x": 1}},
+        ]
+        observation = "preserve-original-observation-" * 1000
+        llm = NativeReplay([first])
+        llm.requires_immutable_history = True
+        result = run_react_loop(
+            llm, {"evaluate_config": lambda _: (observation, .4, 2.)},
+            context="Tune x.", max_steps=3, max_context_tokens=1500,
+            capture_trace_v2=True,
+        )
+        self.assertEqual(len(llm.requests), 1)
+        self.assertEqual(result["termination_reason"], "Context token budget exceeded")
+        self.assertIsNone(result["answer"])
+        captured = result["_trace_v2_capture"]
+        self.assertEqual(captured["llm_calls"][0]["output_message"], first.assistant_message)
+        self.assertIn(observation, captured["tool_calls"][0]["observation"])
+        observed = next(message for message in result["messages"] if message["role"] == "tool")
+        self.assertIn(observation, observed["content"])
+        self.assertNotIn("truncated", observed["content"])
+        # The prior generic policy could fit this same history after truncation.
+        self.assertLess(_estimate_tokens(_trim_messages(result["messages"], 1500)), 1500)
+
+    def test_immutable_history_below_cap_keeps_normal_tool_lifecycle(self):
+        first = native(call())
+        first.assistant_message.pop("reasoning_content")
+        first.assistant_message["content"] = [
+            {"type": "thinking", "thinking": "", "signature": "opaque-signed-history"},
+            {"type": "tool_use", "id": "call_1", "name": "evaluate_config", "input": {"x": 1}},
+        ]
+        llm = NativeReplay([first, LLMOutput('Answer: {"x":1}')])
+        llm.requires_immutable_history = True
+        result = run_react_loop(llm, {"evaluate_config": lambda _: (.4, 2.)},
+                                context="Tune x.", max_steps=3, max_context_tokens=1500,
+                                capture_trace_v2=True)
+        self.assertEqual(result["answer_perf"], .4)
+        self.assertEqual(len(llm.requests), 2)
+        self.assertEqual(llm.requests[1][0][-2], first.assistant_message)
+        self.assertEqual(llm.requests[1][0][-1]["tool_call_id"], "call_1")
+        self.assertEqual(result["protocol_failures"], [])
+
+    def test_generic_native_client_keeps_existing_context_trimming_policy(self):
+        llm = NativeReplay([native(call()), LLMOutput('Answer: {"x":1}')])
+        observation = "original-observation-" * 1000
+        result = run_react_loop(
+            llm, {"evaluate_config": lambda _: (observation, .4, 2.)},
+            context="Tune x.", max_steps=3, max_context_tokens=1500,
+        )
+        self.assertEqual(result["answer_perf"], .4)
+        self.assertEqual(len(llm.requests), 2)
+        self.assertIn("[... truncated ...]", llm.requests[1][0][-1]["content"])
+
     def test_tool_only_response_and_complete_history(self):
         first = native(call())
         llm = NativeReplay([first, LLMOutput('Answer: {"x":1}')])

@@ -6,6 +6,7 @@ flat-string prompts, so chat-tuned LLMs can track their own prior outputs.
 from __future__ import annotations
 
 import copy
+import hashlib
 from contextlib import nullcontext
 import logging
 import math
@@ -218,9 +219,11 @@ def run_react_loop(
     tool_call_traces: List[Dict[str, object]] = []
     protocol_failures: List[Dict[str, object]] = []
     usage_attempts: List[Dict[str, object]] = []
+    context_preparations: List[Dict[str, object]] = []
+    latest_complete_snapshot = ""
 
     def augment_latest_message() -> None:
-        nonlocal prev_augmented_idx
+        nonlocal prev_augmented_idx, latest_complete_snapshot
         if observation_augmenter is None or len(messages) < 2:
             return
         index = len(messages) - 1
@@ -231,20 +234,62 @@ def run_react_loop(
         if not isinstance(content, str):
             raise TypeError("Environment messages must contain text")
         messages[index] = {**message, "content": observation_augmenter(content)}
+        if getattr(observation_augmenter, "requires_complete_context", False):
+            latest_complete_snapshot = observation_augmenter.last_snapshot
+            if not isinstance(latest_complete_snapshot, str):
+                raise TypeError("Complete shared-context snapshot must contain text")
+            if latest_complete_snapshot and not messages[index]["content"].endswith(latest_complete_snapshot):
+                raise ValueError("Shared-context augmenter did not append its declared complete snapshot")
         prev_augmented_idx = index
 
     def prepared_messages() -> Optional[List[Message]]:
+        event: Dict[str, object] = {
+            "preparation_index": len(context_preparations),
+            "history_policy": "append_snapshots_existing_trim_and_drop_groups-v1",
+            "source_message_count": len(messages),
+            "source_serialized_chars": sum(len(json.dumps(m, ensure_ascii=False, allow_nan=False)) for m in messages),
+            "latest_shared_snapshot_chars": len(latest_complete_snapshot),
+            "latest_shared_snapshot_sha256": (hashlib.sha256(latest_complete_snapshot.encode("utf-8")).hexdigest()
+                                               if latest_complete_snapshot else None),
+            "admitted": False,
+        }
+        context_preparations.append(event)
         if max_prompt_tokens is not None and prompt_tokens >= max_prompt_tokens:
+            event["reason"] = "prompt_token_budget"
             return None
         if max_context_tokens is not None:
             message_allowance = max_context_tokens - schema_token_estimate
             if message_allowance < 0:
+                event["reason"] = "tool_schema_context_budget"
                 return None
-            prepared = _trim_messages(messages, message_allowance)
-            if _estimate_tokens(prepared) + schema_token_estimate > max_context_tokens:
-                return None
+            # Signed/encrypted reasoning can be bound to earlier messages and
+            # tool results. Such backends require unchanged history: enforce
+            # the existing context cap by admission, without truncating or
+            # dropping content that a retained reasoning block depends on.
+            prepared = (messages if getattr(llm, "requires_immutable_history", False)
+                        else _trim_messages(messages, message_allowance))
         else:
             prepared = messages
+        event.update(
+            prepared_message_count=len(prepared),
+            prepared_serialized_chars=sum(len(json.dumps(m, ensure_ascii=False, allow_nan=False)) for m in prepared),
+            history_modified=prepared != messages,
+            dropped_message_count=len(messages) - len(prepared),
+        )
+        # Keep exactly the same append/trim/drop history policy as other arms.
+        # A full-peer ablation may not silently send a shortened latest snapshot:
+        # fail admission instead of granting it a different, favorable policy.
+        snapshot_complete = (not latest_complete_snapshot or bool(
+            prepared and isinstance(prepared[-1].get("content"), str)
+            and prepared[-1]["content"].endswith(latest_complete_snapshot)))
+        event["latest_shared_snapshot_complete"] = snapshot_complete
+        if not snapshot_complete:
+            event["reason"] = "latest_shared_snapshot_would_be_truncated"
+            return None
+        if max_context_tokens is not None and _estimate_tokens(prepared) + schema_token_estimate > max_context_tokens:
+            event["reason"] = "context_token_budget"
+            return None
+        event.update(admitted=True, reason=None)
         return copy.deepcopy(prepared)
 
     def generate(send_messages: List[Message], *, forced: bool) -> Tuple[LLMOutput, Dict[str, object]]:
@@ -306,7 +351,10 @@ def run_react_loop(
         return output, record
 
     def record_assistant(output: LLMOutput, record: Dict[str, object], text: str) -> None:
-        if native or output.tool_calls:
+        # The tool protocol controls action parsing, not provider history.
+        # Native transports also need signed/encrypted blocks when their
+        # visible answer contains a textual Action instead of a function call.
+        if native or output.tool_calls or getattr(llm, "requires_immutable_history", False):
             message = copy.deepcopy(record["output_message"])
         else:
             message = {"role": "assistant", "content": text}
@@ -558,6 +606,7 @@ def run_react_loop(
         http_request_attempts=http_request_attempts, usage_attempts=usage_attempts,
         termination_reason=abort_reason if aborted else "Natural answer",
         answer_source=answer_source, answer_score_source=answer_score_source,
+        context_preparations=context_preparations,
     )
     if capture_trace_v2:
         result["_trace_v2_capture"] = {

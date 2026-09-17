@@ -35,6 +35,7 @@ class GenerationOptionsTest(unittest.TestCase):
                 self.assertEqual(args.tool_protocol, "auto")
                 self.assertEqual(args.max_protocol_retries, 1)
                 self.assertEqual(args.tuning_final_policy, "legacy")
+                self.assertEqual(args.prompt_cache_key_field, "prompt_cache_key")
 
     def test_all_cli_accept_portable_protocol_options(self):
         for module in self.PARSERS:
@@ -54,6 +55,7 @@ class GenerationOptionsTest(unittest.TestCase):
             for option, value in (
                 ("--tool-protocol", "guess"), ("--max-protocol-retries", "-1"),
                 ("--max-protocol-retries", "1.5"), ("--tuning-final-policy", "best"),
+                ("--prompt-cache-key-field", "extra_key"),
             ):
                 with self.subTest(cli=module.__name__, option=option, value=value):
                     with mock.patch.object(sys, "stderr", io.StringIO()):
@@ -107,6 +109,7 @@ class GenerationOptionsTest(unittest.TestCase):
                 "--model", "Kimi-K3", "--max-tokens", "4096",
                 "--chat-template-kwargs", '{"enable_thinking":false}',
                 "--reasoning-effort", "high",
+                "--prompt-cache-key-field", "cache_salt",
             ],
         )
         for backend, factory in self.FACTORIES.items():
@@ -116,6 +119,7 @@ class GenerationOptionsTest(unittest.TestCase):
                 self.assertIs(client, build.return_value)
                 self.assertEqual(build.call_args[1]["max_tokens"], 4096)
                 self.assertEqual(build.call_args[1]["reasoning_effort"], "high")
+                self.assertEqual(build.call_args[1]["prompt_cache_key_field"], "cache_salt")
                 self.assertEqual(
                     build.call_args[1]["chat_template_kwargs"],
                     {"enable_thinking": False},

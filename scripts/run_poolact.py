@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Run one ExpGym item with naive, cached, or PoolAct parallel agents."""
+"""Run one ExpGym item with parallel agents and explicit coordination ablations."""
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -39,11 +40,14 @@ from expgym.extras.parallel_cache import (  # noqa: E402
 from expgym.poolact import (  # noqa: E402
     POOLACT_PROTOCOL_VERSION,
     PoolActCoordinator,
+    poolact_protocol_for_strategy,
     aggregate_results as _original_aggregate_results,
     run_agents_parallel,
 )
 from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
-from scripts.run_paper_sweep import _score_check, _score_result  # noqa: E402
+from scripts.run_paper_sweep import (  # noqa: E402
+    _score_check, _score_result, _resolved_budget, _validate_custom_beta,
+)
 from expgym.evaluation_identity import bind_evaluation_identity, evaluation_identity  # noqa: E402
 from expgym.trace_v2 import source_tree_sha256  # noqa: E402
 from expgym.terminal_evidence import TerminalEvidence  # noqa: E402
@@ -52,7 +56,7 @@ from expgym.missing_final import (  # noqa: E402
 )
 
 
-STRATEGIES = ("naive", "cached", "poolact")
+STRATEGIES = ("naive", "cached", "poolact", "graph_no_lock", "peer_context")
 
 
 def aggregate_results(scenario, results, *, answer_evaluator=None):
@@ -182,7 +186,7 @@ def _agent_cache_key(base: Optional[str], strategy: str, agent_id: int) -> Optio
     return prefix[: 64 - len(suffix)] + suffix
 
 
-def _pool_cache_namespace(args: argparse.Namespace) -> Optional[str]:
+def _pool_cache_namespace(args: argparse.Namespace, strategy: Optional[str] = None) -> Optional[str]:
     """Bind an optional routing namespace to one independent pool invocation.
 
     These are provider prompt-cache routing keys, not the observation cache.
@@ -206,6 +210,7 @@ def _pool_cache_namespace(args: argparse.Namespace) -> Optional[str]:
             "data_source": args.data_source,
             "cc_split": args.cc_split,
             "cost_regime": args.cost_regime,
+            "budget": _resolved_budget(args),
             "evaluation_sha256": evaluation.get("sha256") if isinstance(evaluation, dict) else None,
         },
         "pool": {
@@ -224,6 +229,8 @@ def _pool_cache_namespace(args: argparse.Namespace) -> Optional[str]:
         },
         "protocol": {
             "poolact": POOLACT_PROTOCOL_VERSION,
+            "strategy": strategy,
+            "strategy_protocol": poolact_protocol_for_strategy(strategy) if strategy else None,
             "missing_final_policy": getattr(args, "missing_final_policy", "error"),
             **_loop_options(args),
         },
@@ -245,7 +252,7 @@ def _agent_namespace(
     namespace.seed = args.seed + agent_id
     namespace.api_key = api_key
     namespace.prompt_cache_key = _agent_cache_key(
-        _pool_cache_namespace(args),
+        _pool_cache_namespace(args, strategy),
         strategy,
         agent_id,
     )
@@ -257,7 +264,7 @@ def _agent_namespace(
     namespace.list_tuning_tasks = False
     namespace.probes = args.probes
     namespace.time_budget = None
-    namespace.beta = None
+    namespace.beta = getattr(args, "beta", None)
     namespace.baseline = "time_aware"
     namespace._api_dump_context = {
         "runner": "poolact",
@@ -265,7 +272,9 @@ def _agent_namespace(
         "tuning_task": args.tuning_task,
         "question_index": args.question_index,
         "cost_regime": args.cost_regime,
+        "cost_regime_resolved": _resolved_budget(args),
         "strategy": strategy,
+        "strategy_protocol": poolact_protocol_for_strategy(strategy),
         "agent_id": agent_id,
         "seed": namespace.seed,
         "repeat_index": getattr(args, "repeat_index", 0),
@@ -313,8 +322,11 @@ def _resolved_config(
     args: argparse.Namespace,
     time_budget: Optional[float],
 ) -> Dict[str, Any]:
+    budget = _resolved_budget(args)
     return {
         "poolact_protocol": POOLACT_PROTOCOL_VERSION,
+        "strategy_protocols": {strategy: poolact_protocol_for_strategy(strategy)
+                               for strategy in args.strategies},
         "missing_final_policy": getattr(args, "missing_final_policy", "error"),
         "backend": args.backend,
         "model": args.model,
@@ -324,6 +336,9 @@ def _resolved_config(
         "data_source": args.data_source,
         "cc_split": args.cc_split,
         "cost_regime": args.cost_regime,
+        "beta": budget["beta"],
+        "c_base": budget["c_base"],
+        "budget_mode": budget["mode"],
         "time_budget": time_budget,
         "strategies": args.strategies,
         "agents": args.agents,
@@ -342,6 +357,7 @@ def _resolved_config(
         "probes": args.probes,
         "base_url": args.base_url,
         "prompt_cache_key": args.prompt_cache_key,
+        "prompt_cache_key_field": getattr(args, "prompt_cache_key_field", "prompt_cache_key"),
         "vllm_disable_thinking": args.vllm_disable_thinking,
         "request_timeout": args.request_timeout,
         "max_retries": args.max_retries,
@@ -443,6 +459,9 @@ def _load_resumable_result(
             return None
         if existing.get("strategy") != strategy or existing.get("agents") != agents:
             return None
+        expected_protocol = config.get("strategy_protocols", {}).get(strategy)
+        if expected_protocol is not None and existing.get("strategy_protocol") != expected_protocol:
+            return None
         if not _shared_state_is_complete(existing.get("shared_state")):
             return None
         embedded_agents = existing.get("agent_results")
@@ -457,6 +476,9 @@ def _load_resumable_result(
             return None
         for agent_id in range(agents):
             agent = by_id[agent_id]
+            if expected_protocol is not None and (
+                    agent.get("strategy") != strategy or agent.get("strategy_protocol") != expected_protocol):
+                return None
             score_check = agent.get("score_check")
             if not isinstance(score_check, dict) or not terminal_publishable(agent):
                 return None
@@ -507,7 +529,8 @@ def _run_strategy(
     scenario = _SCENARIOS[args.scenario]
     cache = SharedObservationCache() if strategy == "cached" else None
     coordinator = (
-        PoolActCoordinator(args.agents) if strategy == "poolact" else None
+        PoolActCoordinator(args.agents, strategy=strategy)
+        if strategy in ("poolact", "graph_no_lock", "peer_context") else None
     )
     runtimes: Dict[int, Any] = {}
 
@@ -528,7 +551,7 @@ def _run_strategy(
                 overhead_scale=1.0,
                 time_budget=time_budget,
             )
-        elif strategy == "poolact":
+        elif coordinator is not None:
             runtime = coordinator.bind_tools(tools, agent_id, time_budget=time_budget)
             runtimes[agent_id] = runtime
             tools = runtime.tools
@@ -589,6 +612,9 @@ def _run_strategy(
             **_loop_options(namespace),
         )
         result["wall_time_seconds"] = time.perf_counter() - started
+        if getattr(llm, "api_protocol", "chat") != "chat":
+            result["api_protocol"] = llm.api_protocol
+            result["parameter_compatibility"] = copy.deepcopy(llm.parameter_compatibility)
         dump_metadata = getattr(llm, "dump_metadata", None)
         if dump_metadata is not None:
             result["api_dump"] = dict(dump_metadata)
@@ -596,6 +622,8 @@ def _run_strategy(
         result["seed"] = namespace.seed
         result["repeat_index"] = getattr(args, "repeat_index", 0)
         result["strategy"] = strategy
+        result["strategy_protocol"] = poolact_protocol_for_strategy(strategy)
+        result["cost_regime_resolved"] = _resolved_budget(args)
         mark_loop_return(result, args.scenario, getattr(args, "missing_final_policy", "error"))
         result["score_check"] = evidence.score(
             _score_result,
@@ -604,7 +632,7 @@ def _run_strategy(
             answer_evaluator,
         )
         if coordinator is not None and result.get("answer"):
-            coordinator.graph.record_end(agent_id, str(result["answer"]))
+            coordinator.record_end(agent_id, str(result["answer"]))
         return result
 
     def run_agent(agent_id: int) -> Dict[str, Any]:
@@ -623,7 +651,7 @@ def _run_strategy(
             finally:
                 runtime = runtimes.get(agent_id)
                 if runtime is not None:
-                    coordinator.graph.complete_agent_claims(
+                    coordinator.complete_agent_claims(
                         agent_id, completion_time=runtime.clock.now,
                     )
 
@@ -652,6 +680,7 @@ def _run_strategy(
         raise RuntimeError("shared state contains unfinished pending claims")
     response = {
         "strategy": strategy,
+        "strategy_protocol": poolact_protocol_for_strategy(strategy),
         "agents": args.agents,
         "aggregate": aggregate,
         "shared_state": state,
@@ -703,9 +732,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--cc-split", choices=["cc-small", "cc-medium", "cc-large"], default="cc-large")
     parser.add_argument(
         "--cost-regime",
-        choices=["cost_tight", "cost_moderate", "cost_free"],
+        choices=["cost_tight", "cost_moderate", "cost_free", "custom"],
         default="cost_tight",
     )
+    parser.add_argument("--beta", type=float, default=None,
+                        help="Positive finite budget multiplier, only with --cost-regime custom; cost is visible.")
 
     parser.add_argument("--strategies", type=_split_strategies, default=["poolact"])
     parser.add_argument("--agents", type=int, default=2)
@@ -726,7 +757,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("runs/poolact"))
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    try:
+        args.beta = _validate_custom_beta([args.cost_regime], args.beta)
+    except ValueError as exc:
+        parser.error(str(exc))
+    # Also consumed by the study queue's existing cost-regime resolver.
+    args.time_budget = None
+    args.baseline = "time_aware"
+    return args
 
 
 def main(args=None, *, selected_repeat=None) -> int:
@@ -775,11 +814,12 @@ def main(args=None, *, selected_repeat=None) -> int:
             "Set the matching backend API key or pass --api-key."
         )
 
-    c_base = resolve_base_cost(args.scenario, args)
-    time_budget, baselines = resolve_cost_regime(args, c_base)
-    if len(baselines) != 1:
-        raise SystemExit("PoolAct requires one named --cost-regime")
-    mode = baselines[0]
+    try:
+        budget = _resolved_budget(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    time_budget = budget["time_budget"]
+    mode = budget["mode"]
     if args.dry_run:
         configs = []
         for repeat_index in range(args.repeats):

@@ -16,7 +16,7 @@ git clone --single-branch --branch main https://github.com/tiannuo-yang/LLM_ExpG
 
 其他保留分支可能仍引用旧实验历史；下载所有分支不属于轻量主分支的体积范围。
 
-以下为仓库保留的运行与安装说明。代码沿用报告发布时的版本，其来源记录在轻量清单中；这些说明不代表对历史实验重新运行或对后续修补版本的承诺。
+本研究分支已从先前验证的 `5bf4ff7` 执行版本集成运行修补，并增加 GLM scaling、Low thinking 与 PoolAct 消融支持；研究范围见 [GLM follow-ups](docs/glm-followups-study.md)。冻结报告及其数据保持原字节，代码变更不代表重跑或替换历史结果。当前文件身份记录于轻量清单，运行版本另由每次研究的源码身份绑定。以下为运行与安装说明。
 
 One repository, two experiment paths:
 

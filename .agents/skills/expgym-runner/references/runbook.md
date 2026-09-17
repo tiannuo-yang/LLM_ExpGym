@@ -35,6 +35,17 @@ test -n "${SUB2API_API_KEY:-}" && test -n "${SUB2API_BASE_URL:-}"
 
 Do not run `env`, `set`, `printenv`, shell tracing, or commands that print the key. Use the user's explicit model ID; the example names below are not a current availability guarantee. Provider access is account-specific. A real smoke for the intended model is needed before a large new run, not before documentation or offline artifact work.
 
+## Native Gemini tool schemas
+
+With `--api-protocol gemini`, function tools use `parametersJsonSchema`: the
+client deep-copies each original JSON Schema without changing its types, enums
+or constraints. It never sends both `parameters` and `parametersJsonSchema`.
+The same schema remains present during forced final (`NONE`) requests, together
+with the native signed history. Trace `parameter_compatibility` records this
+format and the absence of client schema coercion for every Gemini model ID.
+Validate the intended endpoint with a multi-turn tool smoke before a new study;
+an endpoint rejection does not trigger a fallback to a different schema format.
+
 ## Small real validation
 
 Start with small limits, but cover every relevant path. These examples make actual external calls:

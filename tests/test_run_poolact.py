@@ -46,6 +46,7 @@ class PoolActCliTest(unittest.TestCase):
             ("max_protocol_retries", 0),
             ("tuning_final_policy", "submitted"),
             ("repeats", 2),
+            ("prompt_cache_key_field", "cache_salt"),
         ):
             with self.subTest(option=name), mock.patch.object(args, name, value):
                 changed = run_poolact._resolved_config(args, time_budget=300.0)
@@ -71,6 +72,16 @@ class PoolActCliTest(unittest.TestCase):
         }
         self.assertEqual(len(keys), 4)
         self.assertTrue(all(key is not None and len(key) <= 64 for key in keys))
+
+    def test_cache_field_is_recorded_and_does_not_rederive_agent_namespace(self):
+        args = run_poolact.parse_args(["--prompt-cache-key", "same-study",
+                                       "--prompt-cache-key-field", "cache_salt", "--agents", "4"])
+        salted = run_poolact._agent_namespace(args, "poolact", 0, None)
+        self.assertEqual(salted.prompt_cache_key_field, "cache_salt")
+        self.assertEqual(run_poolact._resolved_config(args, None)["prompt_cache_key_field"], "cache_salt")
+        args.prompt_cache_key_field = "prompt_cache_key"
+        original = run_poolact._agent_namespace(args, "poolact", 0, None)
+        self.assertEqual(salted.prompt_cache_key, original.prompt_cache_key)
 
     def test_strategy_parser_rejects_unknown_value(self):
         with self.assertRaisesRegex(Exception, "unknown strategies"):
@@ -164,6 +175,8 @@ class PoolActCliTest(unittest.TestCase):
                 {
                     "agent_id": agent_id, "seed": args.seed + agent_id,
                     "repeat_index": args.repeat_index, "answer": answer,
+                    "strategy": strategy,
+                    "strategy_protocol": run_poolact.poolact_protocol_for_strategy(strategy),
                     "answer_perf": evaluator(answer), "score_check": {"ok": True},
                     "termination_reason": "answer", "answer_source": "model",
                     "answer_score_source": "answer_evaluator",
@@ -173,6 +186,7 @@ class PoolActCliTest(unittest.TestCase):
             ]
             return {
                 "strategy": strategy, "agents": args.agents, "shared_state": None,
+                "strategy_protocol": run_poolact.poolact_protocol_for_strategy(strategy),
                 "agent_results": agents,
                 "aggregate": run_poolact.aggregate_results(
                     args.scenario, agents, answer_evaluator=evaluator,

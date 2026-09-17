@@ -84,7 +84,7 @@ class PoolActCacheNamespaceTests(unittest.TestCase):
                     self.assertLessEqual(len(key), 64)
                     self.assertRegex(key, r"^[A-Za-z0-9_.-]+$")
                     keys.add(key)
-        self.assertEqual(len(keys), 36)
+        self.assertEqual(len(keys), 3 * len(run_poolact.STRATEGIES) * 4)
 
     def test_generation_mapping_order_and_output_relocation_are_stable(self):
         args = self.make_args()

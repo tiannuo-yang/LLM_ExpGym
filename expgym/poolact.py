@@ -28,16 +28,32 @@ from expgym.extras.parallel_cache import (
     SharedExplorationGraph,
     SharedExplorationLedger,
     SharedObservationCache,
+    SharedPeerContext,
     make_graph_augmenter,
     make_ledger_augmenter,
     make_pre_tool_hook,
+    make_peer_context_augmenter,
     wrap_tools_with_cache,
     wrap_tools_with_ledger,
     wrap_tools_with_polact,
     wrap_tools_with_poolact,
+    wrap_tools_with_peer_context,
 )
 
-POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v3"
+POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v4"
+GRAPH_NO_LOCK_PROTOCOL_VERSION = "paper-graph-no-lock-v1"
+PEER_CONTEXT_PROTOCOL_VERSION = "full-peer-context-v1"
+
+
+def poolact_protocol_for_strategy(strategy: str) -> str:
+    """Identify the actual coordination mechanism, independently of source SHA."""
+    return {
+        "naive": "independent-agents-v1",
+        "cached": "shared-observation-cache-v1",
+        "poolact": POOLACT_PROTOCOL_VERSION,
+        "graph_no_lock": GRAPH_NO_LOCK_PROTOCOL_VERSION,
+        "peer_context": PEER_CONTEXT_PROTOCOL_VERSION,
+    }[strategy]
 
 
 @dataclass
@@ -47,23 +63,29 @@ class PoolActAgentRuntime:
     tools: Dict[str, Callable]
     clock: AgentClock
     observation_augmenter: Callable[[str], str]
-    pre_tool_hook: Callable[[str, str], None]
-    reasoning_lock: threading.Lock
+    pre_tool_hook: Optional[Callable[[str, str], None]]
+    reasoning_lock: Optional[Any]
 
 
 class PoolActCoordinator:
     """Own the shared state for one N-agent PoolAct run."""
 
-    def __init__(self, n_agents: int, *, diversity_mode: bool = True) -> None:
+    def __init__(self, n_agents: int, *, diversity_mode: bool = True,
+                 strategy: str = "poolact") -> None:
         if n_agents < 1:
             raise ValueError("n_agents must be at least 1")
+        if strategy not in ("poolact", "graph_no_lock", "peer_context"):
+            raise ValueError("Coordinator strategy must be poolact, graph_no_lock, or peer_context")
         self.n_agents = n_agents
+        self.strategy = strategy
+        self.protocol_version = poolact_protocol_for_strategy(strategy)
         self.cache = SharedObservationCache()
-        self.graph = SharedExplorationGraph(
+        self.graph = None if strategy == "peer_context" else SharedExplorationGraph(
             n_agents=n_agents,
             diversity_mode=diversity_mode,
         )
-        self.reasoning_lock = threading.Lock()
+        self.peer_context = SharedPeerContext() if strategy == "peer_context" else None
+        self.reasoning_lock = threading.Lock() if strategy == "poolact" else None
 
     def bind_tools(
         self,
@@ -83,6 +105,20 @@ class PoolActCoordinator:
                 f"agent_id must be in [0, {self.n_agents}), got {agent_id}"
             )
         clock = AgentClock()
+        if self.peer_context is not None:
+            return PoolActAgentRuntime(
+                tools=wrap_tools_with_peer_context(
+                    tools, self.cache, self.peer_context, agent_id,
+                    clock=clock, overhead_scale=overhead_scale, time_budget=time_budget,
+                ),
+                clock=clock,
+                observation_augmenter=make_peer_context_augmenter(
+                    self.peer_context, clock=clock, agent_id=agent_id,
+                    time_budget=time_budget,
+                ),
+                pre_tool_hook=None,
+                reasoning_lock=None,
+            )
         wrapped = wrap_tools_with_poolact(
             tools,
             self.cache,
@@ -111,7 +147,18 @@ class PoolActCoordinator:
 
     def stats(self) -> Dict[str, Dict[str, Any]]:
         """Return a serializable snapshot of the shared state."""
+        if self.peer_context is not None:
+            return {"cache": self.cache.stats(), "peer_context": self.peer_context.stats()}
         return {"cache": self.cache.stats(), "graph": self.graph.stats()}
+
+    def complete_agent_claims(self, agent_id: int, *, completion_time: float) -> None:
+        """Close graph claims on every exit; peer context publishes no claims."""
+        if self.graph is not None:
+            self.graph.complete_agent_claims(agent_id, completion_time=completion_time)
+
+    def record_end(self, agent_id: int, answer: str) -> None:
+        if self.graph is not None:
+            self.graph.record_end(agent_id, answer)
 
 
 def run_agents_parallel(
@@ -365,16 +412,22 @@ __all__ = [
     "PoolActAgentRuntime",
     "PoolActCoordinator",
     "POOLACT_PROTOCOL_VERSION",
+    "GRAPH_NO_LOCK_PROTOCOL_VERSION",
+    "PEER_CONTEXT_PROTOCOL_VERSION",
     "SharedExplorationGraph",
     "SharedExplorationLedger",
     "SharedObservationCache",
+    "SharedPeerContext",
     "aggregate_results",
     "make_graph_augmenter",
     "make_ledger_augmenter",
     "make_pre_tool_hook",
+    "make_peer_context_augmenter",
+    "poolact_protocol_for_strategy",
     "run_agents_parallel",
     "wrap_tools_with_cache",
     "wrap_tools_with_ledger",
     "wrap_tools_with_polact",
     "wrap_tools_with_poolact",
+    "wrap_tools_with_peer_context",
 ]

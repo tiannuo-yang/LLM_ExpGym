@@ -82,6 +82,59 @@ class OpenAICompatibleLLMTest(unittest.TestCase):
         self.assertEqual(body["top_p"], 1.0)
         self.assertEqual(body["seed"], 1206)
         self.assertEqual(body["prompt_cache_key"], "expgym-task-abc-v1")
+        self.assertNotIn("cache_salt", body)
+
+    def test_explicit_cache_field_sends_exactly_one_existing_namespace(self) -> None:
+        for field in ("prompt_cache_key", "cache_salt"):
+            for key in (None, "fixed-job-agent-namespace"):
+                with self.subTest(field=field, key=key):
+                    transport = _CaptureTransport({"choices": [{"message": {"content": "Ok"}}]})
+                    llm = OpenAICompatibleLLM(api_key="test", model="opaque-model", transport=transport,
+                                             prompt_cache_key=key, prompt_cache_key_field=field)
+                    llm.generate("Hi")
+                    body = json.loads(transport.request.data)
+                    self.assertEqual(asdict(llm.config)["prompt_cache_key_field"], field)
+                    self.assertNotIn("cache_salt" if field == "prompt_cache_key" else "prompt_cache_key", body)
+                    if key is None:
+                        self.assertNotIn(field, body)
+                    else:
+                        self.assertEqual(body[field], key)
+
+    def test_default_cache_field_preserves_request_bytes(self) -> None:
+        bodies = []
+        for options in ({}, {"prompt_cache_key_field": "prompt_cache_key"}):
+            transport = _CaptureTransport({"choices": [{"message": {"content": "Ok"}}]})
+            llm = OpenAICompatibleLLM(api_key="test", model="opaque-model", transport=transport,
+                                     prompt_cache_key="same-existing-namespace", **options)
+            llm.generate("Identical input")
+            bodies.append(transport.request.data)
+        self.assertEqual(bodies[0], bodies[1])
+
+    def test_cache_field_is_stable_across_retries_and_turns(self) -> None:
+        requests = []
+
+        def transport(request, timeout):
+            requests.append(request.data)
+            if len(requests) == 1:
+                raise urllib.error.URLError("offline retry fixture")
+            return b'{"choices":[{"message":{"content":"Ok"}}]}'
+
+        llm = OpenAICompatibleLLM(api_key="test", model="opaque-model", transport=transport,
+                                 prompt_cache_key="same-namespace", prompt_cache_key_field="cache_salt",
+                                 max_retries=1, retry_base_seconds=0, retry_max_seconds=0)
+        llm.generate("First")
+        llm.generate("Second")
+        self.assertEqual(requests[0], requests[1])
+        self.assertEqual(len(requests), 3)
+        for request in requests:
+            body = json.loads(request)
+            self.assertEqual(body["cache_salt"], "same-namespace")
+            self.assertNotIn("prompt_cache_key", body)
+
+    def test_unknown_cache_field_rejected_before_transport(self) -> None:
+        for field in (None, "", "extra_key", "model-specific", [], {}):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "prompt_cache_key_field"):
+                OpenAICompatibleLLM(api_key="test", prompt_cache_key_field=field)
 
     def test_prompt_cache_key_is_omitted_when_unset(self) -> None:
         transport = _CaptureTransport({"choices": [{"message": {"content": "Ok"}}]})

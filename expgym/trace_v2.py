@@ -380,6 +380,7 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
         "regime": result["job"].get("cost_regime"),
         "mode": cost.get("mode"),
         "base_cost_seconds": cost.get("c_base"),
+        "beta": cost.get("beta"),
         "limit_seconds": cost.get("time_budget"),
     }
     task["limits"] = runtime.get("limits") or {}
@@ -418,7 +419,7 @@ def _schema_errors(value: Any, rule: Dict[str, Any], schema: Dict[str, Any], pat
     """
     supported = {"$schema", "$id", "$defs", "$ref", "title", "description", "type", "const",
                  "enum", "required", "properties", "additionalProperties", "items", "oneOf",
-                 "anyOf", "allOf", "not", "minimum", "maximum", "minLength"}
+                 "anyOf", "allOf", "not", "minimum", "maximum", "exclusiveMinimum", "minLength"}
     unknown = set(rule) - supported
     if unknown:
         raise ValueError("Unsupported trace schema keywords: " + str(sorted(unknown)))
@@ -469,6 +470,8 @@ def _schema_errors(value: Any, rule: Dict[str, Any], schema: Dict[str, Any], pat
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in rule and value < rule["minimum"]:
             errors.append(f"{path} is below its minimum")
+        if "exclusiveMinimum" in rule and value <= rule["exclusiveMinimum"]:
+            errors.append(f"{path} is not above its exclusive minimum")
         if "maximum" in rule and value > rule["maximum"]:
             errors.append(f"{path} exceeds its maximum")
     return errors

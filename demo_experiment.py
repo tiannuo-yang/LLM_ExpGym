@@ -115,9 +115,38 @@ def build_llm(
     system_prompt: str | None = None,
 ) -> LLMBackend:
     prompt_cache_key = getattr(args, "prompt_cache_key", None)
+    prompt_cache_key_field = getattr(args, "prompt_cache_key_field", "prompt_cache_key")
     if backend == "fake":
         final_answer = plan[-1][1] if plan else None
         return FakeLLM(plan=plan, final_answer=final_answer)
+    api_protocol = getattr(args, "api_protocol", "chat")
+    if api_protocol != "chat":
+        if backend not in {"sub2api", "openai"}:
+            raise ValueError("Native API protocols require the sub2api or openai backend")
+        if api_protocol == "responses":
+            from expgym.native_responses_client import NativeResponsesLLM
+            client_type = NativeResponsesLLM
+        elif api_protocol == "anthropic":
+            from expgym.native_anthropic_client import NativeAnthropicLLM
+            client_type = NativeAnthropicLLM
+        elif api_protocol == "gemini":
+            from expgym.native_gemini_client import NativeGeminiLLM
+            client_type = NativeGeminiLLM
+        else:
+            raise ValueError("Unknown API protocol: " + api_protocol)
+        key_env = "SUB2API_API_KEY" if backend == "sub2api" else "OPENAI_API_KEY"
+        url_env = "SUB2API_BASE_URL" if backend == "sub2api" else "OPENAI_BASE_URL"
+        return client_type(
+            api_key=args.api_key or os.getenv(key_env),
+            model=args.model,
+            system_prompt=system_prompt,
+            temperature=getattr(args, "temperature", 0.0),
+            seed=args.seed,
+            base_url=args.base_url or os.getenv(url_env),
+            prompt_cache_key=prompt_cache_key,
+            **_generation_options(args, backend=backend),
+            **_transport_options(args),
+        )
     if backend == "openai":
         from expgym.llm_clients import OpenAICompatibleLLM
 
@@ -129,6 +158,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -143,6 +173,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -159,6 +190,7 @@ def build_llm(
             referer=args.openrouter_referer,
             title=args.openrouter_title,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -173,6 +205,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -187,6 +220,7 @@ def build_llm(
             seed=args.seed,
             base_url=args.base_url,
             prompt_cache_key=prompt_cache_key,
+            prompt_cache_key_field=prompt_cache_key_field,
             **_generation_options(args, backend=backend),
             **_transport_options(args),
         )
@@ -205,13 +239,16 @@ def _generation_options(
         if chat_kwargs.get("enable_thinking") not in (None, False):
             raise ValueError("--vllm-disable-thinking conflicts with chat_template_kwargs.enable_thinking")
         chat_kwargs["enable_thinking"] = False
-    return {
+    options = {
         "max_tokens": getattr(args, "max_tokens", None),
         "top_p": getattr(args, "top_p", 1.0),
         "top_k": getattr(args, "top_k", None),
         "chat_template_kwargs": chat_kwargs,
         "reasoning_effort": getattr(args, "reasoning_effort", None),
     }
+    if getattr(args, "api_protocol", "chat") != "chat":
+        options["api_protocol"] = args.api_protocol
+    return options
 
 
 def _loop_options(args: argparse.Namespace) -> Dict[str, object]:
@@ -224,6 +261,13 @@ def _loop_options(args: argparse.Namespace) -> Dict[str, object]:
 
 
 def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--prompt-cache-key-field", choices=["prompt_cache_key", "cache_salt"],
+        default="prompt_cache_key",
+        help="Explicit provider field for the existing prompt-cache namespace; cache_salt for compatible SGLang servers. Never inferred from model name.",
+    )
+    parser.add_argument("--api-protocol", choices=["chat", "responses", "anthropic", "gemini"], default="chat",
+                        help="Explicit wire API; native adapters preserve provider reasoning state and record parameter omissions.")
     parser.add_argument("--missing-final-policy", choices=["error", "task-abstention-v1"], default="error",
                         help="Explicit post-loop missing-answer policy; does not change model requests or budgets.")
     def positive_integer(value: str) -> int:

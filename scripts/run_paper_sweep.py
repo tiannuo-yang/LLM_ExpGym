@@ -111,6 +111,42 @@ class Job:
     data_source: Optional[str] = None
     cc_split: str = "cc-large"
     hypothesis_order: Optional[List[str]] = None
+    beta: Optional[float] = None
+
+
+def _validate_custom_beta(cost_regimes: Sequence[str], beta: Optional[float]) -> Optional[float]:
+    """Require one explicit, finite custom multiplier; never override a preset."""
+    if "custom" not in cost_regimes:
+        if beta is not None:
+            raise ValueError("--beta requires the custom cost regime; preset budgets cannot be overridden")
+        return None
+    if list(cost_regimes) != ["custom"]:
+        raise ValueError("the custom cost regime must be selected alone with --beta")
+    if isinstance(beta, bool) or not isinstance(beta, (int, float)) or not math.isfinite(beta) or beta <= 0:
+        raise ValueError("the custom cost regime requires a positive finite --beta")
+    return float(beta)
+
+
+def _resolved_budget(args: argparse.Namespace) -> Dict[str, Any]:
+    """Resolve the single time-aware custom budget without changing preset semantics."""
+    beta = _validate_custom_beta([args.cost_regime], getattr(args, "beta", None))
+    if getattr(args, "time_budget", None) is not None:
+        raise ValueError("these runners accept --beta, not a separate time_budget override")
+    c_base = resolve_base_cost(args.scenario, args)
+    namespace = argparse.Namespace(cost_regime=args.cost_regime, beta=beta,
+                                  time_budget=None, baseline="time_aware")
+    time_budget, baselines = resolve_cost_regime(namespace, c_base)
+    if time_budget is not None and (not math.isfinite(time_budget) or time_budget <= 0):
+        raise ValueError("resolved time budget must be positive and finite")
+    effective_beta = beta if args.cost_regime == "custom" else COST_REGIMES[args.cost_regime]["beta"]
+    return {"mode": baselines[0], "c_base": c_base,
+            # JSON null denotes the unbounded cost_free preset.
+            "beta": None if math.isinf(effective_beta) else effective_beta,
+            "time_budget": time_budget}
+
+
+def _job_budget(job: Job) -> Dict[str, Any]:
+    return _resolved_budget(argparse.Namespace(**asdict(job)))
 
 
 def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object]:
@@ -159,6 +195,7 @@ def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object
         "namespace": namespace,
         "backend": getattr(args, "backend", "openrouter"),
         "job": asdict(job),
+        "budget": _job_budget(job),
         "generation": {
             "temperature": temperature,
             "max_tokens": getattr(args, "max_tokens", None),
@@ -166,6 +203,7 @@ def _prompt_cache_config(args: argparse.Namespace, job: Job) -> Dict[str, object
             "top_k": getattr(args, "top_k", None),
             "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
             "reasoning_effort": getattr(args, "reasoning_effort", None),
+            "api_protocol": getattr(args, "api_protocol", "chat"),
             "max_steps": args.max_steps,
             "max_evaluations": args.max_evals,
         },
@@ -328,6 +366,7 @@ def _build_jobs(args: argparse.Namespace) -> List[Job]:
     for regime in cost_regimes:
         if regime not in COST_REGIMES:
             raise ValueError(f"Unknown cost regime {regime!r}; choose from {list(COST_REGIMES)}")
+    beta = _validate_custom_beta(cost_regimes, getattr(args, "beta", None))
 
     jobs: List[Job] = []
     for model_alias, model_id in models:
@@ -341,6 +380,7 @@ def _build_jobs(args: argparse.Namespace) -> List[Job]:
                                 model_alias=model_alias,
                                 model_id=model_id,
                                 cost_regime=cost_regime,
+                                beta=beta,
                                 rep=rep,
                                 seed=args.seed + rep,
                                 tuning_task=task,
@@ -355,6 +395,7 @@ def _build_jobs(args: argparse.Namespace) -> List[Job]:
                                 model_alias=model_alias,
                                 model_id=model_id,
                                 cost_regime=cost_regime,
+                                beta=beta,
                                 rep=rep,
                                 seed=args.seed + rep,
                                 question_index=idx,
@@ -370,6 +411,7 @@ def _build_jobs(args: argparse.Namespace) -> List[Job]:
                                 model_alias=model_alias,
                                 model_id=model_id,
                                 cost_regime=cost_regime,
+                                beta=beta,
                                 rep=rep,
                                 seed=args.seed + rep,
                                 question_index=idx,
@@ -386,7 +428,13 @@ def _build_jobs(args: argparse.Namespace) -> List[Job]:
 
 def _trace_path(output_dir: Path, job: Job, trace_format: str = "v1") -> Path:
     trace_dir = "traces-v2" if trace_format == "v2" else "traces"
-    base = output_dir / f"{job.model_alias}_{REGIME_DIR[job.cost_regime]}" / trace_dir
+    if job.cost_regime == "custom":
+        beta = _validate_custom_beta([job.cost_regime], job.beta)
+        # repr preserves distinct finite float values; :g would round nearby budgets together.
+        regime_dir = "custom_beta_" + repr(beta)
+    else:
+        regime_dir = REGIME_DIR[job.cost_regime]
+    base = output_dir / f"{job.model_alias}_{regime_dir}" / trace_dir
     if job.scenario == "tuning":
         name = f"tuning_{_sanitize(job.tuning_task)}_r{job.rep}_s{job.seed}.json"
     elif job.scenario == "restricted_search":
@@ -463,17 +511,20 @@ def _namespace_for_job(
     ns.top_k = getattr(args, "top_k", None)
     ns.chat_template_kwargs = getattr(args, "chat_template_kwargs", None)
     ns.reasoning_effort = getattr(args, "reasoning_effort", None)
+    ns.api_protocol = getattr(args, "api_protocol", "chat")
     ns.missing_final_policy = getattr(args, "missing_final_policy", "error")
     for name, value in _loop_options(args).items():
         setattr(ns, name, value)
     ns._api_dump_context = {
         "runner": "expgym",
         "job": asdict(job),
+        "cost_regime_resolved": _job_budget(job),
         "trace_path": str(_trace_path(args.output_dir, job, getattr(args, "trace_format", "v1"))),
     }
     ns.base_url = args.base_url
     ns.prompt_cache = _prompt_cache_config(args, job)
     ns.prompt_cache_key = ns.prompt_cache["key"]
+    ns.prompt_cache_key_field = getattr(args, "prompt_cache_key_field", "prompt_cache_key")
     ns.trace_format = getattr(args, "trace_format", "v1")
     ns.probes = 4
     ns.max_steps = args.max_steps
@@ -484,8 +535,8 @@ def _namespace_for_job(
     ns.retry_base_seconds = getattr(args, "retry_base_seconds", 3.0)
     ns.retry_max_seconds = getattr(args, "retry_max_seconds", 120.0)
     ns.cost_regime = job.cost_regime
-    ns.beta = None
-    ns.baseline = "both"
+    ns.beta = job.beta
+    ns.baseline = "time_aware"
     ns.question_index = job.question_index
     ns.tuning_task = job.tuning_task
     ns.list_tuning_tasks = False
@@ -511,6 +562,7 @@ def _resume_key(
         "backend": args.backend,
         "base_url": args.base_url,
         "job": asdict(job),
+        "budget": _job_budget(job),
         "temperature": (
             args.temperature_tuning
             if job.scenario == "tuning"
@@ -523,9 +575,11 @@ def _resume_key(
         "top_k": getattr(args, "top_k", None),
         "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
         "reasoning_effort": getattr(args, "reasoning_effort", None),
+        "api_protocol": getattr(args, "api_protocol", "chat"),
         "protocol": _loop_options(args),
         "evaluation_identity": evaluation if evaluation is not None else _job_evaluation_identity(args, job),
         "prompt_cache": _prompt_cache_config(args, job),
+        "prompt_cache_key_field": getattr(args, "prompt_cache_key_field", "prompt_cache_key"),
         "transport": {
             "timeout": getattr(args, "request_timeout", 600.0),
             "max_retries": getattr(args, "max_retries", 10),
@@ -615,11 +669,9 @@ def _run_job_with_evidence(
     bind_evaluation_identity(input_identity)
     random.seed(ns.seed)
     scenario = _SCENARIOS[job.scenario]
-    c_base = resolve_base_cost(job.scenario, ns)
-    time_budget, baselines = resolve_cost_regime(ns, c_base)
-    if len(baselines) != 1:
-        raise RuntimeError(f"Expected one baseline for {job.cost_regime}, got {baselines}")
-    mode = baselines[0]
+    budget = _resolved_budget(ns)
+    time_budget = budget["time_budget"]
+    mode = budget["mode"]
     include_overhead = mode == "time_focus"
     include_cost = mode == "time_aware"
     system_prompt = _resolve_system_prompt(scenario, include_overhead, ns)
@@ -656,11 +708,7 @@ def _run_job_with_evidence(
     # Readable in legacy v1; v2 additionally records the actual client config.
     result["generation_options"] = _generation_options(ns)
     result["evaluation_identity"] = input_identity
-    result["cost_regime_resolved"] = {
-        "mode": mode,
-        "c_base": c_base,
-        "time_budget": time_budget,
-    }
+    result["cost_regime_resolved"] = budget
     mark_loop_return(result, job.scenario, getattr(ns, "missing_final_policy", "error"))
     result["score_check"] = evidence.score(_score_result, result, tools, answer_evaluator)
     if evaluation_identity(ns, REPO_ROOT) != input_identity:
@@ -671,11 +719,18 @@ def _run_job_with_evidence(
         model = config.pop("model", ns.model)
         base_url = config.pop("base_url", ns.base_url)
         prompt_cache_key = config.pop("prompt_cache_key", None)
+        prompt_cache_key_field = config.pop("prompt_cache_key_field", ns.prompt_cache_key_field)
         prompt_cache = dict(ns.prompt_cache)
         if prompt_cache.get("key") != prompt_cache_key:
             raise RuntimeError("effective prompt cache key metadata mismatch")
+        if prompt_cache_key_field != ns.prompt_cache_key_field:
+            raise RuntimeError("effective prompt cache field metadata mismatch")
+        prompt_cache["key_field"] = prompt_cache_key_field
         timeout = config.pop("timeout", None)
         config.pop("system_prompt", None)
+        if getattr(llm, "api_protocol", "chat") != "chat":
+            config["api_protocol"] = llm.api_protocol
+            config["parameter_compatibility"] = llm.parameter_compatibility
         extra_headers = config.pop("extra_headers", {}) or {}
         max_retries = config.pop("max_retries", ns.max_retries)
         retry_base_seconds = config.pop(
@@ -978,6 +1033,7 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
         "top_k": getattr(args, "top_k", None),
         "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
         "reasoning_effort": getattr(args, "reasoning_effort", None),
+        "api_protocol": getattr(args, "api_protocol", "chat"),
         "protocol": _loop_options(args),
         "max_steps": args.max_steps,
         "max_evals": args.max_evals,
@@ -988,6 +1044,7 @@ def _print_dry_run(jobs: Sequence[Job], args: argparse.Namespace) -> None:
     print("First jobs:")
     for job in jobs[: min(10, len(jobs))]:
         preview = asdict(job)
+        preview["cost_regime_resolved"] = _job_budget(job)
         preview["prompt_cache"] = _prompt_cache_config(args, job)
         print(json.dumps(preview, sort_keys=True))
 
@@ -1024,6 +1081,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument("--scenarios", default=DEFAULT_SCENARIOS)
     parser.add_argument("--cost-regimes", default=DEFAULT_COST_REGIMES)
+    parser.add_argument("--beta", type=float, default=None,
+                        help="Positive finite budget multiplier, only with --cost-regimes custom; cost is visible.")
     parser.add_argument(
         "--tuning-tasks",
         default=DEFAULT_TUNING_TASKS,
@@ -1093,7 +1152,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--shuffle", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    try:
+        args.beta = _validate_custom_beta(_split_csv(args.cost_regimes), args.beta)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def main(args=None, *, selected_job=None) -> int:
@@ -1121,6 +1185,9 @@ def main(args=None, *, selected_job=None) -> int:
         if getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be at least 1")
     try:
+        _validate_custom_beta(_split_csv(args.cost_regimes), getattr(args, "beta", None))
+        if selected_job is not None and selected_job.beta != getattr(args, "beta", None):
+            raise ValueError("selected job beta does not match the requested --beta")
         jobs = _build_jobs(args) if selected_job is None else [selected_job]
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

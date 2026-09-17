@@ -106,6 +106,8 @@ def make_plan(matrix, *, study_id, output_root, default_python, endpoints=()):
             if runner == "poolact":
                 job_args.update(questions=None, question_index=selection["question_index"],
                                 strategies=[selection["strategy"]])
+            budget = (sweep._job_budget(sweep.Job(**selection)) if runner == "expgym"
+                      else pool._resolved_budget(args))
             # User cache namespace remains an input to identity; actual namespace
             # additionally binds study + full invocation, even when seed repeats.
             identity_args = {key: value for key, value in job_args.items()
@@ -113,6 +115,7 @@ def make_plan(matrix, *, study_id, output_root, default_python, endpoints=()):
                                  else key != "repeats")}
             identity = {"study_id": study_id, "runner": runner, "args": identity_args,
                         "selection": selection, "python": python,
+                        "budget": budget,
                         "source_tree_sha256": plan["source_tree_sha256"],
                         "endpoints": stage_endpoints}
             job_id = "job_" + digest(identity)
@@ -124,7 +127,9 @@ def make_plan(matrix, *, study_id, output_root, default_python, endpoints=()):
                             terminal_evidence_dir=None, resume=False)
             if runner == "expgym":
                 # Fake has no API config/cache field; do not claim it sent one.
-                job_args["prompt_cache_scope"] = "disabled" if args.backend == "fake" else "job"
+                job_args["prompt_cache_scope"] = (
+                    "disabled" if args.backend == "fake" or args.prompt_cache_scope == "disabled" else "job"
+                )
             plan["jobs"].append({"job_id": job_id, "stage": label, "runner": runner,
                                  "identity": identity, "args": job_args,
                                  "selection": selection, "python": python,
@@ -146,8 +151,7 @@ def verify_result(job, args):
         args._evaluation_identity = pool.evaluation_identity(args, REPO_ROOT)
         pool.bind_evaluation_identity(args._evaluation_identity)
         scenario = pool._SCENARIOS[args.scenario]
-        cost = pool.resolve_base_cost(args.scenario, args)
-        budget, _ = pool.resolve_cost_regime(args, cost)
+        budget = pool._resolved_budget(args)["time_budget"]
         strategy = job["selection"]["strategy"]
         result = pool._load_resumable_result(
             args.output_dir / strategy / "result.json", item_output_dir=args.output_dir,

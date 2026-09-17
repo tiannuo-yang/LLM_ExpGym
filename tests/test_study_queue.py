@@ -152,6 +152,19 @@ class QueueTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'duplicate logical'):
             make_plan(duplicate, study_id='fake', output_root=self.root, default_python=sys.executable)
 
+    def test_cache_field_is_bound_into_both_runner_plan_identities(self):
+        matrix = self.matrix()
+        original = make_plan(matrix, study_id='cache-field', output_root=self.root, default_python=sys.executable)
+        for stage in matrix['stages']:
+            stage['args'] += ['--prompt-cache-key-field', 'cache_salt']
+        changed = make_plan(matrix, study_id='cache-field', output_root=self.root, default_python=sys.executable)
+        for before, after in zip(original['jobs'], changed['jobs']):
+            self.assertEqual(before['selection'], after['selection'])
+            self.assertEqual(before['args']['prompt_cache_key_field'], 'prompt_cache_key')
+            self.assertEqual(after['args']['prompt_cache_key_field'], 'cache_salt')
+            self.assertEqual(after['identity']['args']['prompt_cache_key_field'], 'cache_salt')
+            self.assertNotEqual(before['job_id'], after['job_id'])
+
     def test_overlapping_stage_selectors_cannot_duplicate_same_job(self):
         matrix = {'stages': [
             {'label':'wide', 'runner':'expgym', 'args':[
