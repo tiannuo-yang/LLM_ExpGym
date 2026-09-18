@@ -103,9 +103,16 @@ def main():
         after['metrics'] = json.loads(after['metrics_json'])
     old_groups, new_groups = merger.group_slots(old), merger.group_slots(new)
     if args.adoption_state == 'official':
-        assert args.fairness_manifest, 'Official adoption requires an explicit HPO fairness decision'
+        assert args.fairness_manifest, 'Official adoption requires the total runtime adoption gate'
         fairness = json.loads(args.fairness_manifest.read_text())
         assert fairness.get('status') == 'PASS' and fairness.get('adoption_ready') is True
+        assert fairness.get('total_main_runtime_adoption') is True, 'HPO-only readiness does not cover the additional Search/Audit control-flow runs'
+        assert fairness.get('hpo_stage_ready') is True and fairness.get('auxiliary_stage_ready') is True
+        for complete,required in [('hpo_verified_pools','hpo_required_pools'),('auxiliary_verified_main_slots','auxiliary_required_main_slots'),('auxiliary_verified_members','auxiliary_required_members')]:
+            assert isinstance(fairness.get(required),int) and fairness[required]>0 and fairness.get(complete)==fairness[required],(complete,required)
+        sweep=fairness.get('sweep_control_gate',{})
+        if sweep.get('required'):
+            assert sweep.get('status')=='PASS' and sweep.get('verified_slots')==sweep.get('registered_slots') and sweep.get('registered_slots',0)>0,'Registered standalone sweep controls are not ready'
     else:
         fairness = json.loads(args.fairness_manifest.read_text()) if args.fairness_manifest else None
     args.output.mkdir(parents=True)
@@ -189,7 +196,9 @@ def main():
     write_csv(args.output / 'conclusion_changes.csv', conclusions)
     versions = dict(historical={'identity': 'published-297c3d0-historical-scoring', 'commit': '297c3d00a006f33fc5a8ca799ce91d327d92839e', 'preserved': True},
                     diagnostic={'identity': 'review-20260918-diagnostic-only', 'adopted': False, 'scope': 'Earlier exploratory parser/vote diagnostics, not the new full-cohort rescore'},
+                    existing_trace_rescored={'identity':'existing-trace-rescore-v1','source':'../rescore/main/slot_scalars.csv','scope':'All 4698 historical main traces under the repaired scorer; actual runtime actions remain historical. Distinct from both earlier exploratory diagnostics and the final runtime replacement cohort.'},
                     new={'identity': args.score_identity, 'code_commit': args.code_commit, 'adoption_state': args.adoption_state, 'full_cohort_recomputed': True},
+                    runtime_fairness=fairness,
                     hpo_fairness=fairness,
                     known_remaining_limits=['Audit fixed native example remains unchanged.', 'Historical provider and thinking/output resource settings differ across models.', 'Historical scheduling and shared-cache availability remain observed execution conditions.', 'Audit verification_eff retains historical submitted-evidence semantics; visible-only efficiency must use a separate name.', 'Recomputed scores do not retroactively change actions or shared prompts; affected HPO runtime comparisons require the separately registered uniform-version controls.'])
     write_json(args.output / 'SCORE_VERSIONS.json', versions)

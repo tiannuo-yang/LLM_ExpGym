@@ -1,0 +1,37 @@
+--- LLM_ExpGym-lightweight-20260917/expgym/react_loop.py	2026-09-17 00:59:58.000000000 +0000
++++ /lustrefs/users/chufan.shi/codex_space_tn/portable_eval_20260908/source_cohorts/v5/LLM_ExpGym/expgym/react_loop.py	2026-09-08 10:42:57.000000000 +0000
+@@ -17,7 +17,7 @@
+ 
+ from expgym.errors import ToolInputError
+ from expgym.execution_contract import validate_execution_contracts
+-from expgym.tool_protocol import native_system_prompt, native_tool_schemas, resolve_tool_protocol, structured_final_answer, unlabelled_final_answer
++from expgym.tool_protocol import native_system_prompt, native_tool_schemas, resolve_tool_protocol, structured_final_answer
+ 
+ logger = logging.getLogger("expgym")
+ 
+@@ -391,9 +391,7 @@
+                 if _extract_action(text) is not None:
+                     protocol_error = "Text Action is not a native function call"
+                 elif text:
+-                    answer = _extract_answer(text) or structured_final_answer(text) or unlabelled_final_answer(text)
+-                    if answer is None:
+-                        protocol_error = "No final answer outside reasoning or protocol examples"
++                    answer = _extract_answer(text) or structured_final_answer(text) or text
+                 else:
+                     protocol_error = "LLM returned empty response"
+             else:
+@@ -517,12 +515,8 @@
+                     if _extract_action(forced_text) is not None:
+                         reject_decision(forced, "Action received during forced final", forced=True)
+                     else:
+-                        answer = (_extract_answer(forced_text) or structured_final_answer(forced_text)
+-                                  or unlabelled_final_answer(forced_text))
+-                        if answer is None:
+-                            reject_decision(forced, "Forced final contains only reasoning or protocol examples", forced=True)
+-                        else:
+-                            answer_source = "forced_model_answer"
++                        answer = _extract_answer(forced_text) or structured_final_answer(forced_text) or forced_text
++                        answer_source = "forced_model_answer"
+                 else:
+                     reject_decision(forced, "Forced final returned empty response", forced=True)
+ 

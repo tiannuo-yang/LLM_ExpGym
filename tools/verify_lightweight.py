@@ -206,10 +206,16 @@ def verify(root=ROOT):
         "tracked_inventory": tracked_check,
         "frozen_exports_verified": len(frozen),
         "generated_csvs_verified": len(csv_entries),
+        "counts_scope": "The following top-level slot and comparison counts describe the unchanged historical ad03 export.",
         "planned_slots": len(selected),
         "completed_slots": len(completed),
         "strict_score_complete": len(scored),
         "comparison_rows": comparison_counts,
+        "current_report_recorded": {
+            key: manifest.get("current_report", {}).get(key)
+            for key in ("path", "scoring_layer", "completed_slots",
+                        "strict_score_complete", "final_runtime_adoption_ready")
+        },
         "model_calls": 0,
         "rescoring": False,
         "scope": "Release bytes, recorded Git blob identities, CSV rows and slot metadata; "

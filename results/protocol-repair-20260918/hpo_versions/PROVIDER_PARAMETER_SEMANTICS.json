@@ -1,0 +1,85 @@
+{
+  "schema": "expgym.hpo-provider-parameter-semantics.v1",
+  "scope": "These are audited adapter semantics, not a claim that configured parameters were honored by the upstream provider. Per-slot configured values are retained in hpo_all_slots.csv and HPO_SCIENTIFIC_SETTINGS.json.",
+  "protocols": {
+    "gpt_sub2_responses": {
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "medium",
+      "wire_omitted_fields": [
+        "temperature",
+        "top_p",
+        "top_k",
+        "seed",
+        "max_tokens",
+        "prompt_cache_key"
+      ],
+      "configured_max_tokens": 32768,
+      "wire_max_output_tokens": null,
+      "output_token_limit_enforced_by_client": false,
+      "requires_immutable_history": true,
+      "seed_semantics": "local task/agent seed is not sent as provider generation seed",
+      "provider_cache_isolation": "not_guaranteed",
+      "source_module_sha256": "45a592ada5863ef1f281c5b462616991fac7d683ec7971fe4760f398f3233265"
+    },
+    "gemini_sub2_native": {
+      "model": "gemini-3.8-flash-medium",
+      "thinking_level": "medium",
+      "configured_temperature": 1.0,
+      "configured_top_p": 1.0,
+      "max_output_tokens": 32768,
+      "seed_semantics": "sent as generationConfig.seed; provider determinism unverified",
+      "requires_immutable_history": true,
+      "provider_cache_isolation": "not_guaranteed",
+      "source_module_sha256": "7c50e480a294f2a1618d94006f9b5e53679e1959b16b1126880193d71f0172a7"
+    },
+    "gemini_openrouter": {
+      "model": "google/gemini-3.8-flash",
+      "provider_routing": {
+        "only": [
+          "google-ai-studio"
+        ],
+        "ignore": [
+          "google-ai-studio/flex",
+          "google-ai-studio/priority"
+        ],
+        "allow_fallbacks": false,
+        "require_parameters": true
+      },
+      "reasoning": {
+        "effort": "medium",
+        "exclude": false
+      },
+      "reasoning_max_tokens": null,
+      "configured_temperature": 1.0,
+      "configured_top_p": 1.0,
+      "max_output_tokens": 32768,
+      "seed_semantics": "sent as seed; provider determinism unverified",
+      "requires_immutable_history": true,
+      "provider_cache_isolation": "not_guaranteed",
+      "prompt_transforms": [],
+      "source_module_sha256": "0d57614fda7546e70717877d321cff0f32ad3d12d35273087f648207ccefac2a"
+    },
+    "self_hosted": {
+      "models": [
+        "glm-5.3",
+        "kimi-k3",
+        "qwen3.8-2.4t-a95b-fp8",
+        "deepseek-v4-flash-0731"
+      ],
+      "reasoning_effort": {
+        "glm-5.3": "max",
+        "kimi-k3": "max",
+        "qwen3.8-2.4t-a95b-fp8": "xhigh",
+        "deepseek-v4-flash-0731": "max"
+      },
+      "cache_namespace": {
+        "glm-5.3": "omitted in adopted historical pool runs and preserved omitted in reruns",
+        "kimi-k3": "omitted in adopted historical pool runs and preserved omitted in reruns",
+        "qwen3.8-2.4t-a95b-fp8": "per-job cache_salt",
+        "deepseek-v4-flash-0731": "per-job cache_salt"
+      },
+      "configured_max_tokens": 32768,
+      "seed_semantics": "requested per agent; provider determinism requires separate verification"
+    }
+  }
+}

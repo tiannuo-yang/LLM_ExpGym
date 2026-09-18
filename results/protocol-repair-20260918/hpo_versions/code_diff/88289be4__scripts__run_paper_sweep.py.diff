@@ -1,0 +1,44 @@
+--- LLM_ExpGym-lightweight-20260917/scripts/run_paper_sweep.py	2026-09-17 00:59:58.000000000 +0000
++++ /lustrefs/users/chufan.shi/codex_space_tn/LLM_ExpGym-gpt-material-rerun-20260912/scripts/run_paper_sweep.py	2026-09-12 04:44:03.000000000 +0000
+@@ -166,6 +166,7 @@
+             "top_k": getattr(args, "top_k", None),
+             "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+             "reasoning_effort": getattr(args, "reasoning_effort", None),
++            "api_protocol": getattr(args, "api_protocol", "chat"),
+             "max_steps": args.max_steps,
+             "max_evaluations": args.max_evals,
+         },
+@@ -463,6 +464,7 @@
+     ns.top_k = getattr(args, "top_k", None)
+     ns.chat_template_kwargs = getattr(args, "chat_template_kwargs", None)
+     ns.reasoning_effort = getattr(args, "reasoning_effort", None)
++    ns.api_protocol = getattr(args, "api_protocol", "chat")
+     ns.missing_final_policy = getattr(args, "missing_final_policy", "error")
+     for name, value in _loop_options(args).items():
+         setattr(ns, name, value)
+@@ -523,6 +525,7 @@
+         "top_k": getattr(args, "top_k", None),
+         "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+         "reasoning_effort": getattr(args, "reasoning_effort", None),
++        "api_protocol": getattr(args, "api_protocol", "chat"),
+         "protocol": _loop_options(args),
+         "evaluation_identity": evaluation if evaluation is not None else _job_evaluation_identity(args, job),
+         "prompt_cache": _prompt_cache_config(args, job),
+@@ -676,6 +679,9 @@
+             raise RuntimeError("effective prompt cache key metadata mismatch")
+         timeout = config.pop("timeout", None)
+         config.pop("system_prompt", None)
++        if getattr(llm, "api_protocol", "chat") != "chat":
++            config["api_protocol"] = llm.api_protocol
++            config["parameter_compatibility"] = llm.parameter_compatibility
+         extra_headers = config.pop("extra_headers", {}) or {}
+         max_retries = config.pop("max_retries", ns.max_retries)
+         retry_base_seconds = config.pop(
+@@ -978,6 +984,7 @@
+         "top_k": getattr(args, "top_k", None),
+         "chat_template_kwargs": getattr(args, "chat_template_kwargs", None),
+         "reasoning_effort": getattr(args, "reasoning_effort", None),
++        "api_protocol": getattr(args, "api_protocol", "chat"),
+         "protocol": _loop_options(args),
+         "max_steps": args.max_steps,
+         "max_evals": args.max_evals,

@@ -1,0 +1,4709 @@
+{
+  "schema": "expgym.hpo-score-formula-independent-review.v1",
+  "formula_status": "PASS",
+  "collector_boundary_status": "PASS_FIX_VERIFIED",
+  "scope": "Read-only existing package replay and synthetic local formula checks; evaluator stubs/certificates only; no model or benchmark reruns and no collector modification.",
+  "summary": {
+    "metric_cases": 11,
+    "selection_cases": 8,
+    "completed_pools": 97,
+    "completed_members": 388,
+    "completed_missing_scores": 0,
+    "completed_true_zeros": 2,
+    "oracle_tasks_with_positive_denominator": 3
+  },
+  "oracle_reference_scope": "Unique task references in this exact public scoring package; not an independent read of private oracle tables.",
+  "formulas": {
+    "Gap": "max(0,100*(perf-oracle.mean_perf)/(oracle.best_perf-oracle.mean_perf)); no upper clamp",
+    "MI": "mean over all members; None if any member is None; Gap MI averages individually floored gaps",
+    "BoN": "max over all members only when all member scores are present; otherwise None",
+    "Gap0": "normal missing answer AND None performance becomes zero; nonempty unscorable answer stays None; applies to gap only, not raw performance",
+    "zero": "A finite numeric zero is scored, matches visible evaluations, contributes to means and can be selected as best; it is never treated as None",
+    "runtime_layer": "Runner uses missing_final.aggregate_terminal around core poolact.aggregate_results; core alone has known-subset max semantics for partial None and is not the formal endpoint"
+  },
+  "boundary_requirements": [
+    "Scoring helper assumes a nonempty pool, aligned perfs/finals lengths and finite numeric scores; collector validates four members and benchmark finiteness first.",
+    "Gap0 helper lacks terminal provenance fields, so execution-complete normal-abstention gates must precede it.",
+    "Raw API, source identity and benchmark certificate provenance are outside this formula-only replay."
+  ],
+  "issues": [
+    {
+      "code": "collector_none_answer_slot_representation_mismatch",
+      "severity": "acceptance_false_rejection",
+      "collector_vulnerable_exact_expression_present": false,
+      "status": "FIX_VERIFIED",
+      "normalized_comparison_present_and_passes_all_policy_valid_cases": true,
+      "finding": "Runtime intentionally serializes None member answers as empty strings in aggregate.individual_answers, but collector compares directly to finals retaining None. A normal missing-final completed pool therefore fails this expression even though strict endpoints and Gap0 are correct.",
+      "affected_synthetic_cases": [
+        "all_none",
+        "partial_none",
+        "partial_none_and_true_zero"
+      ],
+      "current_completed_packages_with_missing_scores": 0,
+      "proposed_scope": "Normalize only the comparison representation to [a or \"\" for a in finals]; retain None in per-member final/strict score exports and existing Gap0 rule."
+    }
+  ],
+  "metric_cases": [
+    {
+      "name": "all_numeric",
+      "perfs": [
+        0.2,
+        0.4,
+        0.6,
+        0.8
+      ],
+      "finals": [
+        "{}",
+        "{}",
+        "{}",
+        "{}"
+      ],
+      "expected": {
+        "raw_perf_mi": 0.5,
+        "raw_perf_bon": 0.8,
+        "gap_mi": 50.0,
+        "gap_bon": 100.0,
+        "gap0_mi": 50.0,
+        "gap0_bon": 100.0
+      },
+      "actual": {
+        "raw_perf_mi": 0.5,
+        "raw_perf_bon": 0.8,
+        "gap_mi": 50.0,
+        "gap_bon": 100.0,
+        "gap0_mi": 50.0,
+        "gap0_bon": 100.0
+      },
+      "passed": true,
+      "runtime_aggregate": {
+        "answer_protocol_version": "final-answer-boundary-v2",
+        "method": "best_of_n",
+        "answer": "{}",
+        "answer_perf": 0.8,
+        "answer_metrics": null,
+        "individual_answers": [
+          "{}",
+          "{}",
+          "{}",
+          "{}"
+        ],
+        "individual_perfs": [
+          0.2,
+          0.4,
+          0.6,
+          0.8
+        ],
+        "diagnostics": {
+          "version": 1,
+          "scenario": "tuning",
+          "agent_count": 4,
+          "empty_answer_agent_indices": [],
+          "abstention": {
+            "policy": "explicit_metadata_only_not_excluded",
+            "reported_agent_indices": [],
+            "declared_count": null,
+            "declared_agent_indices": null
+          },
+          "agent_provenance": [
+            {
+              "agent_index": 0,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            },
+            {
+              "agent_index": 1,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            },
+            {
+              "agent_index": 2,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            },
+            {
+              "agent_index": 3,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            }
+          ],
+          "selected_agent_index": 3,
+          "selection_reason": "caller_selected_best_of_n",
+          "tie_break_rule": "highest_score_then_first_agent"
+        },
+        "mean_individual_perf": 0.5,
+        "known_subset_descriptive": {
+          "n_known": 4,
+          "n_total": 4,
+          "not_full_pool_endpoint": false,
+          "mean_perf": 0.5,
+          "best_perf": 0.8
+        },
+        "terminal_status": {
+          "schema_version": "expgym.execution-terminal.v1",
+          "policy_version": "task-abstention-v1",
+          "execution_complete": true,
+          "score_complete": true,
+          "terminal_classification": "completed_scored",
+          "model_no_answer_count": 0,
+          "expected_model_terminals": 4,
+          "reported_model_terminals": 4
+        }
+      },
+      "collector_literal_answers_equal": true,
+      "collector_normalized_answers_equal": true
+    },
+    {
+      "name": "all_none",
+      "perfs": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "finals": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "expected": {
+        "raw_perf_mi": null,
+        "raw_perf_bon": null,
+        "gap_mi": null,
+        "gap_bon": null,
+        "gap0_mi": 0.0,
+        "gap0_bon": 0.0
+      },
+      "actual": {
+        "raw_perf_mi": null,
+        "raw_perf_bon": null,
+        "gap_mi": null,
+        "gap_bon": null,
+        "gap0_mi": 0.0,
+        "gap0_bon": 0.0
+      },
+      "passed": true,
+      "runtime_aggregate": {
+        "method": "best_of_n",
+        "answer": null,
+        "answer_perf": null,
+        "answer_metrics": null,
+        "individual_answers": [
+          "",
+          "",
+          "",
+          ""
+        ],
+        "individual_perfs": [
+          null,
+          null,
+          null,
+          null
+        ],
+        "diagnostics": {
+          "full_pool_endpoint": "unknown_missing_configuration"
+        },
+        "mean_individual_perf": null,
+        "known_subset_descriptive": {
+          "n_known": 0,
+          "n_total": 4,
+          "not_full_pool_endpoint": true,
+          "mean_perf": null,
+          "best_perf": null
+        },
+        "terminal_status": {
+          "schema_version": "expgym.execution-terminal.v1",
+          "policy_version": "task-abstention-v1",
+          "execution_complete": true,
+          "score_complete": false,
+          "terminal_classification": "model_no_answer",
+          "model_no_answer_count": 4,
+          "expected_model_terminals": 4,
+          "reported_model_terminals": 4
+        }
+      },
+      "collector_literal_answers_equal": false,
+      "collector_normalized_answers_equal": true
+    },
+    {
+      "name": "partial_none",
+      "perfs": [
+        null,
+        0.4,
+        0.6,
+        0.8
+      ],
+      "finals": [
+        null,
+        "{}",
+        "{}",
+        "{}"
+      ],
+      "expected": {
+        "raw_perf_mi": null,
+        "raw_perf_bon": null,
+        "gap_mi": null,
+        "gap_bon": null,
+        "gap0_mi": 50.0,
+        "gap0_bon": 100.0
+      },
+      "actual": {
+        "raw_perf_mi": null,
+        "raw_perf_bon": null,
+        "gap_mi": null,
+        "gap_bon": null,
+        "gap0_mi": 50.0,
+        "gap0_bon": 100.0
+      },
+      "passed": true,
+      "runtime_aggregate": {
+        "method": "best_of_n",
+        "answer": null,
+        "answer_perf": null,
+        "answer_metrics": null,
+        "individual_answers": [
+          "",
+          "{}",
+          "{}",
+          "{}"
+        ],
+        "individual_perfs": [
+          null,
+          0.4,
+          0.6,
+          0.8
+        ],
+        "diagnostics": {
+          "full_pool_endpoint": "unknown_missing_configuration"
+        },
+        "mean_individual_perf": null,
+        "known_subset_descriptive": {
+          "n_known": 3,
+          "n_total": 4,
+          "not_full_pool_endpoint": true,
+          "mean_perf": 0.6,
+          "best_perf": 0.8
+        },
+        "terminal_status": {
+          "schema_version": "expgym.execution-terminal.v1",
+          "policy_version": "task-abstention-v1",
+          "execution_complete": true,
+          "score_complete": false,
+          "terminal_classification": "model_no_answer",
+          "model_no_answer_count": 1,
+          "expected_model_terminals": 4,
+          "reported_model_terminals": 4
+        }
+      },
+      "collector_literal_answers_equal": false,
+      "collector_normalized_answers_equal": true
+    },
+    {
+      "name": "all_true_zero",
+      "perfs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "finals": [
+        "{}",
+        "{}",
+        "{}",
+        "{}"
+      ],
+      "expected": {
+        "raw_perf_mi": 0.0,
+        "raw_perf_bon": 0.0,
+        "gap_mi": 0.0,
+        "gap_bon": 0.0,
+        "gap0_mi": 0.0,
+        "gap0_bon": 0.0
+      },
+      "actual": {
+        "raw_perf_mi": 0.0,
+        "raw_perf_bon": 0.0,
+        "gap_mi": 0.0,
+        "gap_bon": 0.0,
+        "gap0_mi": 0.0,
+        "gap0_bon": 0.0
+      },
+      "passed": true,
+      "runtime_aggregate": {
+        "answer_protocol_version": "final-answer-boundary-v2",
+        "method": "best_of_n",
+        "answer": "{}",
+        "answer_perf": 0.0,
+        "answer_metrics": null,
+        "individual_answers": [
+          "{}",
+          "{}",
+          "{}",
+          "{}"
+        ],
+        "individual_perfs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "diagnostics": {
+          "version": 1,
+          "scenario": "tuning",
+          "agent_count": 4,
+          "empty_answer_agent_indices": [],
+          "abstention": {
+            "policy": "explicit_metadata_only_not_excluded",
+            "reported_agent_indices": [],
+            "declared_count": null,
+            "declared_agent_indices": null
+          },
+          "agent_provenance": [
+            {
+              "agent_index": 0,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            },
+            {
+              "agent_index": 1,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            },
+            {
+              "agent_index": 2,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            },
+            {
+              "agent_index": 3,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            }
+          ],
+          "selected_agent_index": 0,
+          "selection_reason": "caller_selected_best_of_n",
+          "tie_break_rule": "highest_score_then_first_agent"
+        },
+        "mean_individual_perf": 0.0,
+        "known_subset_descriptive": {
+          "n_known": 4,
+          "n_total": 4,
+          "not_full_pool_endpoint": false,
+          "mean_perf": 0.0,
+          "best_perf": 0.0
+        },
+        "terminal_status": {
+          "schema_version": "expgym.execution-terminal.v1",
+          "policy_version": "task-abstention-v1",
+          "execution_complete": true,
+          "score_complete": true,
+          "terminal_classification": "completed_scored",
+          "model_no_answer_count": 0,
+          "expected_model_terminals": 4,
+          "reported_model_terminals": 4
+        }
+      },
+      "collector_literal_answers_equal": true,
+      "collector_normalized_answers_equal": true
+    },
+    {
+      "name": "partial_none_and_true_zero",
+      "perfs": [
+        null,
+        0.0,
+        0.4,
+        0.8
+      ],
+      "finals": [
+        null,
+        "{}",
+        "{}",
+        "{}"
+      ],
+      "expected": {
+        "raw_perf_mi": null,
+        "raw_perf_bon": null,
+        "gap_mi": null,
+        "gap_bon": null,
+        "gap0_mi": 33.33333333333333,
+        "gap0_bon": 100.0
+      },
+      "actual": {
+        "raw_perf_mi": null,
+        "raw_perf_bon": null,
+        "gap_mi": null,
+        "gap_bon": null,
+        "gap0_mi": 33.33333333333333,
+        "gap0_bon": 100.0
+      },
+      "passed": true,
+      "runtime_aggregate": {
+        "method": "best_of_n",
+        "answer": null,
+        "answer_perf": null,
+        "answer_metrics": null,
+        "individual_answers": [
+          "",
+          "{}",
+          "{}",
+          "{}"
+        ],
+        "individual_perfs": [
+          null,
+          0.0,
+          0.4,
+          0.8
+        ],
+        "diagnostics": {
+          "full_pool_endpoint": "unknown_missing_configuration"
+        },
+        "mean_individual_perf": null,
+        "known_subset_descriptive": {
+          "n_known": 3,
+          "n_total": 4,
+          "not_full_pool_endpoint": true,
+          "mean_perf": 0.4000000000000001,
+          "best_perf": 0.8
+        },
+        "terminal_status": {
+          "schema_version": "expgym.execution-terminal.v1",
+          "policy_version": "task-abstention-v1",
+          "execution_complete": true,
+          "score_complete": false,
+          "terminal_classification": "model_no_answer",
+          "model_no_answer_count": 1,
+          "expected_model_terminals": 4,
+          "reported_model_terminals": 4
+        }
+      },
+      "collector_literal_answers_equal": false,
+      "collector_normalized_answers_equal": true
+    },
+    {
+      "name": "clip_before_mean",
+      "perfs": [
+        0.0,
+        0.8
+      ],
+      "finals": [
+        "{}",
+        "{}"
+      ],
+      "expected": {
+        "raw_perf_mi": 0.4,
+        "raw_perf_bon": 0.8,
+        "gap_mi": 50.0,
+        "gap_bon": 100.0,
+        "gap0_mi": 50.0,
+        "gap0_bon": 100.0
+      },
+      "actual": {
+        "raw_perf_mi": 0.4,
+        "raw_perf_bon": 0.8,
+        "gap_mi": 50.0,
+        "gap_bon": 100.0,
+        "gap0_mi": 50.0,
+        "gap0_bon": 100.0
+      },
+      "passed": true,
+      "runtime_aggregate": {
+        "answer_protocol_version": "final-answer-boundary-v2",
+        "method": "best_of_n",
+        "answer": "{}",
+        "answer_perf": 0.8,
+        "answer_metrics": null,
+        "individual_answers": [
+          "{}",
+          "{}"
+        ],
+        "individual_perfs": [
+          0.0,
+          0.8
+        ],
+        "diagnostics": {
+          "version": 1,
+          "scenario": "tuning",
+          "agent_count": 2,
+          "empty_answer_agent_indices": [],
+          "abstention": {
+            "policy": "explicit_metadata_only_not_excluded",
+            "reported_agent_indices": [],
+            "declared_count": null,
+            "declared_agent_indices": null
+          },
+          "agent_provenance": [
+            {
+              "agent_index": 0,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            },
+            {
+              "agent_index": 1,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            }
+          ],
+          "selected_agent_index": 1,
+          "selection_reason": "caller_selected_best_of_n",
+          "tie_break_rule": "highest_score_then_first_agent"
+        },
+        "mean_individual_perf": 0.4,
+        "known_subset_descriptive": {
+          "n_known": 2,
+          "n_total": 2,
+          "not_full_pool_endpoint": false,
+          "mean_perf": 0.4,
+          "best_perf": 0.8
+        },
+        "terminal_status": {
+          "schema_version": "expgym.execution-terminal.v1",
+          "policy_version": "task-abstention-v1",
+          "execution_complete": true,
+          "score_complete": true,
+          "terminal_classification": "completed_scored",
+          "model_no_answer_count": 0,
+          "expected_model_terminals": 2,
+          "reported_model_terminals": 2
+        }
+      },
+      "collector_literal_answers_equal": true,
+      "collector_normalized_answers_equal": true
+    },
+    {
+      "name": "above_oracle_best",
+      "perfs": [
+        0.9,
+        0.8
+      ],
+      "finals": [
+        "{}",
+        "{}"
+      ],
+      "expected": {
+        "raw_perf_mi": 0.8500000000000001,
+        "raw_perf_bon": 0.9,
+        "gap_mi": 108.33333333333331,
+        "gap_bon": 116.66666666666664,
+        "gap0_mi": 108.33333333333331,
+        "gap0_bon": 116.66666666666664
+      },
+      "actual": {
+        "raw_perf_mi": 0.8500000000000001,
+        "raw_perf_bon": 0.9,
+        "gap_mi": 108.33333333333331,
+        "gap_bon": 116.66666666666664,
+        "gap0_mi": 108.33333333333331,
+        "gap0_bon": 116.66666666666664
+      },
+      "passed": true,
+      "runtime_aggregate": {
+        "answer_protocol_version": "final-answer-boundary-v2",
+        "method": "best_of_n",
+        "answer": "{}",
+        "answer_perf": 0.9,
+        "answer_metrics": null,
+        "individual_answers": [
+          "{}",
+          "{}"
+        ],
+        "individual_perfs": [
+          0.9,
+          0.8
+        ],
+        "diagnostics": {
+          "version": 1,
+          "scenario": "tuning",
+          "agent_count": 2,
+          "empty_answer_agent_indices": [],
+          "abstention": {
+            "policy": "explicit_metadata_only_not_excluded",
+            "reported_agent_indices": [],
+            "declared_count": null,
+            "declared_agent_indices": null
+          },
+          "agent_provenance": [
+            {
+              "agent_index": 0,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            },
+            {
+              "agent_index": 1,
+              "agent_id": null,
+              "termination_reason": null,
+              "answer_source": null,
+              "answer_score_source": null,
+              "abstained": null
+            }
+          ],
+          "selected_agent_index": 0,
+          "selection_reason": "caller_selected_best_of_n",
+          "tie_break_rule": "highest_score_then_first_agent"
+        },
+        "mean_individual_perf": 0.8500000000000001,
+        "known_subset_descriptive": {
+          "n_known": 2,
+          "n_total": 2,
+          "not_full_pool_endpoint": false,
+          "mean_perf": 0.8500000000000001,
+          "best_perf": 0.9
+        },
+        "terminal_status": {
+          "schema_version": "expgym.execution-terminal.v1",
+          "policy_version": "task-abstention-v1",
+          "execution_complete": true,
+          "score_complete": true,
+          "terminal_classification": "completed_scored",
+          "model_no_answer_count": 0,
+          "expected_model_terminals": 2,
+          "reported_model_terminals": 2
+        }
+      },
+      "collector_literal_answers_equal": true,
+      "collector_normalized_answers_equal": true
+    },
+    {
+      "name": "unscorable_nonempty",
+      "perfs": [
+        null,
+        0.8
+      ],
+      "finals": [
+        "{}",
+        "{}"
+      ],
+      "expected": {
+        "raw_perf_mi": null,
+        "raw_perf_bon": null,
+        "gap_mi": null,
+        "gap_bon": null,
+        "gap0_mi": null,
+        "gap0_bon": null
+      },
+      "actual": {
+        "raw_perf_mi": null,
+        "raw_perf_bon": null,
+        "gap_mi": null,
+        "gap_bon": null,
+        "gap0_mi": null,
+        "gap0_bon": null
+      },
+      "passed": true
+    },
+    {
+      "name": "n1_none",
+      "perfs": [
+        null
+      ],
+      "finals": [
+        null
+      ],
+      "expected": {
+        "raw_perf": null,
+        "gap": null,
+        "gap0": 0.0
+      },
+      "actual": {
+        "raw_perf": null,
+        "gap": null,
+        "gap0": 0.0
+      },
+      "passed": true
+    },
+    {
+      "name": "n1_true_zero",
+      "perfs": [
+        0.0
+      ],
+      "finals": [
+        "{}"
+      ],
+      "expected": {
+        "raw_perf": 0.0,
+        "gap": 0.0,
+        "gap0": 0.0
+      },
+      "actual": {
+        "raw_perf": 0.0,
+        "gap": 0.0,
+        "gap0": 0.0
+      },
+      "passed": true
+    },
+    {
+      "name": "n1_unscorable_nonempty",
+      "perfs": [
+        null
+      ],
+      "finals": [
+        "{}"
+      ],
+      "expected": {
+        "raw_perf": null,
+        "gap": null,
+        "gap0": null
+      },
+      "actual": {
+        "raw_perf": null,
+        "gap": null,
+        "gap0": null
+      },
+      "passed": true
+    }
+  ],
+  "selection_cases": [
+    {
+      "name": "no_final_never_fallback",
+      "actual": [
+        null,
+        null,
+        null,
+        null,
+        "no_accepted_final_configuration"
+      ],
+      "passed": true,
+      "evaluator_calls": 0
+    },
+    {
+      "name": "matching_real_zero_beats_fallback",
+      "actual": [
+        "{\"x\":1}",
+        0.0,
+        "matching_tool_call",
+        "r0",
+        "visible_configuration_match"
+      ],
+      "passed": true,
+      "evaluator_calls": 0
+    },
+    {
+      "name": "matching_reverse_latest",
+      "actual": [
+        "{\"x\":1}",
+        0.7,
+        "matching_tool_call",
+        "r1",
+        "visible_configuration_match"
+      ],
+      "passed": true,
+      "evaluator_calls": 0
+    },
+    {
+      "name": "fallback_best_visible",
+      "actual": [
+        "{\"x\":2}",
+        0.8,
+        "best_evaluated_fallback",
+        "r1",
+        "legacy_best_visible_fallback"
+      ],
+      "passed": true,
+      "evaluator_calls": 0
+    },
+    {
+      "name": "fallback_tie_first_record",
+      "actual": [
+        "{\"x\":1}",
+        0.8,
+        "best_evaluated_fallback",
+        "r0",
+        "legacy_best_visible_fallback"
+      ],
+      "passed": true,
+      "evaluator_calls": 0
+    },
+    {
+      "name": "only_none_records_not_offline",
+      "actual": [
+        "{\"x\":1}",
+        null,
+        null,
+        null,
+        "legacy_visible_records_without_numeric_score"
+      ],
+      "passed": true,
+      "evaluator_calls": 0
+    },
+    {
+      "name": "unmatched_all_zero_fallback",
+      "actual": [
+        "{\"x\":1}",
+        0.0,
+        "best_evaluated_fallback",
+        "r0",
+        "legacy_best_visible_fallback"
+      ],
+      "passed": true,
+      "evaluator_calls": 0
+    },
+    {
+      "name": "no_visible_evaluations_offline_zero",
+      "actual": [
+        "{\"x\":3}",
+        0.0,
+        "offline_final_answer",
+        "offline_submitted_configuration",
+        "test_offline_evaluation"
+      ],
+      "passed": true,
+      "evaluator_calls": 1
+    }
+  ],
+  "real_package_checks": [
+    {
+      "slot_id": "042f8a0c883918035d147e0e",
+      "result_sha256": "1c3f68999bd0dbc34d89890c4d929eba08bea4181a6208550f235c837e8fd2e7",
+      "metrics": {
+        "raw_perf_mi": 0.9398704618215561,
+        "raw_perf_bon": 0.9421741366386414,
+        "gap_mi": 99.11720809344378,
+        "gap_bon": 99.44469442278952,
+        "gap0_mi": 99.11720809344378,
+        "gap0_bon": 99.44469442278952
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9421741366386414,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9390691916147867,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9373664458592733,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.940872073173523,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "0528aa82238ccb6ab56e8172",
+      "result_sha256": "0fce39746481e4cc16de55078cfa0087d82db82e3e1ed57a3d695bd28fd979bb",
+      "metrics": {
+        "raw_perf_mi": 0.9436932404836018,
+        "raw_perf_bon": 0.9450453917185465,
+        "gap_mi": 97.93658772467286,
+        "gap_bon": 98.46717388381616,
+        "gap0_mi": 97.93658772467286,
+        "gap0_bon": 98.46717388381616
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9423410892486572,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9423410892486572,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9450453917185465,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9450453917185465,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "07ee7c56cee1e84ee2c6fda1",
+      "result_sha256": "ff901fe4a5ed00d173fb74a739883c03502dcf9dd9599bc2f8eb7c1a1dd4f11c",
+      "metrics": {
+        "raw_perf_mi": 0.7023654530445734,
+        "raw_perf_bon": 0.938201109568278,
+        "gap_mi": 73.9771947323401,
+        "gap_bon": 98.87989593560077,
+        "gap0_mi": 73.9771947323401,
+        "gap0_bon": 98.87989593560077
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.0,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9377003312110901,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9335603713989258,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.938201109568278,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "0aa854be1610459f67f8176b",
+      "result_sha256": "91ffef2f0dc31d5ed0134cd3e4f8595dd091342e682386d03de1616eb0a07df3",
+      "metrics": {
+        "raw_perf_mi": 0.9369240850210191,
+        "raw_perf_bon": 0.9387687047322592,
+        "gap_mi": 98.6983563891489,
+        "gap_bon": 98.96058425820081,
+        "gap0_mi": 98.6983563891489,
+        "gap0_bon": 98.96058425820081
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9350627660751343,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9387687047322592,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9387687047322592,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9350961645444235,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "0b9da8c9f6429679cc6eb654",
+      "result_sha256": "405131a2b9ae569439579dc25e5e74461365330ebed18bd96e908cfe61c83cd2",
+      "metrics": {
+        "raw_perf_mi": 0.9364566653966904,
+        "raw_perf_bon": 0.9417401154836019,
+        "gap_mi": 95.09694487889779,
+        "gap_bon": 97.17017856473953,
+        "gap0_mi": 95.09694487889779,
+        "gap0_bon": 97.17017856473953
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9318576455116272,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9414396286010742,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9417401154836019,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9307892719904581,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "1004ff7a313febf84de7f7c5",
+      "result_sha256": "6845a2eeaf1214a38183ed676b482df59f0a1784e2a790160f2d5ff1b688348c",
+      "metrics": {
+        "raw_perf_mi": 0.9430338541666666,
+        "raw_perf_bon": 0.9445112148920695,
+        "gap_mi": 99.54957861442799,
+        "gap_bon": 99.81097073177946,
+        "gap0_mi": 99.54957861442799,
+        "gap0_bon": 99.81097073177946
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9440104166666666,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9418402711550394,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9445112148920695,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "152bd78d7ad15159994ab8e7",
+      "result_sha256": "94eba34baedd412557328618f05b39d17c7e8744a47571e560add69aeaae47db",
+      "metrics": {
+        "raw_perf_mi": 0.9381677409013112,
+        "raw_perf_bon": 0.9433093070983887,
+        "gap_mi": 98.68860835318287,
+        "gap_bon": 99.598315002106,
+        "gap0_mi": 98.68860835318287,
+        "gap0_bon": 99.598315002106
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9388354818026224,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9336271286010742,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9368990461031595,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9433093070983887,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "16eb77afda8e7ca3474ca976",
+      "result_sha256": "82752535f19ee86db35b4537cf7bc5d3f41287f2b5ec17f48ea58c18d829415c",
+      "metrics": {
+        "raw_perf_mi": 0.9411475012699763,
+        "raw_perf_bon": 0.9430421988169352,
+        "gap_mi": 96.9376358643853,
+        "gap_bon": 97.68111800469507,
+        "gap0_mi": 96.9376358643853,
+        "gap0_bon": 97.68111800469507
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9409054517745972,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9430421988169352,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.940872073173523,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9397702813148499,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "1a408555e37e39b4580d2acf",
+      "result_sha256": "9e57beded1db971706c9ffdf6afa57cc71415570faa80fd3a114274eaedf9913",
+      "metrics": {
+        "raw_perf_mi": 0.9390942205985386,
+        "raw_perf_bon": 0.9400707880655924,
+        "gap_mi": 98.85253208932755,
+        "gap_bon": 99.02531794559168,
+        "gap0_mi": 98.85253208932755,
+        "gap0_bon": 99.02531794559168
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9397035241127014,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9400707880655924,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9384682178497314,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9381343523661295,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "21c2f1decbe9463d3050994d",
+      "result_sha256": "0efec3df4ec5b6d1a2eb7ba4ec47de6ec772e93867b28c3825710e32464e08e9",
+      "metrics": {
+        "raw_perf_mi": 0.9417818586031595,
+        "raw_perf_bon": 0.9429086645444235,
+        "gap_mi": 99.32806076463504,
+        "gap_bon": 99.52742858710837,
+        "gap0_mi": 99.32806076463504,
+        "gap0_bon": 99.52742858710837
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9401375651359558,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9429086645444235,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "2216c2262047ffcbcde63a69",
+      "result_sha256": "97f518ea3a6bede4b20be39486c6d729bd5a786abfd14944a759294efded70d7",
+      "metrics": {
+        "raw_perf_mi": 0.9427500665187837,
+        "raw_perf_bon": 0.944945236047109,
+        "gap_mi": 99.49936755027633,
+        "gap_bon": 99.88776288331049,
+        "gap0_mi": 99.49936755027633,
+        "gap0_bon": 99.88776288331049
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.944945236047109,
+          "selected_record": "eval_records[13]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.939636766910553,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9432091315587362,
+          "selected_record": "eval_records[11]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9432091315587362,
+          "selected_record": "eval_records[12]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "2436b7dbc783152fc8002459",
+      "result_sha256": "ea581b1cd43a9bf79311453e66efb72f1ec72016ba48a41a910100f0540e8743",
+      "metrics": {
+        "raw_perf_mi": 0.943000465631485,
+        "raw_perf_bon": 0.946013609568278,
+        "gap_mi": 99.5436711202349,
+        "gap_bon": 100.076792151531,
+        "gap0_mi": 99.5436711202349,
+        "gap0_bon": 100.076792151531
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9428418874740601,
+          "selected_record": "eval_records[13]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.940705140431722,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.946013609568278,
+          "selected_record": "eval_records[13]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9424412250518799,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "2ac7531ef7a7d828a1579455",
+      "result_sha256": "af29c8686bb069a4768845a7124a392614f1c3caa00a5a3c83c340d7d42d3eb5",
+      "metrics": {
+        "raw_perf_mi": 0.9436848858992258,
+        "raw_perf_bon": 0.9456797440846761,
+        "gap_mi": 97.93330937331635,
+        "gap_bon": 98.71609469739805,
+        "gap0_mi": 97.93330937331635,
+        "gap0_bon": 98.71609469739805
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9429754217465719,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9456797440846761,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9456797440846761,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9404046336809794,
+          "selected_record": "eval_records[10]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "2d65764c60e05648dc33a059",
+      "result_sha256": "9c9f165121ee285b522deceaf3665f1a4dd7da5bc764f427ecea7e247938c7ff",
+      "metrics": {
+        "raw_perf_mi": 0.9457131226857504,
+        "raw_perf_bon": 0.9457131226857504,
+        "gap_mi": 100.02362646145295,
+        "gap_bon": 100.02362646145295,
+        "gap0_mi": 100.02362646145295,
+        "gap0_bon": 100.02362646145295
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9457131226857504,
+          "selected_record": "eval_records[11]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9457131226857504,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9457131226857504,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9457131226857504,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "2d67f8b25b83bf2c86d75c1b",
+      "result_sha256": "af4ef2a038603d8b29be708ede6e3f5465d5d8f41ef494f71004897a721f5b4c",
+      "metrics": {
+        "raw_perf_mi": 0.941464677453041,
+        "raw_perf_bon": 0.9420406023661295,
+        "gap_mi": 99.34383896229234,
+        "gap_bon": 99.42571142726322,
+        "gap0_mi": 99.34383896229234,
+        "gap0_bon": 99.42571142726322
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9404714107513428,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9413060943285624,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "2dbdd87bb9597181b0cbcdd8",
+      "result_sha256": "734dd81cae8d2556d82af9a00d7cc028ef169fe6f76c12166ec5ae990cf9243d",
+      "metrics": {
+        "raw_perf_mi": 0.9383263289928436,
+        "raw_perf_bon": 0.9428752660751343,
+        "gap_mi": 95.83060365961371,
+        "gap_bon": 97.61561334810166,
+        "gap0_mi": 95.83060365961371,
+        "gap0_bon": 97.61561334810166
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9414730270703634,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9428752660751343,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9389356374740601,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9300213853518168,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "30ac923531f53427496e3858",
+      "result_sha256": "9f3164488b8cdf4ce8f4aabdbe5e1966a301f176550fcfe9f7580301187ecf08",
+      "metrics": {
+        "raw_perf_mi": 0.9409722238779068,
+        "raw_perf_bon": 0.9425414005915324,
+        "gap_mi": 99.27383263479429,
+        "gap_bon": 99.49690401545479,
+        "gap0_mi": 99.27383263479429,
+        "gap0_bon": 99.49690401545479
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9425414005915324,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9383346637090048,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "315b8fab73656791df8bfe58",
+      "result_sha256": "70c39751c4f668d000686a3099d5467b8f8935f8bbf7c2fc67b14ab75f367d2a",
+      "metrics": {
+        "raw_perf_mi": 0.8865267684062321,
+        "raw_perf_bon": 0.9294871687889099,
+        "gap_mi": 91.53396317503463,
+        "gap_bon": 97.64113755754894,
+        "gap0_mi": 91.53396317503463,
+        "gap0_bon": 97.64113755754894
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9294871687889099,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9248464107513428,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "335906464bcc2b9063bf8c2e",
+      "result_sha256": "ad85333d0d1b0055987ddb500d7adbda318f4f5981b966ee965d171e3ad178a6",
+      "metrics": {
+        "raw_perf_mi": 0.9382762511571248,
+        "raw_perf_bon": 0.9432759086290995,
+        "gap_mi": 95.8109530422674,
+        "gap_bon": 97.77282608318929,
+        "gap0_mi": 95.8109530422674,
+        "gap0_bon": 97.77282608318929
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.940872073173523,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9389356374740601,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9432759086290995,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9300213853518168,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "3b0441d032843b1daaa84d2e",
+      "result_sha256": "bc23dd2ff07633c53ad3da1d8e0aa8c61d956d3d3e78e163151c9b8fc0e30778",
+      "metrics": {
+        "raw_perf_mi": 0.943359375,
+        "raw_perf_bon": 0.94407719373703,
+        "gap_mi": 99.6071736069061,
+        "gap_bon": 99.73417858024847,
+        "gap0_mi": 99.6071736069061,
+        "gap0_bon": 99.73417858024847
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.94407719373703,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.94407719373703,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.94407719373703,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412059187889099,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "3b07c4986a69d9c63c3730ba",
+      "result_sha256": "989fb76d0afcbf7cd472319765f43cec47118973706d49b6fc922a564ecc4e0e",
+      "metrics": {
+        "raw_perf_mi": 0.9409304906924566,
+        "raw_perf_bon": 0.9412393172581991,
+        "gap_mi": 96.85248059044557,
+        "gap_bon": 96.97366459495926,
+        "gap0_mi": 96.85248059044557,
+        "gap0_bon": 96.97366459495926
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9409722288449606,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9402710994084676,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "4246bf1e4869b870364594cd",
+      "result_sha256": "d0ee89a273f9432c8e83caa3c6d3bbece5853a6ca4d9b2fc5e8a7ed1f2a2d5cf",
+      "metrics": {
+        "raw_perf_mi": 0.9374415725469589,
+        "raw_perf_bon": 0.9393696586290995,
+        "gap_mi": 98.5601260668773,
+        "gap_bon": 98.90126584051602,
+        "gap0_mi": 98.5601260668773,
+        "gap0_bon": 98.90126584051602
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9380008180936178,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9365317821502686,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9393696586290995,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9358640313148499,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "433d6c57ce283ad7e2127c46",
+      "result_sha256": "318a5ecd764bea108bf46f4ad61a9c513f3936f3f8a4541255e7155eea24fa7c",
+      "metrics": {
+        "raw_perf_mi": 0.9463725239038467,
+        "raw_perf_bon": 0.9505542318026224,
+        "gap_mi": 100.14029551703203,
+        "gap_bon": 100.88017269327707,
+        "gap0_mi": 100.14029551703203,
+        "gap0_bon": 100.88017269327707
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9441773295402527,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9465812047322592,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9505542318026224,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9441773295402527,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "4cb83e1d5b0f5c504ddda54b",
+      "result_sha256": "c90ce1ef5654cfd2edcac2b1846168ea659563bb3bc0a7cb1e732ffd490f47ff",
+      "metrics": {
+        "raw_perf_mi": 0.9388938943545023,
+        "raw_perf_bon": 0.9407051205635071,
+        "gap_mi": 98.8170880029989,
+        "gap_bon": 99.13755154696183,
+        "gap0_mi": 98.8170880029989,
+        "gap0_bon": 99.13755154696183
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9379340211550394,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9384682178497314,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9407051205635071,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9384682178497314,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "4d5219f702d77df2e9e982ee",
+      "result_sha256": "60ba5adfa3c366a174b56b21ebdc3c625005d806bfd867a14fc44b278ce072d7",
+      "metrics": {
+        "raw_perf_mi": 0.9343950301408768,
+        "raw_perf_bon": 0.9399038354555765,
+        "gap_mi": 98.02109578372846,
+        "gap_bon": 98.99577871696658,
+        "gap0_mi": 98.02109578372846,
+        "gap0_bon": 98.99577871696658
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9399038354555765,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9359642267227173,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9373664458592733,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9243456125259399,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "50b6fc6a1762af007389b115",
+      "result_sha256": "439c892f247adcbd419265ade8c534cbcaa07a7ae1e75b5b8f99b4e7b8546981",
+      "metrics": {
+        "raw_perf_mi": 0.9404964645703634,
+        "raw_perf_bon": 0.9445112148920695,
+        "gap_mi": 99.20619953479078,
+        "gap_bon": 99.77692932544704,
+        "gap0_mi": 99.20619953479078,
+        "gap0_bon": 99.77692932544704
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9377003312110901,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9445112148920695,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9385349949200948,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "524d5cc2fa9bb05e02f85fbf",
+      "result_sha256": "113e3c035c0542076ae9909ca04b209532ceffdc16f569a8728e7233e3bb01da",
+      "metrics": {
+        "raw_perf_mi": 0.9417234212160112,
+        "raw_perf_bon": 0.943709929784139,
+        "gap_mi": 99.38062151708164,
+        "gap_bon": 99.66302005456845,
+        "gap0_mi": 99.38062151708164,
+        "gap0_bon": 99.66302005456845
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9393362601598104,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9428752660751343,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9409722288449606,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.943709929784139,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "53b6160823ad9aad84fea5f0",
+      "result_sha256": "98d95a77f741c5c37631209bca7a721cfd8d0cb277dccec125720fac38771bda",
+      "metrics": {
+        "raw_perf_mi": 0.9400457392136256,
+        "raw_perf_bon": 0.9425414005915324,
+        "gap_mi": 99.02088600670211,
+        "gap_bon": 99.46244790864417,
+        "gap0_mi": 99.02088600670211,
+        "gap0_bon": 99.46244790864417
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9373664458592733,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9425414005915324,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.94017094373703,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9401041666666666,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "556f31acc1fc193f770039d1",
+      "result_sha256": "263d431b5344ca71c78e1ec66244e80b84eafff22e362bc2c2db8f69972623e7",
+      "metrics": {
+        "raw_perf_mi": 0.940863718589147,
+        "raw_perf_bon": 0.9412393172581991,
+        "gap_mi": 99.25840771524096,
+        "gap_bon": 99.31180215638463,
+        "gap0_mi": 99.25840771524096,
+        "gap0_bon": 99.31180215638463
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9406717419624329,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9406717419624329,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.940872073173523,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "5631b49a6192c186a682d366",
+      "result_sha256": "63682e83d8d44753c4d7d2e2f91e5566c8b7c15cf38f39726d1e3bb65fd3c046",
+      "metrics": {
+        "raw_perf_mi": 0.9119925250609716,
+        "raw_perf_bon": 0.9376669327418009,
+        "gap_mi": 95.15413000978967,
+        "gap_bon": 98.80395830463519,
+        "gap0_mi": 95.15413000978967,
+        "gap0_bon": 98.80395830463519
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9376669327418009,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.861144502957662,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9135617017745972,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9355969627698263,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "569a032dff113380523e9851",
+      "result_sha256": "c55e25d9d9ae1eea6e1f528fa66f61b099092ef357442070da8e16c50f295b6e",
+      "metrics": {
+        "raw_perf_mi": 0.9386768788099289,
+        "raw_perf_bon": 0.9412393172581991,
+        "gap_mi": 95.9681599301172,
+        "gap_bon": 96.97366459495926,
+        "gap0_mi": 95.9681599301172,
+        "gap0_bon": 96.97366459495926
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9377670884132385,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9377670884132385,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9379340211550394,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "5e5a902a94dc4d8b880e190f",
+      "result_sha256": "ab61903f3756ac68780b6e890a1f297445e2b80bf0304938142d203075d6b90b",
+      "metrics": {
+        "raw_perf_mi": 0.9423160403966904,
+        "raw_perf_bon": 0.9456797440846761,
+        "gap_mi": 99.46486720954707,
+        "gap_bon": 99.9430453645607,
+        "gap0_mi": 99.46486720954707,
+        "gap0_bon": 99.9430453645607
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9397703011830648,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9456797440846761,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "6088d50f8e20c4125949969a",
+      "result_sha256": "a0a047134bbde4ade3ecd57d659aea664d1cc5b84297f6ef8a5d8cf33af958aa",
+      "metrics": {
+        "raw_perf_mi": 0.943709929784139,
+        "raw_perf_bon": 0.9456797440846761,
+        "gap_mi": 99.66302005456845,
+        "gap_bon": 99.9430453645607,
+        "gap0_mi": 99.66302005456845,
+        "gap0_bon": 99.9430453645607
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9456797440846761,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9413060943285624,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9456797440846761,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9421741366386414,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "63d69fa32d8353a97f55bb17",
+      "result_sha256": "a5245f7a98ec54b0fd6916cfa5d971ec9900a128f846e5ead34a753621871c0d",
+      "metrics": {
+        "raw_perf_mi": 0.9353382140398026,
+        "raw_perf_bon": 0.9387687047322592,
+        "gap_mi": 94.65806290009013,
+        "gap_bon": 96.00419255884972,
+        "gap0_mi": 94.65806290009013,
+        "gap0_bon": 96.00419255884972
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9387687047322592,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9387687047322592,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9363982478777567,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9274171988169352,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "64a9ab9d9b97029011fb6b74",
+      "result_sha256": "061147b91eca1801f9fd47d9ff2e034dc6bb7305941cc91a055d834aa787fed7",
+      "metrics": {
+        "raw_perf_mi": 0.9406216641267141,
+        "raw_perf_bon": 0.9416399598121643,
+        "gap_mi": 99.22399768183868,
+        "gap_bon": 99.36875679182394,
+        "gap0_mi": 99.22399768183868,
+        "gap0_bon": 99.36875679182394
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9389356374740601,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9416399598121643,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9406717419624329,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "6799ff2fc31a44c41a318544",
+      "result_sha256": "63c51d4a1890ba19a564a537abe310ea4b4d6d03f097ee35bafbd9e960f34738",
+      "metrics": {
+        "raw_perf_mi": 0.9376669327418009,
+        "raw_perf_bon": 0.9432425300280253,
+        "gap_mi": 98.599999455606,
+        "gap_bon": 99.58650001371983,
+        "gap0_mi": 98.599999455606,
+        "gap0_bon": 99.58650001371983
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.939269502957662,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9432425300280253,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.93482905626297,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9333266417185465,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "6883a5a14125ee7daae4ba01",
+      "result_sha256": "ac3a012db5f0f31915462eb0e9aa95fa34fd63827699e3421b0256937a6b9873",
+      "metrics": {
+        "raw_perf_mi": 0.9338274498780569,
+        "raw_perf_bon": 0.9373664458592733,
+        "gap_mi": 94.06523679215496,
+        "gap_bon": 95.45394408788441,
+        "gap0_mi": 94.06523679215496,
+        "gap0_bon": 95.45394408788441
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9336271286010742,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9373664458592733,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.93482905626297,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9294871687889099,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "6a00105cced03e7f7bc6fdea",
+      "result_sha256": "3e79d0783ccb1bebe293c2a522ff3e864c789f7ef813e01b9c57a5b99bcf51bf",
+      "metrics": {
+        "raw_perf_mi": 0.9440438002347946,
+        "raw_perf_bon": 0.9450787901878357,
+        "gap_mi": 98.07414789333491,
+        "gap_bon": 98.48027949292515,
+        "gap0_mi": 98.07414789333491,
+        "gap0_bon": 98.48027949292515
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9450787901878357,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9450787901878357,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9431423544883728,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9428752660751343,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "6bae9f39e02b398598fdf9a0",
+      "result_sha256": "dbb7484c46e4a3d3819d5c59c715cced733eb254c4448c69ec94ea36e46ae130",
+      "metrics": {
+        "raw_perf_mi": 0.9421157191197077,
+        "raw_perf_bon": 0.9443109035491943,
+        "gap_mi": 97.31756599115401,
+        "gap_bon": 98.17895963185882,
+        "gap0_mi": 97.31756599115401,
+        "gap0_bon": 98.17895963185882
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.941940426826477,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9389356374740601,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9443109035491943,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9432759086290995,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "6e051804134543922158af07",
+      "result_sha256": "98d00e2336de7f8c0bbce3912f9649bdbb98bf9d17f3286a51104eb13758f8d3",
+      "metrics": {
+        "raw_perf_mi": 0.9406884312629701,
+        "raw_perf_bon": 0.9418736696243286,
+        "gap_mi": 99.13459867869511,
+        "gap_bon": 99.34430505542127,
+        "gap0_mi": 99.13459867869511,
+        "gap0_bon": 99.34430505542127
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9418736696243286,
+          "selected_record": "eval_records[11]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9384014209111532,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "76f544a1dfbb9d3256c7b24a",
+      "result_sha256": "a853adbd1fb249e8d86bddf817d91939170614dd9e06be964a6aad8fe80d6d71",
+      "metrics": {
+        "raw_perf_mi": 0.9421324133872986,
+        "raw_perf_bon": 0.9443109035491943,
+        "gap_mi": 97.32411684662921,
+        "gap_bon": 98.17895963185882,
+        "gap0_mi": 97.32411684662921,
+        "gap0_bon": 98.17895963185882
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9432759086290995,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9443109035491943,
+          "selected_record": "eval_records[13]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9406717419624329,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9402710994084676,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "7aa19a01271226153548860c",
+      "result_sha256": "fc5eb7272804076c3fdf941273aa3b1cf5822cba2499b566d7dad5a70cf1f764",
+      "metrics": {
+        "raw_perf_mi": 0.9430922816197077,
+        "raw_perf_bon": 0.9455795884132385,
+        "gap_mi": 99.55991628985097,
+        "gap_bon": 100.0,
+        "gap0_mi": 99.55991628985097,
+        "gap0_bon": 100.0
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9455795884132385,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[17]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9407051205635071,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9443109035491943,
+          "selected_record": "eval_records[10]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "7c4b6bb9606f431d246535ad",
+      "result_sha256": "fba4f17ea712c47d8eb41ba29a2a2edaff481367098923379155a7fcc7f29819",
+      "metrics": {
+        "raw_perf_mi": 0.943284253279368,
+        "raw_perf_bon": 0.9456797440846761,
+        "gap_mi": 99.59388218438657,
+        "gap_bon": 100.01772072491956,
+        "gap0_mi": 99.59388218438657,
+        "gap0_bon": 100.01772072491956
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9444778362909952,
+          "selected_record": "eval_records[15]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9456797440846761,
+          "selected_record": "eval_records[16]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9415398041407267,
+          "selected_record": "eval_records[14]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9414396286010742,
+          "selected_record": "eval_records[12]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "7edb4e9148fa93c91d898a92",
+      "result_sha256": "cf949584dba70c61a3d9437d42e124a51ef73883752f030577040495aaf4f1b2",
+      "metrics": {
+        "raw_perf_mi": 0.9323083559672037,
+        "raw_perf_bon": 0.9399038354555765,
+        "gap_mi": 98.04219252701103,
+        "gap_bon": 99.12195243011023,
+        "gap0_mi": 98.04219252701103,
+        "gap0_bon": 99.12195243011023
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9399038354555765,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9172342419624329,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9372662901878357,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.93482905626297,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "81ce21641f6f1126fa0ac1f6",
+      "result_sha256": "549e2aacefb4db9f1f8b7d67b1c6854d193fb32d2ec513d588e23dc2d55394b9",
+      "metrics": {
+        "raw_perf_mi": 0.9408136357863743,
+        "raw_perf_bon": 0.9445112148920695,
+        "gap_mi": 99.15675134250424,
+        "gap_bon": 99.81097073177946,
+        "gap0_mi": 99.15675134250424,
+        "gap0_bon": 99.81097073177946
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9388354818026224,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9378672440846761,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9445112148920695,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "823f9ce251391166d87ddcba",
+      "result_sha256": "1e15582204cbd7f402053481ed00cf6aef77d0a6f8d4d6b4232ea20c4742b7e4",
+      "metrics": {
+        "raw_perf_mi": 0.9409471799929937,
+        "raw_perf_bon": 0.943175752957662,
+        "gap_mi": 96.85902949684147,
+        "gap_bon": 97.73352484849669,
+        "gap0_mi": 96.85902949684147,
+        "gap0_bon": 97.73352484849669
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.943175752957662,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9417067170143127,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9400707880655924,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9388354619344076,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "858b89a7980b6b20b4a64e51",
+      "result_sha256": "59463ea3fdde328e2c78092745cbaeb1e02cd98250ad57e74c83687fe44a96b1",
+      "metrics": {
+        "raw_perf_mi": 0.9372746447722117,
+        "raw_perf_bon": 0.9412393172581991,
+        "gap_mi": 98.53059123240142,
+        "gap_bon": 99.23206793873176,
+        "gap0_mi": 98.53059123240142,
+        "gap0_bon": 99.23206793873176
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9391359686851501,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9379340211550394,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9307892719904581,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "89c11c7f01720cb4f6d30db6",
+      "result_sha256": "c9c7446a15d369bdafd441ca4063f593442b7e85628b2a180ee978c0bb3278a8",
+      "metrics": {
+        "raw_perf_mi": 0.9402877936760584,
+        "raw_perf_bon": 0.941773513952891,
+        "gap_mi": 99.17653525027008,
+        "gap_bon": 99.38774261178044,
+        "gap0_mi": 99.17653525027008,
+        "gap0_bon": 99.38774261178044
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9402043223381042,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9383346637090048,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9408386747042338,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "8d1a378c49540880481d842e",
+      "result_sha256": "1870442068cb835de8f56cfa6d479de7efc027656836c3b4ad892ee5b64d706b",
+      "metrics": {
+        "raw_perf_mi": 0.9301215211550395,
+        "raw_perf_bon": 0.9326589306195577,
+        "gap_mi": 92.61102483983208,
+        "gap_bon": 93.60670809415956,
+        "gap0_mi": 92.61102483983208,
+        "gap0_bon": 93.60670809415956
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9326589306195577,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9232438604036967,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9322916467984518,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9322916467984518,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "8e9b82fed364a6d927906d7e",
+      "result_sha256": "fc8411d850d45baf49348b634dbfde9557caab90069e860730381cb0dec6b6e3",
+      "metrics": {
+        "raw_perf_mi": 0.9446781575679778,
+        "raw_perf_bon": 0.9472489356994629,
+        "gap_mi": 99.84050820274489,
+        "gap_bon": 100.29536064837662,
+        "gap0_mi": 99.84050820274489,
+        "gap0_bon": 100.29536064837662
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9449786345163981,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9447115461031595,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9472489356994629,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "90a3ec4023e322d17745c4ab",
+      "result_sha256": "288b0c9997e0b9bffca4cd9a1edf2439d97749a557936a13f1b66085957cfbd6",
+      "metrics": {
+        "raw_perf_mi": 0.9414730320374172,
+        "raw_perf_bon": 0.943175752957662,
+        "gap_mi": 99.34502663520097,
+        "gap_bon": 99.58708242360287,
+        "gap0_mi": 99.34502663520097,
+        "gap0_bon": 99.58708242360287
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.939302901426951,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9417067368825277,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.943175752957662,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9417067368825277,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "90ee5b61e04851ccbf0810f9",
+      "result_sha256": "6970f0c0ed051995f62103769f45f5b591e53da949e0e5d92fac1d19155615f6",
+      "metrics": {
+        "raw_perf_mi": 0.9409805734952291,
+        "raw_perf_bon": 0.9427750905354818,
+        "gap_mi": 96.87213315687116,
+        "gap_bon": 97.57630431709191,
+        "gap0_mi": 96.87213315687116,
+        "gap0_bon": 97.57630431709191
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9401375651359558,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9427750905354818,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.94017094373703,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9408386945724487,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "912ee28b48003ef226ea8d32",
+      "result_sha256": "27c625def3e937c85c9442522126b84fbad41b914b077a820179d14c4567d4b8",
+      "metrics": {
+        "raw_perf_mi": 0.9436348179976145,
+        "raw_perf_bon": 0.9442107478777567,
+        "gap_mi": 99.65590823692442,
+        "gap_bon": 99.75780855702078,
+        "gap0_mi": 99.65590823692442,
+        "gap0_bon": 99.75780855702078
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9429754217465719,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9442107478777567,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9442107478777567,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9431423544883728,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "97d3a86480e050aba37508d5",
+      "result_sha256": "d069dca79dae4e0a6b03c0af6d40f4062f97013b34405a752d4dd3ab0aeb4103",
+      "metrics": {
+        "raw_perf_mi": 0.9452958007653555,
+        "raw_perf_bon": 0.9471153815587362,
+        "gap_mi": 98.56543476686488,
+        "gap_bon": 99.2794409811552,
+        "gap0_mi": 98.56543476686488,
+        "gap0_bon": 99.2794409811552
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9457131226857504,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9471153815587362,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9471153815587362,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "9ac9f02b41c99b2a648e0cb3",
+      "result_sha256": "78e2ac4e4c16f304625dd1c4d70fa18545de01774307acbb3b269060a90935fa",
+      "metrics": {
+        "raw_perf_mi": 0.9433927635351816,
+        "raw_perf_bon": 0.9456797440846761,
+        "gap_mi": 99.61308110109918,
+        "gap_bon": 100.01772072491956,
+        "gap0_mi": 99.61308110109918,
+        "gap0_bon": 100.01772072491956
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9456797440846761,
+          "selected_record": "eval_records[13]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9403378764788309,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9432425300280253,
+          "selected_record": "eval_records[13]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9443109035491943,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "9e38ca2b71118e23088cbecf",
+      "result_sha256": "f50af328702575cfc96029333ad259bed2ed9272dc63584766aff66355375117",
+      "metrics": {
+        "raw_perf_mi": 0.9385767181714376,
+        "raw_perf_bon": 0.9412393172581991,
+        "gap_mi": 95.92885674634528,
+        "gap_bon": 96.97366459495926,
+        "gap0_mi": 95.92885674634528,
+        "gap0_bon": 96.97366459495926
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9396033684412638,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9386351307233175,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.93482905626297,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "a0dae4e0f6c10847f6d8ea0b",
+      "result_sha256": "1d2981889303c8079e3321e2c0d5392dc0ca122797c2d800f8d71de44d34080d",
+      "metrics": {
+        "raw_perf_mi": 0.9317908684412639,
+        "raw_perf_bon": 0.94264155626297,
+        "gap_mi": 97.96862741743246,
+        "gap_bon": 99.51114196820707,
+        "gap0_mi": 97.96862741743246,
+        "gap0_bon": 99.51114196820707
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9402710994084676,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.922409196694692,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9218416213989258,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.94264155626297,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "a1c0f31e494f06fe8634bccf",
+      "result_sha256": "aada8a5d7af8b7152a9c9ff373ff0785351e079749e40b0c9502cf7ec536fcca",
+      "metrics": {
+        "raw_perf_mi": 0.943451186021169,
+        "raw_perf_bon": 0.9437767068545023,
+        "gap_mi": 97.84160519298068,
+        "gap_bon": 97.96934005296956,
+        "gap0_mi": 97.84160519298068,
+        "gap0_bon": 97.96934005296956
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9433426856994629,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9437767068545023,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9433426856994629,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9433426658312479,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "a4c4ec17743d5e175ff608f8",
+      "result_sha256": "8e622804d77d0289a693d47951c44d462f551f65d27d83f699670b43ba01b55c",
+      "metrics": {
+        "raw_perf_mi": 0.940062423547109,
+        "raw_perf_bon": 0.9421741366386414,
+        "gap_mi": 99.02383799613897,
+        "gap_bon": 99.39746723017996,
+        "gap0_mi": 99.02383799613897,
+        "gap0_bon": 99.39746723017996
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9421741366386414,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.939803679784139,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9421741366386414,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9360977411270142,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "a7551e86b64fa1f85e71079f",
+      "result_sha256": "4fa6411c8cf85bd5b819a3fc79d2c1a1587baba768611b9f8f876139a84b9978",
+      "metrics": {
+        "raw_perf_mi": 0.8788895507653554,
+        "raw_perf_bon": 0.9414396286010742,
+        "gap_mi": 90.44826985014524,
+        "gap_bon": 99.34027806188918,
+        "gap0_mi": 90.44826985014524,
+        "gap0_bon": 99.34027806188918
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.8823450803756714,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9414396286010742,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "a8d470f7ec0228507856aff2",
+      "result_sha256": "3a029b755c07a47dee92a89281410863dd9f23818a2ce788d2689ba8b709a940",
+      "metrics": {
+        "raw_perf_mi": 0.9422826518615087,
+        "raw_perf_bon": 0.9443109035491943,
+        "gap_mi": 99.41666702572239,
+        "gap_bon": 99.77552928194035,
+        "gap0_mi": 99.41666702572239,
+        "gap0_bon": 99.77552928194035
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9402710795402527,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9433093070983887,
+          "selected_record": "eval_records[15]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9443109035491943,
+          "selected_record": "eval_records[16]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "b195459d677de788de305c15",
+      "result_sha256": "2c48854e7b9d08d92ec3686f13e0e9fb20468ff323508d51440eb77edf3bef08",
+      "metrics": {
+        "raw_perf_mi": 0.9396451016267141,
+        "raw_perf_bon": 0.9412393172581991,
+        "gap_mi": 99.08517128753606,
+        "gap_bon": 99.31180215638463,
+        "gap0_mi": 99.08517128753606,
+        "gap0_bon": 99.31180215638463
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9390357931454977,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9389356374740601,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9393696586290995,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "b40fd65aa4cf8e855f76d674",
+      "result_sha256": "0d6e03dbc88722f9739da30f6bec37c60dccfd862cb251aba2e00b9507f42d4b",
+      "metrics": {
+        "raw_perf_mi": 0.941598226626714,
+        "raw_perf_bon": 0.9450787901878357,
+        "gap_mi": 97.11450116589853,
+        "gap_bon": 98.48027949292515,
+        "gap0_mi": 97.11450116589853,
+        "gap0_bon": 98.48027949292515
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9411057631174723,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9381677508354187,
+          "selected_record": "eval_records[11]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9450787901878357,
+          "selected_record": "eval_records[10]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "b697f01e080e5fb9be777842",
+      "result_sha256": "b0d8f3919883b9ec3d00adee3a858cad940e94def864fe3e2b3455c2690b9ebc",
+      "metrics": {
+        "raw_perf_mi": 0.9473490963379542,
+        "raw_perf_bon": 0.9505542318026224,
+        "gap_mi": 99.37115100872872,
+        "gap_bon": 100.62885094035056,
+        "gap0_mi": 99.37115100872872,
+        "gap0_bon": 100.62885094035056
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9465812047322592,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9456797440846761,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9465812047322592,
+          "selected_record": "eval_records[12]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9505542318026224,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "bbbbf2d3ad584b74c5836c77",
+      "result_sha256": "fd0882491b13c1d3c8bfa3263c9d6525705da8caf5bc16dc10c6c3954977180d",
+      "metrics": {
+        "raw_perf_mi": 0.9382595469554265,
+        "raw_perf_bon": 0.942641536394755,
+        "gap_mi": 98.88820329099309,
+        "gap_bon": 99.51113914377683,
+        "gap0_mi": 98.88820329099309,
+        "gap0_bon": 99.51113914377683
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9408386945724487,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9383680621782938,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9311898946762085,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.942641536394755,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "bc7f5b33ac82be5194590b8a",
+      "result_sha256": "5b3e360b9270466a47daf229c8ee646c2fdc16c4f26560631612f3c1df799d27",
+      "metrics": {
+        "raw_perf_mi": 0.9387436459461849,
+        "raw_perf_bon": 0.9421741366386414,
+        "gap_mi": 95.99435945385943,
+        "gap_bon": 97.340489112619,
+        "gap0_mi": 95.99435945385943,
+        "gap0_bon": 97.340489112619
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9393362601598104,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9386351307233175,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9421741366386414,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.93482905626297,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "bcb19e920f5a231e46770072",
+      "result_sha256": "f398898ed471fd0aac01d2b9a9f66c84ec338ff7abbed99f253e1de85917476c",
+      "metrics": {
+        "raw_perf_mi": 0.9398370732863743,
+        "raw_perf_bon": 0.9432759086290995,
+        "gap_mi": 98.98396636506995,
+        "gap_bon": 99.59240575025322,
+        "gap0_mi": 98.98396636506995,
+        "gap0_bon": 99.59240575025322
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.938201109568278,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9369992017745972,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9432759086290995,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.940872073173523,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "bee569665ad97b4e9fa24138",
+      "result_sha256": "74e31b5fccac60a3dcb81c50c64ed7f3f2abd09d7e5a5d3df593ae6ea1947167",
+      "metrics": {
+        "raw_perf_mi": 0.943659856915474,
+        "raw_perf_bon": 0.9465811848640442,
+        "gap_mi": 97.92348796280176,
+        "gap_bon": 99.06982140226596,
+        "gap0_mi": 97.92348796280176,
+        "gap0_bon": 99.06982140226596
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9465811848640442,
+          "selected_record": "eval_records[10]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9424412449200948,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9424412449200948,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.943175752957662,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "c0b4a50e412066c0dcf8878b",
+      "result_sha256": "eaa296fde325f268881723ce39e907894959c743d6f196769bc8340ee6db4aab",
+      "metrics": {
+        "raw_perf_mi": 0.941506415605545,
+        "raw_perf_bon": 0.941773513952891,
+        "gap_mi": 99.34977238408254,
+        "gap_bon": 99.38774261178044,
+        "gap0_mi": 99.34977238408254,
+        "gap0_bon": 99.38774261178044
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "c157fed0910b4aececa84999",
+      "result_sha256": "e434238558cf7dfab95676a777472be49de4df38c994f4815ce4c295bfbc2ffa",
+      "metrics": {
+        "raw_perf_mi": 0.9414145996173223,
+        "raw_perf_bon": 0.9433426856994629,
+        "gap_mi": 99.26308096500068,
+        "gap_bon": 99.6042207386394,
+        "gap0_mi": 99.26308096500068,
+        "gap0_bon": 99.6042207386394
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9391359488169352,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9417067368825277,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9433426856994629,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9414730270703634,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "c31270d0d5da5f8405e45a2c",
+      "result_sha256": "20f53c3930f1145f60ee270e48f46f219fe7875ed551cbc424dbfe3b69cd0709",
+      "metrics": {
+        "raw_perf_mi": 0.9435096134742101,
+        "raw_perf_bon": 0.9465812047322592,
+        "gap_mi": 97.86453221260425,
+        "gap_bon": 99.06982919858311,
+        "gap0_mi": 97.86453221260425,
+        "gap0_bon": 99.06982919858311
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9465812047322592,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9455795884132385,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9398370583852133,
+          "selected_record": "eval_records[12]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[10]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "c6d1c186c312720cfc4d7c62",
+      "result_sha256": "a44cc21a45db7f0cfa035f3c90fb1c9f1bc7f6dd84848da8d8c57f3c129107f5",
+      "metrics": {
+        "raw_perf_mi": 0.9360142896572748,
+        "raw_perf_bon": 0.936965803305308,
+        "gap_mi": 94.92335597966179,
+        "gap_bon": 95.29673135279673,
+        "gap0_mi": 94.92335597966179,
+        "gap0_bon": 95.29673135279673
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9351629217465719,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9363982478777567,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.936965803305308,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9355301856994629,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "ca421a125cc6bf5decbe313a",
+      "result_sha256": "6f6fb72bdece33a39105343f47368c9c704ca72e6457f0b204b52576d7ca65a1",
+      "metrics": {
+        "raw_perf_mi": 0.9228682518005371,
+        "raw_perf_bon": 0.9286191066106161,
+        "gap_mi": 96.70020404875235,
+        "gap_bon": 97.51773537669209,
+        "gap0_mi": 96.70020404875235,
+        "gap0_bon": 97.51773537669209
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9196380774180094,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9232104818026224,
+          "selected_record": "offline_submitted_configuration",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9200053413709005,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9286191066106161,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "cfe99df7a1d5ea5878b755a9",
+      "result_sha256": "1760094ec5e4829f1b6d694d374ae30c41f62328f147437eb87f5723651e93a9",
+      "metrics": {
+        "raw_perf_mi": 0.9450871447722117,
+        "raw_perf_bon": 0.9455462098121643,
+        "gap_mi": 98.48355784428168,
+        "gap_bon": 98.66369564991359,
+        "gap0_mi": 98.48355784428168,
+        "gap0_bon": 98.66369564991359
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9455462098121643,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9445446133613586,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9455462098121643,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9447115461031595,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "d296d7ecb9c08771de4398de",
+      "result_sha256": "a7158fd291f03c479ac42888ea750adde596b382637631119e7ea254f09869c9",
+      "metrics": {
+        "raw_perf_mi": 0.9413227786620457,
+        "raw_perf_bon": 0.9439436395963033,
+        "gap_mi": 97.00641497417666,
+        "gap_bon": 98.03484470956302,
+        "gap0_mi": 97.00641497417666,
+        "gap0_bon": 98.03484470956302
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9439436395963033,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9408386747042338,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9394030372301737,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9411057631174723,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "d2a133f42cabec9ff905e9b6",
+      "result_sha256": "df35a9221a883b8dbf95bfc95ec04add903bcbcc35d4c5ca12e88d05bac26119",
+      "metrics": {
+        "raw_perf_mi": 0.9177767783403397,
+        "raw_perf_bon": 0.9429420431454977,
+        "gap_mi": 95.97640920493365,
+        "gap_bon": 99.5538586508941,
+        "gap0_mi": 95.97640920493365,
+        "gap0_bon": 99.5538586508941
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9411391615867615,
+          "selected_record": "offline_submitted_configuration",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9411391615867615,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9429420431454977,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "d5ae6c93fe129488123b8d58",
+      "result_sha256": "18c2b6ccd029f0c1c113a4557b8284684815af267ba60aefeb7f4477881ba299",
+      "metrics": {
+        "raw_perf_mi": 0.8720035354296366,
+        "raw_perf_bon": 0.9350961446762085,
+        "gap_mi": 89.46936611365075,
+        "gap_bon": 98.43849962926889,
+        "gap0_mi": 89.46936611365075,
+        "gap0_bon": 98.43849962926889
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.861144502957662,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9350961446762085,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "dbab8f7aa75215791492595d",
+      "result_sha256": "fc0296194dffa05ff76a461600241826b67670a751ebbd9fa33f37cba8baa0a8",
+      "metrics": {
+        "raw_perf_mi": 0.9323667933543522,
+        "raw_perf_bon": 0.9384682178497314,
+        "gap_mi": 98.05049988240333,
+        "gap_bon": 98.9178675755138,
+        "gap0_mi": 98.05049988240333,
+        "gap0_bon": 98.9178675755138
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9281851053237915,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9384682178497314,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9300213853518168,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9327924648920695,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "dbdd0975b2efe8af2740cdac",
+      "result_sha256": "36f46b382cf694eb2e5384e6640747a487e9f5c38cc1f9ad46f5572875a93649",
+      "metrics": {
+        "raw_perf_mi": 0.6935680359601974,
+        "raw_perf_bon": 0.9372662901878357,
+        "gap_mi": 72.72656951070789,
+        "gap_bon": 98.7470036691959,
+        "gap0_mi": 72.72656951070789,
+        "gap0_bon": 98.7470036691959
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9372662901878357,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9026442170143127,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9343616366386414,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.0,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "e10db734b2d3d4788dc8c5eb",
+      "result_sha256": "9cbc1c9a25a5ceae8a53d2e4a595e4940f2aa8749d631a5d59a07ff421e7ee92",
+      "metrics": {
+        "raw_perf_mi": 0.9406467030445735,
+        "raw_perf_bon": 0.9412393172581991,
+        "gap_mi": 99.22755717002673,
+        "gap_bon": 99.31180215638463,
+        "gap0_mi": 99.22755717002673,
+        "gap0_bon": 99.31180215638463
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9388688604036967,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "e2c9f647e77cadf93dbd4dd3",
+      "result_sha256": "9c0d86157e68387f5d88db2fb4cc349c6383188f5c20656e1925fc9128cdcb03",
+      "metrics": {
+        "raw_perf_mi": 0.9404129981994629,
+        "raw_perf_bon": 0.9420406023661295,
+        "gap_mi": 99.19433410342553,
+        "gap_bon": 99.42571142726322,
+        "gap0_mi": 99.19433410342553,
+        "gap0_bon": 99.42571142726322
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9411057829856873,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9372662901878357,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "e3c6c9bd4921e3edeb39f1b3",
+      "result_sha256": "6f68c900deb124ba383b138bd82a1cddd9d5abda0f5d75dbd67ac66635dcab95",
+      "metrics": {
+        "raw_perf_mi": 0.941639964779218,
+        "raw_perf_bon": 0.9432425300280253,
+        "gap_mi": 99.30295523255921,
+        "gap_bon": 99.58650001371983,
+        "gap0_mi": 99.30295523255921,
+        "gap0_bon": 99.58650001371983
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9397703011830648,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9432425300280253,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.941773513952891,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "e4163cefabf671183b79cfed",
+      "result_sha256": "72836f9042b251358fc6fcd98e7d5b8d64f7159e25bc9974e263b92138db415a",
+      "metrics": {
+        "raw_perf_mi": 0.9102397114038467,
+        "raw_perf_bon": 0.9370993574460348,
+        "gap_mi": 94.90495312668898,
+        "gap_bon": 98.72327280646537,
+        "gap0_mi": 94.90495312668898,
+        "gap0_bon": 98.72327280646537
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9289863705635071,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9289863705635071,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9370993574460348,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "e621b588df01718e7316f411",
+      "result_sha256": "414bc0df538bf813ef386ffe765d69cf1506651113d231429ef15d324d6aa586",
+      "metrics": {
+        "raw_perf_mi": 0.9374332278966904,
+        "raw_perf_bon": 0.9411391615867615,
+        "gap_mi": 98.55864963274396,
+        "gap_bon": 99.2143472138122,
+        "gap0_mi": 98.55864963274396,
+        "gap0_bon": 99.2143472138122
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.93482905626297,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9411391615867615,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9389356374740601,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.93482905626297,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "e70fbde891a064ec706ccf50",
+      "result_sha256": "83e06115ba30cbc87335499e170a184bb45372f3f350298111a21e69bffa0c0b",
+      "metrics": {
+        "raw_perf_mi": 0.9220586170752844,
+        "raw_perf_bon": 0.9386351307233175,
+        "gap_mi": 89.4471292661293,
+        "gap_bon": 95.951777918731,
+        "gap0_mi": 89.4471292661293,
+        "gap0_bon": 95.951777918731
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.937833845615387,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.8968683282534281,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9148971637090048,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9386351307233175,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "e7ea4b89e5b964769f104fc5",
+      "result_sha256": "af9eb09aefcc0818c89cd9b9278f9c003e4a405ca5370ec7fdbf527a0df61a8e",
+      "metrics": {
+        "raw_perf_mi": 0.9062833885351818,
+        "raw_perf_bon": 0.9385016163190206,
+        "gap_mi": 94.3425292792099,
+        "gap_bon": 98.92261544271803,
+        "gap0_mi": 94.3425292792099,
+        "gap0_bon": 98.92261544271803
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.845886747042338,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9366319378217062,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9385016163190206,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.904113252957662,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "e86b0d08dc9845071603f35e",
+      "result_sha256": "9a6f016dfab2a959cf8b41151a94ddc1b12c22e55074cde5d3cf3a0db8d090c8",
+      "metrics": {
+        "raw_perf_mi": 0.9376085052887598,
+        "raw_perf_bon": 0.9380007982254028,
+        "gap_mi": 98.58966178018302,
+        "gap_bon": 98.65907088221746,
+        "gap0_mi": 98.58966178018302,
+        "gap0_bon": 98.65907088221746
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9376669327418009,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9373998443285624,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9380007982254028,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9373664458592733,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "eb9c68ab88ad643b5f57f095",
+      "result_sha256": "26862806415da7778045d12ccb4c2fc563f9ad250461917acf6799a499ef13aa",
+      "metrics": {
+        "raw_perf_mi": 0.9422743072112402,
+        "raw_perf_bon": 0.9438768823941549,
+        "gap_mi": 99.41519059158904,
+        "gap_bon": 99.69873713040934,
+        "gap0_mi": 99.41519059158904,
+        "gap0_bon": 99.69873713040934
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9438768823941549,
+          "selected_record": "eval_records[9]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.941940426826477,
+          "selected_record": "eval_records[11]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "eca6168e6f89b2fba454523c",
+      "result_sha256": "cb2df556bf391cc2bf6e677628222ffb626269edb3e27743da05c54ffbfb9957",
+      "metrics": {
+        "raw_perf_mi": 0.9433426807324091,
+        "raw_perf_bon": 0.9437767068545023,
+        "gap_mi": 97.7990275560108,
+        "gap_bon": 97.96934005296956,
+        "gap0_mi": 97.7990275560108,
+        "gap0_bon": 97.96934005296956
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9437767068545023,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9437767068545023,
+          "selected_record": "eval_records[7]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9420406023661295,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9437767068545023,
+          "selected_record": "eval_records[8]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "f399fa5cc22ed306d3d7198c",
+      "result_sha256": "b2ff4d4ad4ef9c1118da50febcda1e5425fa0a598ef914bd9f10a4efedb639a2",
+      "metrics": {
+        "raw_perf_mi": 0.9237696925799053,
+        "raw_perf_bon": 0.9384682178497314,
+        "gap_mi": 90.11855784344975,
+        "gap_bon": 95.8862810584547,
+        "gap0_mi": 90.11855784344975,
+        "gap0_bon": 95.8862810584547
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.890257736047109,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9304887851079305,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9358640313148499,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9384682178497314,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "f4ec5e7d29315a3a7f78b219",
+      "result_sha256": "1e5f16f81d4114216583b83c0ee57a12c3536d3cb121154e89c223e554d5a0cd",
+      "metrics": {
+        "raw_perf_mi": 0.9420906901359558,
+        "raw_perf_bon": 0.943175752957662,
+        "gap_mi": 99.43283181585447,
+        "gap_bon": 99.58708242360287,
+        "gap0_mi": 99.43283181585447,
+        "gap0_bon": 99.58708242360287
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.943175752957662,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.943175752957662,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9410056273142496,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9410056273142496,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "f7155caed5ada090fb8b0344",
+      "result_sha256": "685a735069450b38f7a610387e6a56310471698c529f051520d6ec32349a8d66",
+      "metrics": {
+        "raw_perf_mi": 0.9389272779226303,
+        "raw_perf_bon": 0.9430088003476461,
+        "gap_mi": 98.98312674191516,
+        "gap_bon": 99.56334873644212,
+        "gap0_mi": 98.98312674191516,
+        "gap0_bon": 99.56334873644212
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9430088003476461,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9403044780095419,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9369324247042338,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9354634086290995,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "f965f886e9395bcc0dc54364",
+      "result_sha256": "8fb734c5be811e81bb3e70faa9a3fca1db3f1f0a0b0e51502819158093fa8d1b",
+      "metrics": {
+        "raw_perf_mi": 0.9416816880305608,
+        "raw_perf_bon": 0.9433093070983887,
+        "gap_mi": 97.14725154511598,
+        "gap_bon": 97.78593169229828,
+        "gap0_mi": 97.14725154511598,
+        "gap0_bon": 97.78593169229828
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9409054517745972,
+          "selected_record": "eval_records[11]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9421741366386414,
+          "selected_record": "eval_records[12]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9403378566106161,
+          "selected_record": "eval_records[14]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9433093070983887,
+          "selected_record": "eval_records[14]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "fab86f7080e849e1cde3b6f4",
+      "result_sha256": "8d5a732e39aff3a1be1b69d8281aabd6f311c0deba53d60a4d1770328fddeec5",
+      "metrics": {
+        "raw_perf_mi": 0.9409555345773697,
+        "raw_perf_bon": 0.9427083532015482,
+        "gap_mi": 96.86230784819799,
+        "gap_bon": 97.55011648782535,
+        "gap0_mi": 96.86230784819799,
+        "gap0_bon": 97.55011648782535
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9427083532015482,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9411725401878357,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9410056074460348,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9389356374740601,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "fcd71291ff089d5352498e77",
+      "result_sha256": "d0ac8de644f8eb5ddb2271ff7830eea4544c3d6afd7a568678f8a3f013689107",
+      "metrics": {
+        "raw_perf_mi": 0.9398871511220931,
+        "raw_perf_bon": 0.9413728515307108,
+        "gap_mi": 99.11958061483078,
+        "gap_bon": 99.33078515191092,
+        "gap0_mi": 99.11958061483078,
+        "gap0_bon": 99.33078515191092
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9413728515307108,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9381677508354187,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9408386747042338,
+          "selected_record": "eval_records[4]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9391693274180094,
+          "selected_record": "eval_records[0]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "fdd07015b0f43d092c6cefc9",
+      "result_sha256": "2ffbaebfc3054c2041e58c7e084eacfe892aea5e89e3580ec42b7c8ffa3c2c84",
+      "metrics": {
+        "raw_perf_mi": 0.9413979103167852,
+        "raw_perf_bon": 0.9433760841687521,
+        "gap_mi": 99.26012809673398,
+        "gap_bon": 99.61012999049215,
+        "gap0_mi": 99.26012809673398,
+        "gap0_bon": 99.61012999049215
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9411057829856873,
+          "selected_record": "eval_records[3]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9433760841687521,
+          "selected_record": "eval_records[6]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.9407051205635071,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9404046535491943,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "slot_id": "ffb1fd3b8ee9e0b8382fecf6",
+      "result_sha256": "54a567eca3cfd95862959b2ad8033b252f2bda52ce8d910629e3ce1b9915557e",
+      "metrics": {
+        "raw_perf_mi": 0.938835471868515,
+        "raw_perf_bon": 0.9412393172581991,
+        "gap_mi": 98.80675120640576,
+        "gap_bon": 99.23206793873176,
+        "gap0_mi": 98.80675120640576,
+        "gap0_bon": 99.23206793873176
+      },
+      "members": [
+        {
+          "agent_id": 0,
+          "performance": 0.9379340211550394,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 1,
+          "performance": 0.9368990461031595,
+          "selected_record": "eval_records[1]",
+          "passed": true
+        },
+        {
+          "agent_id": 2,
+          "performance": 0.939269502957662,
+          "selected_record": "eval_records[2]",
+          "passed": true
+        },
+        {
+          "agent_id": 3,
+          "performance": 0.9412393172581991,
+          "selected_record": "eval_records[5]",
+          "passed": true
+        }
+      ],
+      "passed": true
+    }
+  ],
+  "sources": [
+    {
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/protocol_repair_20260918/analysis/rerun_adoption/collector_review/score_formula_review.py",
+      "sha256": "f955251269f248700cce27787d0e1f7ab723d1b1737c492a22a138e5ebb0381c"
+    },
+    {
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/LLM_ExpGym-protocol-repair-20260918/tools/rescore_hpo_protocol.py",
+      "sha256": "5534e0df2d131e6131af1c82800bc4ee2b7fc4be96472bb72b356a46a33405a9"
+    },
+    {
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/protocol_repair_20260918/runtime/expgym/poolact.py",
+      "sha256": "30ab691a867bd151d156e3d3e3bd5e6857ccbdaa1b667ccde24c0c2eb26c3e7c"
+    },
+    {
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/protocol_repair_20260918/runtime/expgym/missing_final.py",
+      "sha256": "fb5812d3e23f995d0e08912e1a95d3eaa0a42693949f569f16498fcd1767f12f"
+    },
+    {
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/protocol_repair_20260918/runtime/scripts/run_poolact.py",
+      "sha256": "1e76ab4d5dfe2ada63e8bd3b4eb89cf715a0b3e672d50d58a3e78c64e5a3d170"
+    },
+    {
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/protocol_repair_20260918/runtime/scripts/run_paper_sweep.py",
+      "sha256": "6806c2748d06a5ac0b84f715578541eaa22b99e4b706d55745b84498d6c8046c"
+    },
+    {
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/protocol_repair_20260918/runtime/expgym/react_loop.py",
+      "sha256": "80d58f390299f0551b29aae5b88a7a98a998dcb4e8ba8df37db1d53600532253"
+    },
+    {
+      "path": "/lustrefs/users/chufan.shi/codex_space_tn/protocol_repair_20260918/analysis/rerun_adoption/collect_hpo_reruns.py",
+      "sha256": "55e9e8c044d23942827b51eb4ce4f574cced488e611c67f86aeb30f2bd8ecfff"
+    }
+  ],
+  "package_snapshot": {
+    "path": "protocol_repair_20260918/analysis/rerun_adoption/progress/scoring_inputs.jsonl.gz",
+    "sha256": "cc3a309a873cd9162d231cc42874464922ab49bc0509084a4952a6e8d83232f6",
+    "bytes": 446970
+  }
+}

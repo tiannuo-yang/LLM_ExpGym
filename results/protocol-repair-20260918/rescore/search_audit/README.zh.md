@@ -18,13 +18,13 @@
 
 `scoring_inputs.jsonl.gz` 是由原件派生的最小评分输入，包含终端原文、历史答案与分数、原件 SHA、任务身份、仅评分需要的冻结 gold 名称/标签/证据 ID，以及 Audit 历史工具提交记录；不包含完整合同、检索语料、完整轨迹、HTTP 请求头或推理签名。拒绝/截断输出只保留资格与摘要校验信息，不将其当成终答。
 
-从仓库根目录运行（需 Git 历史中的基线提交；不需要私有原件或完整数据集）：
+从仓库根目录运行（公开包自带哈希校验的历史 scorer 源码，不需要 Git 历史、私有原件或完整数据集）：
 
 ```bash
 python tools/rescore_protocol.py --inputs PATH/scoring_inputs.jsonl.gz --output /tmp/search-audit-replay
 ```
 
-脚本直接调用生产 `parse_final_answer`、任务评分器和 `aggregate_results`；同时从固定历史 Git 提交加载旧实现，重算并验证旧分。`LIGHTWEIGHT_REPLAY_CHECKS.json` 记录七张 CSV 的逐字节复算结果。表的再汇总与 parser/scorer 回放是不同检查，本目录提供后者。
+脚本直接调用生产 `parse_final_answer`、任务评分器和 `aggregate_results`；同时从公开的历史 scorer 源码胶囊加载旧实现，重算并验证旧分；胶囊逐字节来自固定历史提交 `297c3d0`。`LIGHTWEIGHT_REPLAY_CHECKS.json` 记录七张 CSV 的逐字节复算结果。表的再汇总与 parser/scorer 回放是不同检查，本目录提供后者。
 
 若持有完整本地留档，可从原件重新构建输入包：
 

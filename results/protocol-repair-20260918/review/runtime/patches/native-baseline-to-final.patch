@@ -1,0 +1,2433 @@
+--- a/demo_experiment.py
++++ b/demo_experiment.py
+@@ -115,6 +115,7 @@
+     system_prompt: str | None = None,
+ ) -> LLMBackend:
+     prompt_cache_key = getattr(args, "prompt_cache_key", None)
++    prompt_cache_key_field = getattr(args, "prompt_cache_key_field", "prompt_cache_key")
+     if backend == "fake":
+         final_answer = plan[-1][1] if plan else None
+         return FakeLLM(plan=plan, final_answer=final_answer)
+@@ -143,6 +144,7 @@
+             seed=args.seed,
+             base_url=args.base_url or os.getenv(url_env),
+             prompt_cache_key=prompt_cache_key,
++            prompt_cache_key_field=prompt_cache_key_field,
+             **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+@@ -157,6 +159,7 @@
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            prompt_cache_key_field=prompt_cache_key_field,
+             **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+@@ -171,6 +174,7 @@
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            prompt_cache_key_field=prompt_cache_key_field,
+             **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+@@ -190,6 +194,7 @@
+             referer=args.openrouter_referer,
+             title=args.openrouter_title,
+             prompt_cache_key=prompt_cache_key,
++            prompt_cache_key_field=prompt_cache_key_field,
+             **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+@@ -204,6 +209,7 @@
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            prompt_cache_key_field=prompt_cache_key_field,
+             **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+@@ -218,6 +224,7 @@
+             seed=args.seed,
+             base_url=args.base_url,
+             prompt_cache_key=prompt_cache_key,
++            prompt_cache_key_field=prompt_cache_key_field,
+             **_generation_options(args, backend=backend),
+             **_transport_options(args),
+         )
+@@ -258,6 +265,11 @@
+ 
+ 
+ def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
++    parser.add_argument(
++        "--prompt-cache-key-field", choices=["prompt_cache_key", "cache_salt"],
++        default="prompt_cache_key",
++        help="Explicit provider field for the existing prompt-cache namespace; cache_salt for compatible SGLang servers. Never inferred from model name.",
++    )
+     parser.add_argument("--api-protocol", choices=["chat", "responses", "anthropic", "gemini"], default="chat",
+                         help="Explicit wire API; native adapters preserve provider reasoning state and record parameter omissions.")
+     parser.add_argument("--missing-final-policy", choices=["error", "task-abstention-v1"], default="error",
+--- a/expgym/extras/aggregation_diagnostics.py
++++ b/expgym/extras/aggregation_diagnostics.py
+@@ -6,9 +6,11 @@
+ """
+ from __future__ import annotations
+ 
+-import json
+-import re
+ from typing import Any, Dict, List, Mapping, Optional, Sequence
++from expgym.tool_protocol import (
++    AUDIT_ANSWER_PROTOCOL_VERSION, AUDIT_FIELD_PROTOCOL_VERSION,
++    AuditAnswerTypeError, audit_evidence_key, audit_label_key, parse_audit_answer,
++)
+ 
+ 
+ def _vote_groups(
+@@ -35,39 +37,23 @@
+ 
+ 
+ def _parse_audit_answer(answer: Any) -> tuple[Dict[str, Any], str]:
+-    """Match the historical aggregator, not a more permissive score parser."""
+-    if isinstance(answer, str):
+-        try:
+-            answer = json.loads(answer)
+-        except (json.JSONDecodeError, TypeError):
+-            return {}, "invalid_json"
+-    if not isinstance(answer, dict):
++    """Use the same wrapper acceptance as the scorer and aggregator."""
++    if not isinstance(answer, (str, dict)):
+         return {}, "not_object"
+-    return answer, "object"
++    try:
++        return parse_audit_answer(answer), "object"
++    except AuditAnswerTypeError:
++        return {}, "not_object"
++    except (ValueError, TypeError, RecursionError, OverflowError):
++        return {}, "invalid_json"
+ 
+ 
+ def _audit_label(value: Any) -> str:
+-    raw = re.sub(r"[^a-z]", "", str(value or "").lower())
+-    return {
+-        "entailment": "Entailment",
+-        "entailed": "Entailment",
+-        "contradiction": "Contradiction",
+-        "contradicted": "Contradiction",
+-        "notmentioned": "NotMentioned",
+-        "neutral": "NotMentioned",
+-    }.get(raw, str(value or "").strip())
++    return audit_label_key(value)
+ 
+ 
+ def _evidence_key(value: Any) -> tuple[Any, ...]:
+-    if not isinstance(value, list):
+-        return ()
+-    normalized = set()
+-    for item in value:
+-        try:
+-            normalized.add(int(item))
+-        except (TypeError, ValueError, OverflowError):
+-            normalized.add(str(item))
+-    return tuple(sorted(normalized, key=lambda item: (str(type(item)), str(item))))
++    return audit_evidence_key(value)
+ 
+ 
+ def build_aggregation_diagnostics(
+@@ -240,7 +226,8 @@
+             "evidence_tied": len(evidence_leaders) > 1,
+         }
+     diagnostics.update({
+-        "audit_parse_policy": "legacy_json_loads_v1",
++        "audit_parse_policy": AUDIT_ANSWER_PROTOCOL_VERSION,
++        "audit_field_policy": AUDIT_FIELD_PROTOCOL_VERSION,
+         "audit_parse_status": [status for _, status in parsed_with_status],
+         "observed_hypothesis_ids": hypothesis_ids,
+         "hypotheses": hypotheses,
+--- a/expgym/extras/parallel_cache.py
++++ b/expgym/extras/parallel_cache.py
+@@ -14,6 +14,7 @@
+ from __future__ import annotations
+ 
+ import copy
++import hashlib
+ import json
+ import math
+ import re
+@@ -649,6 +650,7 @@
+         self._fetch_nodes: Dict[int, FetchNode] = {}    # doc_id -> node
+         self._end_nodes: Dict[str, EndNode] = {}        # answer -> node
+         self._eval_nodes: Dict[str, EvalNode] = {}      # config_key -> node
++        self._eval_key_payloads: Dict[str, str] = {}    # digest identity -> full payload
+ 
+         # Edges: (source_key, target_key) -> GraphEdge
+         self._edges: Dict[Tuple[str, str], GraphEdge] = {}
+@@ -866,7 +868,45 @@
+         return 'END:"{}"'.format(short)
+ 
+     def _eval_key(self, config_key: str) -> str:
+-        return "E:{}".format(config_key[:80])
++        # Path identity must include the complete canonical payload. Truncating
++        # JSON merges distinct long configurations into false transitions/loops.
++        # This full digest is internal; visible paths use snapshot-local labels.
++        # Cache, claim and observation dedup still use their full payload keys.
++        return "E:sha256:{}".format(hashlib.sha256(config_key.encode("utf-8")).hexdigest())
++
++    def _eval_display_keys(self, eval_nodes: Dict[str, EvalNode]) -> Dict[str, str]:
++        """Map full identities to compact IDs using only this visible snapshot.
++
++        Short canonical JSON retains its original readable path label. Long
++        keys use hash prefixes; all colliding prefixes expand together. These
++        aliases are snapshot-local, not a pool-global registry influenced by
++        observations that are still hidden from the receiving agent.
++        """
++        short = {}
++        long = {}
++        for config_key in eval_nodes:
++            identity = self._eval_key(config_key)
++            if len(config_key) <= 80:
++                short[identity] = "E:" + config_key
++            else:
++                long[identity] = 12
++        while True:
++            aliases = dict(short)
++            aliases.update({identity: "E:h:" + identity.rsplit(":", 1)[1][:width]
++                            for identity, width in long.items()})
++            by_alias: Dict[str, List[str]] = {}
++            for identity, alias in aliases.items():
++                by_alias.setdefault(alias, []).append(identity)
++            conflicts = [identities for identities in by_alias.values()
++                         if len(identities) > 1]
++            if not conflicts:
++                return aliases
++            for identities in conflicts:
++                expandable = [identity for identity in identities if identity in long]
++                if not expandable or any(long[identity] >= 64 for identity in expandable):
++                    raise ValueError("Cannot assign distinct evaluation graph display IDs")
++                for identity in expandable:
++                    long[identity] += 1
+ 
+     def _add_edge(self, source: str, target: str, agent_id: int) -> None:
+         """Add or increment an edge. Caller must hold _lock."""
+@@ -1017,11 +1057,15 @@
+             completion_time: Simulated time when this eval completed.
+         """
+         with self._lock:
++            ekey = self._eval_key(config_key)
++            previous_payload = self._eval_key_payloads.get(ekey)
++            if previous_payload is not None and previous_payload != config_key:
++                raise ValueError("Evaluation graph identity digest collision")
+             completion_time = self._remember_observation(
+                 "record_evaluate_config",
+                 (agent_id, config_key, config_display, perf, cost), completion_time,
+             )
+-            ekey = self._eval_key(config_key)
++            self._eval_key_payloads[ekey] = config_key
+             if config_key not in self._eval_nodes:
+                 self._eval_nodes[config_key] = EvalNode(
+                     config_key=config_key,
+@@ -1124,6 +1168,12 @@
+                 and not pending_claims:
+             return ""
+ 
++        # Render from the filtered snapshot only. Keep internal edge identities
++        # untouched, and use the same alias map in observation rows and paths.
++        eval_display_keys = self._eval_display_keys(eval_nodes)
++        edges = {(eval_display_keys.get(src, src), eval_display_keys.get(tgt, tgt)): edge
++                 for (src, tgt), edge in edges.items()}
++
+         # Diversity mode: unified coverage-map format for all scenarios
+         if self._diversity_mode:
+             return self._format_unified(
+@@ -1131,11 +1181,13 @@
+                 end_nodes, edges,
+                 agent_id=agent_id,
+                 pending_claims=pending_claims,
++                eval_display_keys=eval_display_keys,
+             )
+ 
+         # Non-diversity mode: original formats
+         if eval_nodes and not search_nodes and not fetch_nodes:
+-            return self._format_tuning_default(eval_nodes, end_nodes, edges)
++            return self._format_tuning_default(eval_nodes, end_nodes, edges,
++                                               eval_display_keys=eval_display_keys)
+         return self._format_default(
+             search_nodes, fetch_nodes, end_nodes, edges,
+         )
+@@ -1254,6 +1306,7 @@
+         *,
+         agent_id: Optional[int] = None,
+         pending_claims: Optional[List[ActionClaim]] = None,
++        eval_display_keys: Dict[str, str],
+     ) -> str:
+         """Unified coverage-map format for all scenarios in diversity mode.
+ 
+@@ -1337,10 +1390,14 @@
+             for node in sorted_nodes:
+                 who = sorted(node.visited_by)
+                 marker = " (you)" if agent_id in who else ""
++                display = node.config_display
++                if len(node.config_key) > 80:
++                    display = "{} {}".format(eval_display_keys[self._eval_key(node.config_key)],
++                                             display)
+                 if is_audit:
+                     lines.append(
+                         "  {} [agents {}]{}".format(
+-                            node.config_display,
++                            display,
+                             ",".join(str(a) for a in who), marker,
+                         )
+                     )
+@@ -1348,7 +1405,7 @@
+                     perf_str = "{:.6f}".format(node.perf) if node.perf is not None else "INVALID"
+                     lines.append(
+                         "  {} -> {} [agents {}]{}".format(
+-                            node.config_display, perf_str,
++                            display, perf_str,
+                             ",".join(str(a) for a in who), marker,
+                         )
+                     )
+@@ -1434,6 +1491,8 @@
+         eval_nodes: Dict[str, EvalNode],
+         end_nodes: Dict[str, EndNode],
+         edges: Dict[Tuple[str, str], GraphEdge],
++        *,
++        eval_display_keys: Dict[str, str],
+     ) -> str:
+         """Default format for tuning: show all configs with perf + cost."""
+         lines = [
+@@ -1456,9 +1515,13 @@
+ 
+         for node in sorted_nodes:
+             perf_str = "perf={:.6f}".format(node.perf) if node.perf is not None else "INVALID"
++            display = node.config_display
++            if len(node.config_key) > 80:
++                display = "{} {}".format(eval_display_keys[self._eval_key(node.config_key)],
++                                         display)
+             lines.append(
+                 "  {} -> {}, cost={:.0f}s ({}x by [{}])".format(
+-                    node.config_display,
++                    display,
+                     perf_str,
+                     node.cost,
+                     node.visits,
+--- a/expgym/llm_clients.py
++++ b/expgym/llm_clients.py
+@@ -170,6 +170,7 @@
+     retry_max_seconds: float = 120.0
+     retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES
+     reasoning_effort: Optional[str] = None
++    prompt_cache_key_field: str = "prompt_cache_key"
+ 
+ 
+ class OpenAICompatibleLLM(LLMBackend):
+@@ -205,10 +206,13 @@
+         retry_http_statuses: Tuple[int, ...] = DEFAULT_RETRY_HTTP_STATUSES,
+         dump_context: Optional[Dict[str, object]] = None,
+         reasoning_effort: Optional[str] = None,
++        prompt_cache_key_field: str = "prompt_cache_key",
+     ) -> None:
+         key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
+         if not key:
+             raise ValueError("An API key is required for OpenAICompatibleLLM")
++        if prompt_cache_key_field not in ("prompt_cache_key", "cache_salt"):
++            raise ValueError("prompt_cache_key_field must be prompt_cache_key or cache_salt")
+         if (isinstance(top_p, bool) or not isinstance(top_p, (int, float))
+                 or not 0.0 < top_p <= 1.0 or not math.isfinite(top_p)):
+             raise ValueError("top_p must be a finite number in (0, 1]")
+@@ -260,6 +264,7 @@
+             retry_max_seconds=retry_max_seconds,
+             retry_http_statuses=tuple(retry_http_statuses),
+             reasoning_effort=reasoning_effort,
++            prompt_cache_key_field=prompt_cache_key_field,
+         )
+         self._transport = transport
+         dump_directory = os.getenv("EXPGYM_API_DUMP_DIR")
+@@ -673,7 +678,7 @@
+         if self.config.chat_template_kwargs:
+             payload["chat_template_kwargs"] = self.config.chat_template_kwargs
+         if self.config.prompt_cache_key is not None:
+-            payload["prompt_cache_key"] = self.config.prompt_cache_key
++            payload[self.config.prompt_cache_key_field] = self.config.prompt_cache_key
+         if tools is not None:
+             payload["tools"] = copy.deepcopy(tools)
+             payload["tool_choice"] = copy.deepcopy(tool_choice) if tool_choice is not None else "auto"
+--- a/expgym/poolact.py
++++ b/expgym/poolact.py
+@@ -14,7 +14,6 @@
+ import inspect
+ import json
+ import math
+-import re
+ import threading
+ from collections import Counter
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+@@ -22,6 +21,10 @@
+ from typing import Any, Callable, Dict, List, Optional, Sequence
+ 
+ from expgym.extras.aggregation_diagnostics import build_aggregation_diagnostics
++from expgym.tool_protocol import (
++    ANSWER_PROTOCOL_VERSION, audit_evidence_key, audit_label_key,
++    parse_audit_answer, parse_search_answer,
++)
+ from expgym.extras.parallel_cache import (
+     ActionClaim,
+     AgentClock,
+@@ -37,7 +40,7 @@
+     wrap_tools_with_poolact,
+ )
+ 
+-POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v3"
++POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v4"
+ 
+ 
+ @dataclass
+@@ -139,31 +142,8 @@
+ 
+ 
+ def _search_vote_key(answer: Any) -> tuple[str, ...]:
+-    """Canonicalize a search answer so name order does not split a vote."""
+-    text = str(answer or "").strip()
+-    if not text:
+-        return ()
+-    try:
+-        parsed = json.loads(text)
+-    except (json.JSONDecodeError, TypeError):
+-        parsed = None
+-    if isinstance(parsed, list):
+-        parts = [str(value) for value in parsed]
+-    else:
+-        parts = re.split(r"[,;\n]", text)
+-    normalized = {
+-        " ".join(
+-            re.sub(r"^\s*\d+[.)]\s*", "", part)
+-            .strip()
+-            .strip("-*•")
+-            .lower()
+-            .split()
+-        )
+-        for part in parts
+-        if str(part).strip()
+-    }
+-    normalized.discard("")
+-    return tuple(sorted(normalized))
++    """Use exactly the name set accepted by the individual Search scorer."""
++    return tuple(sorted(parse_search_answer(str(answer or ""))))
+ 
+ 
+ def _evaluate_aggregate(
+@@ -210,28 +190,12 @@
+ 
+ 
+ def _canonical_audit_label(value: Any) -> str:
+-    """Normalize common label spellings to the task's public answer format."""
+-    raw = re.sub(r"[^a-z]", "", str(value or "").lower())
+-    return {
+-        "entailment": "Entailment",
+-        "entailed": "Entailment",
+-        "contradiction": "Contradiction",
+-        "contradicted": "Contradiction",
+-        "notmentioned": "NotMentioned",
+-        "neutral": "NotMentioned",
+-    }.get(raw, str(value or "").strip())
++    """Use the individual scorer's literal label interpretation."""
++    return audit_label_key(value)
+ 
+ 
+ def _canonical_evidence_ids(value: Any) -> tuple[Any, ...]:
+-    if not isinstance(value, list):
+-        return ()
+-    normalized = set()
+-    for item in value:
+-        try:
+-            normalized.add(int(item))
+-        except (TypeError, ValueError, OverflowError):
+-            normalized.add(str(item))
+-    return tuple(sorted(normalized, key=lambda item: (str(type(item)), str(item))))
++    return audit_evidence_key(value)
+ 
+ 
+ def aggregate_results(
+@@ -263,6 +227,7 @@
+             ),
+         )
+         return {
++            "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
+             "method": "best_of_n",
+             "answer": best.get("answer") or "",
+             "answer_perf": best.get("answer_perf"),
+@@ -287,6 +252,7 @@
+         answer = str(individual_answers[winner_index])
+         perf, metrics = _evaluate_aggregate(answer_evaluator, answer)
+         return {
++            "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
+             "method": "majority_vote",
+             "answer": answer,
+             "answer_perf": perf,
+@@ -304,10 +270,8 @@
+     parsed_answers: List[Dict[str, Any]] = []
+     for answer in individual_answers:
+         try:
+-            # Preserve the historical vote acceptance set. Task evaluators may
+-            # accept other wrappers; changing voting requires a separate policy.
+-            parsed = json.loads(answer) if isinstance(answer, str) else answer
+-        except (json.JSONDecodeError, TypeError):
++            parsed = parse_audit_answer(answer)
++        except (ValueError, TypeError, RecursionError, OverflowError):
+             parsed = {}
+         parsed_answers.append(parsed if isinstance(parsed, dict) else {})
+ 
+@@ -347,6 +311,7 @@
+     answer = json.dumps(voted, sort_keys=True)
+     perf, metrics = _evaluate_aggregate(answer_evaluator, answer)
+     return {
++        "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
+         "method": "per_hypothesis_majority_vote",
+         "answer": answer,
+         "answer_perf": perf,
+--- a/expgym/react_loop.py
++++ b/expgym/react_loop.py
+@@ -17,7 +17,7 @@
+ 
+ from expgym.errors import ToolInputError
+ from expgym.execution_contract import validate_execution_contracts
+-from expgym.tool_protocol import native_system_prompt, native_tool_schemas, resolve_tool_protocol, structured_final_answer, unlabelled_final_answer
++from expgym.tool_protocol import ANSWER_PROTOCOL_VERSION, native_system_prompt, native_tool_schemas, resolve_tool_protocol, parse_final_answer
+ 
+ logger = logging.getLogger("expgym")
+ 
+@@ -396,7 +396,7 @@
+                 if _extract_action(text) is not None:
+                     protocol_error = "Text Action is not a native function call"
+                 elif text:
+-                    answer = _extract_answer(text) or structured_final_answer(text) or unlabelled_final_answer(text)
++                    answer = parse_final_answer(text)
+                     if answer is None:
+                         protocol_error = "No final answer outside reasoning or protocol examples"
+                 else:
+@@ -522,8 +522,7 @@
+                     if _extract_action(forced_text) is not None:
+                         reject_decision(forced, "Action received during forced final", forced=True)
+                     else:
+-                        answer = (_extract_answer(forced_text) or structured_final_answer(forced_text)
+-                                  or unlabelled_final_answer(forced_text))
++                        answer = parse_final_answer(forced_text)
+                         if answer is None:
+                             reject_decision(forced, "Forced final contains only reasoning or protocol examples", forced=True)
+                         else:
+@@ -557,6 +556,7 @@
+         tool_records=tool_records, eval_records=eval_records,
+     ).__dict__
+     result.update(
++        answer_protocol_version=ANSWER_PROTOCOL_VERSION,
+         tool_protocol=resolved_protocol, max_protocol_retries=max_protocol_retries,
+         tuning_final_policy=tuning_final_policy, protocol_retries=protocol_retries,
+         protocol_failures=protocol_failures, agent_steps=agent_steps,
+@@ -742,8 +742,7 @@
+ 
+ 
+ def _extract_answer(block: str) -> Optional[str]:
+-    from expgym.tool_protocol import extract_text_answer
+-    return extract_text_answer(block)
++    return parse_final_answer(block, allow_unlabelled=False)
+ 
+ 
+ def _extract_action(block: str) -> Optional[Tuple[str, str]]:
+--- a/expgym/task_evidence_audit.py
++++ b/expgym/task_evidence_audit.py
+@@ -10,6 +10,7 @@
+ 
+ from expgym.react_loop import build_system_prompt as build_react_system_prompt
+ from expgym.errors import ToolInputError
++from expgym.tool_protocol import audit_evidence_key, audit_label_key, parse_audit_answer
+ 
+ # Canonical native arguments do not redefine the historical metric. In
+ # particular EA remains independent of LA and legacy int() evidence coercion
+@@ -344,17 +345,8 @@
+     ) -> Dict[str, object]:
+         empty = {"label_acc": 0.0, "evidence_acc": 0.0, "verification_eff": None}
+         try:
+-            data = json.loads(prediction)
+-        except (ValueError, RecursionError, OverflowError):
+-            # Strip trailing non-JSON chars (e.g. ";", markdown fences)
+-            cleaned = prediction.strip().rstrip(";").strip()
+-            if cleaned.startswith("```"):
+-                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+-            try:
+-                data = json.loads(cleaned)
+-            except (ValueError, RecursionError, OverflowError):
+-                return empty
+-        if not isinstance(data, dict):
++            data = parse_audit_answer(prediction)
++        except (ValueError, TypeError, RecursionError, OverflowError):
+             return empty
+ 
+         # Collect all verified submissions from tool records
+@@ -396,7 +388,7 @@
+             if not isinstance(entry, dict):
+                 continue
+ 
+-            pred_label = entry.get("label")
++            pred_label = audit_label_key(entry.get("label"))
+             pred_evidence = entry.get("evidence_ids", [])
+             gold_choice = gold_entry["choice"]
+             gold_spans = set(int(s) for s in gold_entry.get("spans", []))
+@@ -407,10 +399,7 @@
+                 label_correct += 1
+ 
+             # (2) Evidence accuracy (exact match, binary)
+-            try:
+-                evidence_set = set(int(v) for v in pred_evidence)
+-            except Exception:
+-                evidence_set = set()
++            evidence_set = set(audit_evidence_key(pred_evidence))
+             evidence_ok = evidence_set == gold_spans
+             if evidence_ok:
+                 evidence_correct += 1
+--- a/expgym/task_restricted_search.py
++++ b/expgym/task_restricted_search.py
+@@ -9,6 +9,7 @@
+ 
+ from expgym.react_loop import build_system_prompt as build_react_system_prompt
+ from expgym.errors import ToolInputError
++from expgym.tool_protocol import parse_search_answer
+ 
+ # ---------------------------------------------------------------------------
+ # Data paths
+@@ -160,35 +161,8 @@
+ 
+ 
+ def _extract_names(text: str) -> Set[str]:
+-    """Extract person names from LLM prediction text.
+-
+-    Handles: comma-separated, newline-separated, JSON arrays, numbered lists.
+-    """
+-    if not text or not text.strip():
+-        return set()
+-
+-    # Try JSON array first
+-    try:
+-        parsed = json.loads(text.strip())
+-        if isinstance(parsed, list):
+-            return {_normalize_name(str(n)) for n in parsed if str(n).strip()}
+-    except (json.JSONDecodeError, TypeError):
+-        pass
+-
+-    # Split by commas, newlines, semicolons
+-    parts = re.split(r"[,;\n]", text)
+-    names = set()
+-    for part in parts:
+-        # Strip list markers like "1.", "-", "*", "•"
+-        cleaned = re.sub(r"^\s*[\d]+[.)]\s*", "", part)
+-        cleaned = cleaned.strip().strip("-*•").strip()
+-        if not cleaned:
+-            continue
+-        words = cleaned.split()
+-        # Names are typically 2-3 words (Firstname Lastname)
+-        if 1 <= len(words) <= 5:
+-            names.add(_normalize_name(cleaned))
+-    return names
++    """Extract the historical name-F1 set, shared with pool majority vote."""
++    return parse_search_answer(text)
+ 
+ 
+ def _name_f1(prediction: str, gold_answers: List[str]) -> float:
+--- a/expgym/tool_protocol.py
++++ b/expgym/tool_protocol.py
+@@ -10,6 +10,15 @@
+ import math
+ import re
+ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
++
++ANSWER_PROTOCOL_VERSION = "final-answer-boundary-v2"
++AUDIT_ANSWER_PROTOCOL_VERSION = "audit-json-wrapper-v2"
++AUDIT_FIELD_PROTOCOL_VERSION = "audit-literal-label-legacy-evidence-v2"
++SEARCH_ANSWER_PROTOCOL_VERSION = "search-name-set-v2"
++
++
++class AuditAnswerTypeError(ValueError):
++    """The parsed Audit payload is not an object."""
+ 
+ 
+ def resolve_tool_protocol(llm: object, requested: str = "auto") -> str:
+@@ -61,6 +70,9 @@
+ 
+ 
+ _LABEL = re.compile(r"\b(?P<label>Final\s+Answer|Answer|Action|Observation|Thought|System)\s*:", re.I)
++_ANSWER_LABEL = re.compile(
++    r"(?<![^\W_])(?P<label>Final\s+Answer|Answer)(?P<closing>\*\*|__|\*|_)?\s*:", re.I,
++)
+ _REASONING_TAG = re.compile(r"<(/?)(think|analysis|reasoning)\s*>", re.I)
+ _LINE_MARKUP = re.compile(r"[ \t]*(?:(?:[-+*]|\d+[.)])\s+)?(?:\#{1,6}\s+)?[*_]*[ \t]*\Z")
+ _EXAMPLE_OR_NEGATION = re.compile(
+@@ -120,7 +132,10 @@
+             position = end
+             continue
+         if char in "\"'“‘":
+-            if char == "'" and position > 0 and text[position - 1].isalnum():
++            if char == "'" and position > 0 and (
++                text[position - 1].isalnum()
++                or re.search(r"\w(?:\*{1,2}|_{1,2})$", text[:position])
++            ):
+                 position += 1
+                 continue
+             delimiter = {"“": "”", "‘": "’"}.get(char, char)
+@@ -196,17 +211,88 @@
+     return end + match.end()
+ 
+ 
++def _answer_content_start(text: str, match: re.Match) -> Optional[int]:
++    """Remove markup belonging to the label, never markup in its payload."""
++    prefix = text[:match.start()]
++    opening = re.search(r"(\*\*|__|\*|_)$", prefix)
++    marker = opening.group(1) if opening else ""
++    closing = match.group("closing") or ""
++    if closing and closing != marker:
++        return None
++    end = match.end()
++    if marker and not closing:
++        # **Answer:** and **Answer**: are both label wrappers.
++        if text.startswith(marker, end):
++            end += len(marker)
++        # **Answer: Ada** emphasizes the whole submission. Its closing marker
++        # belongs to the original payload and is retained, as in the historical
++        # line parser; task-level name/JSON rules decide how to interpret it.
++    while end < len(text) and text[end].isspace():
++        end += 1
++    return end
++
++
++def _answer_payload(text: str) -> Optional[Tuple[str, bool]]:
++    """Find one unambiguous directive and return its literal suffix.
++
++    An introduction ending in ``final answer:`` is not a submission. Consecutive
++    empty answer headings are wrappers, but two nonempty submissions are never
++    resolved by taking the first/last one or consulting task reference answers.
++    The boolean reports a line-start directive (which may contain plain text).
++    """
++    view = _protocol_view(text)
++    if view is None or extract_text_action(text) is not None:
++        return None
++    labels = list(_ANSWER_LABEL.finditer(view))
++    eligible = []
++    for match in labels:
++        if not _directive_boundary(text, view, match.start()):
++            # A mention in prose is not another submission. Quoted/code/example
++            # regions are already masked or rejected by _directive_boundary.
++            continue
++        start = _answer_content_start(text, match)
++        if start is None:
++            return None
++        eligible.append((match, start))
++    if not eligible:
++        return None
++    for (previous, start), (following, _) in zip(eligible, eligible[1:]):
++        line_start = text.rfind("\n", 0, following.start()) + 1
++        if text[start:line_start].strip():
++            return None
++        # Only line markup can separate adjacent empty headings.
++        if not _LINE_MARKUP.fullmatch(text[line_start:following.start()]):
++            return None
++    match, start = eligible[-1]
++    # A bare structured answer before a labelled one is a double submission.
++    first = eligible[0][0]
++    first_line_start = text.rfind("\n", 0, first.start()) + 1
++    prefix_end = (first_line_start
++                  if _LINE_MARKUP.fullmatch(text[first_line_start:first.start()])
++                  else first.start())
++    try:
++        earlier = parse_json_answer(text[:prefix_end])
++    except (ValueError, TypeError):
++        pass
++    else:
++        if isinstance(earlier, (dict, list)):
++            return None
++    line_start = view.rfind("\n", 0, match.start()) + 1
++    line_final = bool(_LINE_MARKUP.fullmatch(view[line_start:match.start()]))
++    candidate = text[start:].strip()
++    return (candidate, line_final) if candidate else None
++
++
+ def structured_final_answer(text: str) -> Optional[str]:
+     """Recognize a complete structured final, including an inline Answer label.
+ 
+-    Only one visible final label is allowed, outside quoted examples and closed
+-    reasoning regions. Its entire suffix must be a finite JSON object or list.
++    Only one nonempty final directive is allowed, outside quoted examples and
++    closed reasoning regions. Its suffix must be a finite JSON object or list.
+     Callers still prefer explicit actions over textual answers in legacy mode.
+     """
+     if not isinstance(text, str):
+         return None
+-    view = _protocol_view(text)
+-    if view is None:
++    if _protocol_view(text) is None or extract_text_action(text) is not None:
+         return None
+     try:
+         value = parse_json_answer(text)
+@@ -214,22 +300,10 @@
+         pass
+     else:
+         return json.dumps(value, ensure_ascii=False, allow_nan=False) if isinstance(value, (dict, list)) else None
+-    labels = [match for match in _LABEL.finditer(view)
+-              if re.fullmatch(r"(?:final\s+)?answer", match.group("label"), re.I)]
+-    if len(labels) != 1:
+-        return None
+-    match = labels[0]
+-    if not _directive_boundary(text, view, match.start()):
+-        return None
+-    # Do not silently replace an already submitted bare JSON answer.
+-    try:
+-        earlier = parse_json_answer(text[:match.start()])
+-    except (ValueError, TypeError):
+-        pass
+-    else:
+-        if isinstance(earlier, (dict, list)):
+-            return None
+-    candidate = text[_content_start(text, match.end()):].strip()
++    payload = _answer_payload(text)
++    if payload is None:
++        return None
++    candidate, _ = payload
+     try:
+         value = parse_json_answer(candidate)
+     except (ValueError, TypeError):
+@@ -240,25 +314,12 @@
+ 
+ 
+ def extract_text_answer(text: str) -> Optional[str]:
+-    """Keep legacy line-final payloads verbatim, with conservative boundaries.
+-
+-    Multiple line-labelled answers remain one invalid submission beginning at
+-    the first label, as in the legacy evaluator/fallback contract. Inline and
+-    unlabelled finals use the stricter structured recognizer.
+-    """
++    """Extract a unique final, preserving the payload's literal contents."""
+     if not isinstance(text, str):
+         return None
+-    view = _protocol_view(text)
+-    if view is None:
+-        return None
+-    labels = [match for match in _LABEL.finditer(view)
+-              if re.fullmatch(r"(?:final\s+)?answer", match.group("label"), re.I)]
+-    if labels:
+-        first = labels[0]
+-        line_start = view.rfind("\n", 0, first.start()) + 1
+-        if (_LINE_MARKUP.fullmatch(view[line_start:first.start()])
+-                and _directive_boundary(text, view, first.start())):
+-            return text[first.end():].strip()
++    payload = _answer_payload(text)
++    if payload is not None and payload[1]:
++        return payload[0]
+     return structured_final_answer(text)
+ 
+ 
+@@ -274,10 +335,108 @@
+     """
+     if not isinstance(text, str) or not text.strip():
+         return None
+-    if (_protocol_view(text) is None or _LABEL.search(text)
++    if (_protocol_view(text) is None or _LABEL.search(text) or _ANSWER_LABEL.search(text)
+             or _REASONING_TAG.search(text)):
+         return None
+     return text.strip()
++
++
++def parse_final_answer(text: str, *, allow_unlabelled: bool = True) -> Optional[str]:
++    """The shared runtime/offline text-to-final boundary, independent of task.
++
++    Callers must reject provider-native tool calls and length-truncated outputs
++    before invoking this text-only helper. Bare prose is enabled only where the
++    transport already permits it (native or forced-final responses).
++    """
++    if not isinstance(text, str) or extract_text_action(text) is not None:
++        return None
++    answer = extract_text_answer(text)
++    if answer is None and allow_unlabelled:
++        answer = unlabelled_final_answer(text)
++    return answer
++
++
++def parse_audit_answer(prediction: Any) -> Dict[str, Any]:
++    """Parse the same Audit payload for individual scoring and pool voting.
++
++    Accept one object, an optional semicolon, and a complete JSON/no-language
++    fence. Preserve the historical acceptance of explanation after a closing
++    fence, but reject another object, fence, or protocol directive in that tail.
++    Never extract a JSON example from arbitrary leading prose or alter fields.
++    """
++    if isinstance(prediction, dict):
++        return prediction
++    if not isinstance(prediction, str):
++        raise AuditAnswerTypeError("An Audit answer must be a JSON object")
++    # Keep the historical JSON field/coercion semantics. The versioned change
++    # concerns wrappers and voting acceptance, not evidence or label values.
++    cleaned = prediction.strip().rstrip(";").strip()
++    try:
++        value = json.loads(cleaned)
++    except (ValueError, TypeError, RecursionError, OverflowError):
++        match = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?```(.*)", cleaned, re.S | re.I)
++        if match is None:
++            raise ValueError("Invalid Audit JSON wrapper") from None
++        body, tail = match.groups()
++        tail = tail.lstrip().lstrip(";").strip()
++        view = _protocol_view(tail)
++        tail_directives = (view is not None and any(
++            _directive_boundary(tail, view, label.start())
++            for pattern in (_LABEL, _ANSWER_LABEL)
++            for label in pattern.finditer(view)
++        ))
++        if (view is None or "```" in tail or "~~~" in tail
++                or tail_directives
++                or "{" in view or "}" in view
++                or re.search(r"(?m)^\s*\[", view)):
++            raise ValueError("Ambiguous Audit answer after closing fence")
++        try:
++            value = json.loads(body.strip().rstrip(";").strip())
++        except (ValueError, TypeError, RecursionError, OverflowError) as exc:
++            raise ValueError("Invalid Audit JSON contents") from exc
++    if not isinstance(value, dict):
++        raise AuditAnswerTypeError("An Audit answer must be a JSON object")
++    return value
++
++
++def parse_search_answer(text: str) -> set[str]:
++    """The existing name-F1 acceptance set, shared with Search majority vote."""
++    if not text or not text.strip():
++        return set()
++    try:
++        parsed = json.loads(text.strip())
++        if isinstance(parsed, list):
++            return {" ".join(str(name).lower().split()) for name in parsed if str(name).strip()}
++    except (json.JSONDecodeError, TypeError):
++        pass
++    names = set()
++    for part in re.split(r"[,;\n]", text):
++        cleaned = re.sub(r"^\s*[\d]+[.)]\s*", "", part).strip().strip("-*•").strip()
++        if 1 <= len(cleaned.split()) <= 5:
++            names.add(" ".join(cleaned.lower().split()))
++    return names
++
++
++def audit_label_key(value: Any) -> str:
++    """Keep literal label strings; never turn an incorrect alias into a label.
++
++    Non-string labels cannot equal any public Audit label and share the invalid
++    empty-string key. They are still votes, rather than silent abstentions.
++    """
++    return value if isinstance(value, str) else ""
++
++
++def audit_evidence_key(value: Any) -> Tuple[int, ...]:
++    """Match the historical individual metric's all-or-empty int-set rule.
++
++    Its acceptance of non-list iterables and int-convertible values is retained
++    for compatibility. This helper does not infer or repair evidence IDs.
++    """
++    try:
++        values = {int(item) for item in value}
++    except Exception:
++        values = set()
++    return tuple(sorted(values, key=str))
+ 
+ 
+ class _TextAction(NamedTuple):
+--- a/expgym/trace_v2.py
++++ b/expgym/trace_v2.py
+@@ -362,7 +362,7 @@
+     }
+     if score_source is not None:
+         outcome["answer_score_source"] = score_source
+-    for optional in ("tool_protocol", "tuning_final_policy", "protocol_failures", "protocol_retries", "agent_steps", "http_request_attempts"):
++    for optional in ("tool_protocol", "answer_protocol_version", "tuning_final_policy", "protocol_failures", "protocol_retries", "agent_steps", "http_request_attempts"):
+         if optional in result:
+             outcome[optional] = copy.deepcopy(result[optional])
+     if result.get("missing_final_policy") == "task-abstention-v1":
+--- a/scripts/run_paper_sweep.py
++++ b/scripts/run_paper_sweep.py
+@@ -523,6 +523,7 @@
+     ns.base_url = args.base_url
+     ns.prompt_cache = _prompt_cache_config(args, job)
+     ns.prompt_cache_key = ns.prompt_cache["key"]
++    ns.prompt_cache_key_field = getattr(args, "prompt_cache_key_field", "prompt_cache_key")
+     ns.trace_format = getattr(args, "trace_format", "v1")
+     ns.probes = 4
+     ns.max_steps = args.max_steps
+@@ -577,6 +578,7 @@
+         "protocol": _loop_options(args),
+         "evaluation_identity": evaluation if evaluation is not None else _job_evaluation_identity(args, job),
+         "prompt_cache": _prompt_cache_config(args, job),
++        "prompt_cache_key_field": getattr(args, "prompt_cache_key_field", "prompt_cache_key"),
+         "transport": {
+             "timeout": getattr(args, "request_timeout", 600.0),
+             "max_retries": getattr(args, "max_retries", 10),
+@@ -716,9 +718,13 @@
+         model = config.pop("model", ns.model)
+         base_url = config.pop("base_url", ns.base_url)
+         prompt_cache_key = config.pop("prompt_cache_key", None)
++        prompt_cache_key_field = config.pop("prompt_cache_key_field", ns.prompt_cache_key_field)
+         prompt_cache = dict(ns.prompt_cache)
+         if prompt_cache.get("key") != prompt_cache_key:
+             raise RuntimeError("effective prompt cache key metadata mismatch")
++        if prompt_cache_key_field != ns.prompt_cache_key_field:
++            raise RuntimeError("effective prompt cache field metadata mismatch")
++        prompt_cache["key_field"] = prompt_cache_key_field
+         timeout = config.pop("timeout", None)
+         config.pop("system_prompt", None)
+         if getattr(llm, "api_protocol", "chat") != "chat":
+--- a/scripts/run_poolact.py
++++ b/scripts/run_poolact.py
+@@ -342,6 +342,7 @@
+         "probes": args.probes,
+         "base_url": args.base_url,
+         "prompt_cache_key": args.prompt_cache_key,
++        "prompt_cache_key_field": getattr(args, "prompt_cache_key_field", "prompt_cache_key"),
+         "vllm_disable_thinking": args.vllm_disable_thinking,
+         "request_timeout": args.request_timeout,
+         "max_retries": args.max_retries,
+--- a/tests/fixtures/poolact_gemini_graph_collision.json
++++ b/tests/fixtures/poolact_gemini_graph_collision.json
+@@ -0,0 +1,78 @@
++{
++  "description": "Observed Gemini HPO PoolAct graph whose path target is ambiguous under the legacy first-80-character ID. These are already visible observations; replay changes rendering only, not historical actions or scores.",
++  "source": {
++    "slot_id": "e10db734b2d3d4788dc8c5eb",
++    "model": "gemini-3.8-flash-medium",
++    "item": "hpobench:nasbench101:A",
++    "regime": "cost_moderate",
++    "outer_repeat": "2",
++    "sha256": "ecb56ee8107ac21106da1449d3e8e75e6ff0a4a3698bfadceca9a68691e35922",
++    "agent_id": 0,
++    "message_index": 5
++  },
++  "source_message_sha256": "a41b90d0a10d1a54f1e32f5e3e63f47974f23ad3f994e5833589470fbc620d5e",
++  "events": [
++    {
++      "agent_id": 0,
++      "payload": "{\"edge_10\":0,\"edge_0\":1,\"edge_14\":0,\"edge_13\":0,\"edge_18\":0,\"edge_5\":0,\"edge_15\":0,\"edge_9\":0,\"edge_3\":0,\"edge_7\":0,\"edge_1\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"edge_2\":0,\"op_node_3\":\"conv3x3-bn-relu\",\"edge_20\":1,\"op_node_4\":\"conv3x3-bn-relu\",\"edge_11\":0,\"edge_4\":0,\"edge_12\":0,\"edge_17\":0,\"edge_19\":0,\"edge_16\":0,\"op_node_1\":\"conv3x3-bn-relu\",\"edge_6\":1,\"edge_8\":0,\"op_node_2\":\"conv3x3-bn-relu\"}",
++      "config_key": "{\"edge_0\":1,\"edge_1\":0,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":0,\"edge_14\":0,\"edge_15\":0,\"edge_16\":0,\"edge_17\":0,\"edge_18\":0,\"edge_19\":0,\"edge_2\":0,\"edge_20\":1,\"edge_3\":0,\"edge_4\":0,\"edge_5\":0,\"edge_6\":1,\"edge_7\":0,\"edge_8\":0,\"edge_9\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_2\":\"conv3x3-bn-relu\",\"op_node_3\":\"conv3x3-bn-relu\",\"op_node_4\":\"conv3x3-bn-relu\"}",
++      "config_display": "{edge_0:1,edge_1:0,edge_10:0,edge_11:0,edge_12:0,edge_13:0,edge_14:0,edge_15:0,edge_16:0,edge_17:0,edge_18:0,edge_19:0,edge_2:0,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:1,edge_7:0,edge_8:0,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu}",
++      "perf": null,
++      "cost": 0.0
++    },
++    {
++      "agent_id": 0,
++      "payload": "{\"op_node_0\":\"conv3x3-bn-relu\",\"edge_17\":0,\"op_node_2\":\"conv3x3-bn-relu\",\"edge_4\":0,\"edge_19\":1,\"edge_5\":0,\"edge_8\":1,\"edge_13\":1,\"op_node_1\":\"conv3x3-bn-relu\",\"edge_1\":1,\"edge_11\":0,\"edge_9\":0,\"op_node_4\":\"conv3x3-bn-relu\",\"edge_3\":0,\"edge_14\":0,\"edge_18\":0,\"edge_0\":1,\"edge_10\":0,\"op_node_3\":\"conv3x3-bn-relu\",\"edge_7\":0,\"edge_12\":0,\"edge_15\":1,\"edge_16\":1,\"edge_6\":0,\"edge_20\":1,\"edge_2\":1}",
++      "config_key": "{\"edge_0\":1,\"edge_1\":1,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":1,\"edge_14\":0,\"edge_15\":1,\"edge_16\":1,\"edge_17\":0,\"edge_18\":0,\"edge_19\":1,\"edge_2\":1,\"edge_20\":1,\"edge_3\":0,\"edge_4\":0,\"edge_5\":0,\"edge_6\":0,\"edge_7\":0,\"edge_8\":1,\"edge_9\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_2\":\"conv3x3-bn-relu\",\"op_node_3\":\"conv3x3-bn-relu\",\"op_node_4\":\"conv3x3-bn-relu\"}",
++      "config_display": "{edge_0:1,edge_1:1,edge_10:0,edge_11:0,edge_12:0,edge_13:1,edge_14:0,edge_15:1,edge_16:1,edge_17:0,edge_18:0,edge_19:1,edge_2:1,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:0,edge_7:0,edge_8:1,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu}",
++      "perf": 0.93482905626297,
++      "cost": 6329.89892578125
++    },
++    {
++      "agent_id": 1,
++      "payload": "{\"edge_9\":0,\"edge_17\":0,\"edge_5\":0,\"edge_2\":1,\"edge_4\":0,\"edge_15\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"op_node_3\":\"conv3x3-bn-relu\",\"edge_14\":0,\"edge_1\":1,\"edge_3\":0,\"edge_7\":0,\"op_node_1\":\"conv3x3-bn-relu\",\"edge_12\":1,\"edge_19\":1,\"op_node_4\":\"conv3x3-bn-relu\",\"edge_6\":0,\"edge_16\":1,\"op_node_2\":\"conv3x3-bn-relu\",\"edge_10\":0,\"edge_11\":0,\"edge_0\":1,\"edge_13\":0,\"edge_18\":1,\"edge_8\":1,\"edge_20\":1}",
++      "config_key": "{\"edge_0\":1,\"edge_1\":1,\"edge_10\":0,\"edge_11\":0,\"edge_12\":1,\"edge_13\":0,\"edge_14\":0,\"edge_15\":0,\"edge_16\":1,\"edge_17\":0,\"edge_18\":1,\"edge_19\":1,\"edge_2\":1,\"edge_20\":1,\"edge_3\":0,\"edge_4\":0,\"edge_5\":0,\"edge_6\":0,\"edge_7\":0,\"edge_8\":1,\"edge_9\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_2\":\"conv3x3-bn-relu\",\"op_node_3\":\"conv3x3-bn-relu\",\"op_node_4\":\"conv3x3-bn-relu\"}",
++      "config_display": "{edge_0:1,edge_1:1,edge_10:0,edge_11:0,edge_12:1,edge_13:0,edge_14:0,edge_15:0,edge_16:1,edge_17:0,edge_18:1,edge_19:1,edge_2:1,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:0,edge_7:0,edge_8:1,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu}",
++      "perf": 0.9300213853518168,
++      "cost": 6305.0849609375
++    },
++    {
++      "agent_id": 2,
++      "payload": "{\"edge_3\":0,\"edge_4\":0,\"edge_0\":1,\"edge_11\":0,\"edge_8\":1,\"edge_15\":0,\"edge_18\":0,\"op_node_3\":\"conv3x3-bn-relu\",\"edge_9\":0,\"edge_1\":1,\"edge_19\":1,\"edge_2\":1,\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_2\":\"conv3x3-bn-relu\",\"edge_7\":0,\"edge_12\":0,\"edge_10\":0,\"edge_16\":1,\"edge_6\":0,\"op_node_4\":\"conv3x3-bn-relu\",\"edge_5\":0,\"edge_20\":1,\"edge_17\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"edge_13\":1,\"edge_14\":0}",
++      "config_key": "{\"edge_0\":1,\"edge_1\":1,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":1,\"edge_14\":0,\"edge_15\":0,\"edge_16\":1,\"edge_17\":0,\"edge_18\":0,\"edge_19\":1,\"edge_2\":1,\"edge_20\":1,\"edge_3\":0,\"edge_4\":0,\"edge_5\":0,\"edge_6\":0,\"edge_7\":0,\"edge_8\":1,\"edge_9\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_2\":\"conv3x3-bn-relu\",\"op_node_3\":\"conv3x3-bn-relu\",\"op_node_4\":\"conv3x3-bn-relu\"}",
++      "config_display": "{edge_0:1,edge_1:1,edge_10:0,edge_11:0,edge_12:0,edge_13:1,edge_14:0,edge_15:0,edge_16:1,edge_17:0,edge_18:0,edge_19:1,edge_2:1,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:0,edge_7:0,edge_8:1,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu}",
++      "perf": 0.9335603713989258,
++      "cost": 6228.48974609375
++    },
++    {
++      "agent_id": 3,
++      "payload": "{\"edge_3\":0,\"edge_13\":0,\"edge_0\":1,\"edge_2\":0,\"edge_15\":0,\"edge_7\":1,\"edge_16\":1,\"edge_8\":0,\"op_node_4\":\"conv3x3-bn-relu\",\"edge_14\":0,\"edge_17\":0,\"edge_4\":0,\"op_node_2\":\"conv3x3-bn-relu\",\"edge_18\":0,\"edge_5\":0,\"edge_11\":1,\"edge_9\":0,\"edge_6\":1,\"op_node_3\":\"conv3x3-bn-relu\",\"edge_12\":1,\"edge_10\":0,\"edge_19\":1,\"edge_20\":1,\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_0\":\"conv3x3-bn-relu\",\"edge_1\":1}",
++      "config_key": "{\"edge_0\":1,\"edge_1\":1,\"edge_10\":0,\"edge_11\":1,\"edge_12\":1,\"edge_13\":0,\"edge_14\":0,\"edge_15\":0,\"edge_16\":1,\"edge_17\":0,\"edge_18\":0,\"edge_19\":1,\"edge_2\":0,\"edge_20\":1,\"edge_3\":0,\"edge_4\":0,\"edge_5\":0,\"edge_6\":1,\"edge_7\":1,\"edge_8\":0,\"edge_9\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_2\":\"conv3x3-bn-relu\",\"op_node_3\":\"conv3x3-bn-relu\",\"op_node_4\":\"conv3x3-bn-relu\"}",
++      "config_display": "{edge_0:1,edge_1:1,edge_10:0,edge_11:1,edge_12:1,edge_13:0,edge_14:0,edge_15:0,edge_16:1,edge_17:0,edge_18:0,edge_19:1,edge_2:0,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:1,edge_7:1,edge_8:0,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu}",
++      "perf": 0.9158987601598104,
++      "cost": 5953.949951171875
++    }
++  ],
++  "ambiguous_keys": [
++    "{\"edge_0\":1,\"edge_1\":1,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":1,\"edge_14\":0,\"edge_15\":0,\"edge_16\":1,\"edge_17\":0,\"edge_18\":0,\"edge_19\":1,\"edge_2\":1,\"edge_20\":1,\"edge_3\":0,\"edge_4\":0,\"edge_5\":0,\"edge_6\":0,\"edge_7\":0,\"edge_8\":1,\"edge_9\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_2\":\"conv3x3-bn-relu\",\"op_node_3\":\"conv3x3-bn-relu\",\"op_node_4\":\"conv3x3-bn-relu\"}",
++    "{\"edge_0\":1,\"edge_1\":1,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":1,\"edge_14\":0,\"edge_15\":1,\"edge_16\":1,\"edge_17\":0,\"edge_18\":0,\"edge_19\":1,\"edge_2\":1,\"edge_20\":1,\"edge_3\":0,\"edge_4\":0,\"edge_5\":0,\"edge_6\":0,\"edge_7\":0,\"edge_8\":1,\"edge_9\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"op_node_1\":\"conv3x3-bn-relu\",\"op_node_2\":\"conv3x3-bn-relu\",\"op_node_3\":\"conv3x3-bn-relu\",\"op_node_4\":\"conv3x3-bn-relu\"}"
++  ],
++  "historical_graph": "[Parallel Exploration — Agent 0 of 4]\nYou are one of 4 agents solving this task in parallel.\nShared state below shows what other agents have explored and are exploring.\nUse this to plan your next action — prioritize paths not yet explored.\n\n== In Progress ==\n  evaluate {edge_0=1, edge_1=1, edge_10=0, edge_11=0, edge_12=1, edge_13=0, edge_14=0, edge_15=0, edge_16=1, edge_17=0, edge_18=0, edge_19=1, edge_2=1, edge_20=1, edge_3=0, edge_4=0, edge_5=0, edge_6=0, edge_7=1, edge_8=1, edge_9=0, op_node_0=conv3x3-bn-relu, op_node_1=conv3x3-bn-relu, op_node_2=conv3x3-bn-relu, op_node_3=conv3x3-bn-relu, op_node_4=conv3x3-bn-relu} [agent 3]\n  evaluate {edge_0=1, edge_1=1, edge_10=0, edge_11=0, edge_12=0, edge_13=1, edge_14=0, edge_15=0, edge_16=1, edge_17=0, edge_18=0, edge_19=1, edge_2=1, edge_20=1, edge_3=0, edge_4=0, edge_5=1, edge_6=0, edge_7=0, edge_8=1, edge_9=0, op_node_0=conv3x3-bn-relu, op_node_1=conv3x3-bn-relu, op_node_2=conv3x3-bn-relu, op_node_3=conv3x3-bn-relu, op_node_4=conv3x3-bn-relu} [agent 2]\n  evaluate {edge_0=1, edge_1=1, edge_10=0, edge_11=0, edge_12=0, edge_13=1, edge_14=0, edge_15=0, edge_16=1, edge_17=0, edge_18=0, edge_19=1, edge_2=1, edge_20=1, edge_3=0, edge_4=0, edge_5=1, edge_6=0, edge_7=0, edge_8=1, edge_9=0, op_node_0=conv3x3-bn-relu, op_node_1=conv3x3-bn-relu, op_node_2=conv3x3-bn-relu, op_node_3=conv3x3-bn-relu, op_node_4=conv3x3-bn-relu} [agent 1]\n\n== Already Explored ==\n  {edge_0:1,edge_1:1,edge_10:0,edge_11:0,edge_12:0,edge_13:1,edge_14:0,edge_15:1,edge_16:1,edge_17:0,edge_18:0,edge_19:1,edge_2:1,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:0,edge_7:0,edge_8:1,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu} -> 0.934829 [agents 0] (you)\n  {edge_0:1,edge_1:1,edge_10:0,edge_11:0,edge_12:0,edge_13:1,edge_14:0,edge_15:0,edge_16:1,edge_17:0,edge_18:0,edge_19:1,edge_2:1,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:0,edge_7:0,edge_8:1,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu} -> 0.933560 [agents 2]\n  {edge_0:1,edge_1:1,edge_10:0,edge_11:0,edge_12:1,edge_13:0,edge_14:0,edge_15:0,edge_16:1,edge_17:0,edge_18:1,edge_19:1,edge_2:1,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:0,edge_7:0,edge_8:1,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu} -> 0.930021 [agents 1]\n  {edge_0:1,edge_1:1,edge_10:0,edge_11:1,edge_12:1,edge_13:0,edge_14:0,edge_15:0,edge_16:1,edge_17:0,edge_18:0,edge_19:1,edge_2:0,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:1,edge_7:1,edge_8:0,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu} -> 0.915899 [agents 3]\n  {edge_0:1,edge_1:0,edge_10:0,edge_11:0,edge_12:0,edge_13:0,edge_14:0,edge_15:0,edge_16:0,edge_17:0,edge_18:0,edge_19:0,edge_2:0,edge_20:1,edge_3:0,edge_4:0,edge_5:0,edge_6:1,edge_7:0,edge_8:0,edge_9:0,op_node_0:conv3x3-bn-relu,op_node_1:conv3x3-bn-relu,op_node_2:conv3x3-bn-relu,op_node_3:conv3x3-bn-relu,op_node_4:conv3x3-bn-relu} -> INVALID [agents 0] (you)\n\n== Exploration Paths ==\n  E:{\"edge_0\":1,\"edge_1\":0,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":0,\"edge_14\" --> E:{\"edge_0\":1,\"edge_1\":1,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":1,\"edge_14\" [agents 0]\n\n== Coverage Gap ==\n  5 unique configs evaluated, best: 0.934829",
++  "historical_path_lines": [
++    "  E:{\"edge_0\":1,\"edge_1\":0,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":0,\"edge_14\" --> E:{\"edge_0\":1,\"edge_1\":1,\"edge_10\":0,\"edge_11\":0,\"edge_12\":0,\"edge_13\":1,\"edge_14\" [agents 0]"
++  ],
++  "pending": [
++    {
++      "agent_id": 3,
++      "payload": "{\"edge_14\":0,\"op_node_3\":\"conv3x3-bn-relu\",\"edge_15\":0,\"op_node_2\":\"conv3x3-bn-relu\",\"edge_11\":0,\"op_node_4\":\"conv3x3-bn-relu\",\"edge_19\":1,\"edge_16\":1,\"edge_1\":1,\"edge_20\":1,\"edge_7\":1,\"edge_9\":0,\"edge_17\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"edge_13\":0,\"edge_8\":1,\"edge_3\":0,\"edge_6\":0,\"edge_2\":1,\"edge_0\":1,\"edge_12\":1,\"edge_4\":0,\"edge_5\":0,\"op_node_1\":\"conv3x3-bn-relu\",\"edge_10\":0,\"edge_18\":0}"
++    },
++    {
++      "agent_id": 2,
++      "payload": "{\"edge_5\":1,\"op_node_0\":\"conv3x3-bn-relu\",\"edge_9\":0,\"edge_6\":0,\"edge_12\":0,\"edge_0\":1,\"edge_15\":0,\"op_node_3\":\"conv3x3-bn-relu\",\"edge_7\":0,\"edge_8\":1,\"edge_11\":0,\"op_node_4\":\"conv3x3-bn-relu\",\"edge_4\":0,\"edge_18\":0,\"op_node_1\":\"conv3x3-bn-relu\",\"edge_14\":0,\"edge_10\":0,\"op_node_2\":\"conv3x3-bn-relu\",\"edge_20\":1,\"edge_2\":1,\"edge_16\":1,\"edge_13\":1,\"edge_19\":1,\"edge_3\":0,\"edge_17\":0,\"edge_1\":1}"
++    },
++    {
++      "agent_id": 1,
++      "payload": "{\"edge_8\":1,\"edge_19\":1,\"op_node_3\":\"conv3x3-bn-relu\",\"op_node_1\":\"conv3x3-bn-relu\",\"edge_18\":0,\"edge_15\":0,\"edge_4\":0,\"edge_0\":1,\"edge_3\":0,\"op_node_2\":\"conv3x3-bn-relu\",\"edge_7\":0,\"edge_2\":1,\"edge_1\":1,\"edge_9\":0,\"edge_11\":0,\"edge_6\":0,\"edge_14\":0,\"edge_13\":1,\"edge_17\":0,\"op_node_0\":\"conv3x3-bn-relu\",\"edge_20\":1,\"edge_16\":1,\"edge_10\":0,\"edge_12\":0,\"edge_5\":1,\"op_node_4\":\"conv3x3-bn-relu\"}"
++    }
++  ]
++}
+--- a/tests/test_aggregation_diagnostics.py
++++ b/tests/test_aggregation_diagnostics.py
+@@ -90,10 +90,10 @@
+ 
+     def test_audit_label_tie_and_evidence_vote_use_only_label_supporters(self):
+         parsed = [
+-            {"h": {"label": "entailed", "evidence_ids": [2, "1", 2]}},
++            {"h": {"label": "Entailment", "evidence_ids": [2, "1", 2]}},
+             {"h": {"label": "Contradiction", "evidence_ids": [9]}},
+             {"h": {"label": "Entailment", "evidence_ids": [3]}},
+-            {"h": {"label": "contradicted", "evidence_ids": [9]}},
++            {"h": {"label": "Contradiction", "evidence_ids": [9]}},
+         ]
+         out = build_aggregation_diagnostics(
+             "evidence_audit", [{"answer": json.dumps(value)} for value in parsed],
+@@ -140,7 +140,7 @@
+         self.assertEqual(out["observed_hypothesis_ids"], [])
+         self.assertEqual(out["hypotheses"], {})
+ 
+-    def test_audit_plain_json_matches_legacy_aggregation_for_every_strategy(self):
++    def test_audit_plain_json_matches_aggregation_for_every_strategy(self):
+         from expgym.poolact import aggregate_results
+ 
+         payload = json.dumps({"h": {"label": "Entailment", "evidence_ids": [1]}})
+@@ -149,13 +149,13 @@
+                 results = [{"answer": payload, "strategy": strategy}]
+                 out = build_aggregation_diagnostics("evidence_audit", results)
+                 aggregate = aggregate_results("evidence_audit", results)
+-                self.assertEqual(out["audit_parse_policy"], "legacy_json_loads_v1")
++                self.assertEqual(out["audit_parse_policy"], "audit-json-wrapper-v2")
+                 self.assertEqual(out["audit_parse_status"], ["object"])
+                 self.assertEqual(out["hypotheses"]["h"]["winning_label"], "Entailment")
+                 self.assertEqual(out["hypotheses"]["h"]["winning_evidence"], [1])
+                 self.assertEqual(json.loads(aggregate["answer"]), json.loads(payload))
+ 
+-    def test_audit_wrapped_json_is_not_accepted_by_legacy_aggregation(self):
++    def test_audit_wrapped_json_is_accepted_by_shared_policy(self):
+         from expgym.poolact import aggregate_results
+ 
+         payload = json.dumps({"h": {"label": "Entailment", "evidence_ids": [1]}})
+@@ -169,11 +169,11 @@
+                     results = [{"answer": answer, "strategy": strategy}]
+                     out = build_aggregation_diagnostics("evidence_audit", results)
+                     aggregate = aggregate_results("evidence_audit", results)
+-                    self.assertEqual(out["audit_parse_policy"], "legacy_json_loads_v1")
+-                    self.assertEqual(out["audit_parse_status"], ["invalid_json"])
+-                    self.assertEqual(out["observed_hypothesis_ids"], [])
+-                    self.assertEqual(out["hypotheses"], {})
+-                    self.assertEqual(json.loads(aggregate["answer"]), {})
++                    self.assertEqual(out["audit_parse_policy"], "audit-json-wrapper-v2")
++                    self.assertEqual(out["audit_parse_status"], ["object"])
++                    self.assertEqual(out["observed_hypothesis_ids"], ["h"])
++                    self.assertEqual(out["hypotheses"]["h"]["winning_label"], "Entailment")
++                    self.assertEqual(json.loads(aggregate["answer"]), json.loads(payload))
+ 
+     def test_audit_parser_does_not_extract_examples_from_prose_or_broken_fences(self):
+         payload = json.dumps({"h": {"label": "Entailment", "evidence_ids": [1]}})
+--- a/tests/test_answer_protocol_v2.py
++++ b/tests/test_answer_protocol_v2.py
+@@ -0,0 +1,231 @@
++"""Final-answer boundary and scorer/vote consistency, without model calls."""
++import json
++import unittest
++from unittest.mock import patch
++
++from expgym.poolact import aggregate_results
++from expgym.react_loop import LLMOutput, run_react_loop
++from expgym.task_evidence_audit import Document, build_answer_evaluator
++from expgym.task_restricted_search import _extract_names, _name_f1
++from expgym.tool_protocol import (
++    ANSWER_PROTOCOL_VERSION, AUDIT_ANSWER_PROTOCOL_VERSION, AUDIT_FIELD_PROTOCOL_VERSION,
++    audit_evidence_key,
++    extract_text_answer, parse_audit_answer, parse_final_answer,
++    parse_json_answer, parse_search_answer,
++)
++
++
++PAYLOAD = '{\n  "nda-1": {"label": "Entailment", "evidence_ids": [1]}\n}'
++FENCED = '```json\n' + PAYLOAD + '\n```'
++
++
++class AnswerBoundaryV2Test(unittest.TestCase):
++    def test_prose_mentions_do_not_override_a_unique_final_directive(self):
++        for prefix in ('I will answer: after checking the evidence.\n\n',
++                       'Thought: consider Answer: {"candidate":2}\n',
++                       'The answer: should be supplied as JSON.\n'):
++            with self.subTest(prefix=prefix):
++                self.assertEqual(parse_final_answer(prefix + '**Answer:**\n' + PAYLOAD), PAYLOAD)
++        self.assertEqual(parse_final_answer('Thought: consider Answer: {"x":2}.Answer: {"x":1}'),
++                         '{"x": 1}')
++
++    def test_observed_markdown_and_intro_failures_preserve_payload(self):
++        for prefix in ('**Answer:**\n', '__Answer:__\n', '**Answer**:\n',
++                       '__Answer__:\n', 'Here is my final answer:\n\n**Answer:**\n',
++                       'Final answer:\n\n**Answer:**\n', '- **Final Answer:**\n'):
++            for suffix in (FENCED, FENCED + '\nKey rationale: evidence [1] supports this.'):
++                with self.subTest(prefix=prefix, suffix=suffix):
++                    self.assertEqual(extract_text_answer(prefix + suffix), suffix)
++                    self.assertEqual(parse_final_answer(prefix + suffix), suffix)
++                    self.assertEqual(parse_audit_answer(suffix), json.loads(PAYLOAD))
++
++    def test_payload_markdown_and_literals_are_not_label_markup(self):
++        for value in ('**Ada Lovelace**', '__Ada Lovelace__', '*Ada*', '_Ada_',
++                      '{"note":"Answer: fake; Action: fake; <think>"}'):
++            with self.subTest(value=value):
++                self.assertEqual(parse_final_answer('Answer: ' + value), value)
++
++    def test_whole_submission_emphasis_preserves_historical_payload_and_tail(self):
++        for tail in ('', '\n\nReasoning: this is the selected name.'):
++            raw = '**Answer: Ada Lovelace**' + tail
++            self.assertEqual(parse_final_answer(raw), 'Ada Lovelace**' + tail)
++        self.assertEqual(parse_final_answer("Grandmother **Bettye Gendron**'s sisters agree.\n"
++                                            'Answer: Leana Wick, Tonia Wick'),
++                         'Leana Wick, Tonia Wick')
++
++    def test_empty_heading_chain_is_distinct_from_multiple_submissions(self):
++        self.assertEqual(parse_final_answer('Answer:\nFinal Answer:\n' + PAYLOAD), PAYLOAD)
++        for raw in ('Answer: thinking\nAnswer: ' + PAYLOAD,
++                    'Answer: {}\n**Answer:** ' + PAYLOAD,
++                    '{}\n**Answer:** ' + PAYLOAD,
++                    '```json\n{}\n```\n__Answer:__ ' + PAYLOAD,
++                    'Answer: one\nAnswer: two'):
++            with self.subTest(raw=raw):
++                self.assertIsNone(extract_text_answer(raw))
++                self.assertIsNone(parse_final_answer(raw))
++
++    def test_quoted_examples_and_tools_cannot_submit_an_answer(self):
++        for raw in ('Thought: Example:\nAnswer: ' + PAYLOAD,
++                    '> **Answer:** ' + PAYLOAD,
++                    '"Answer: wrong"', '```text\nAnswer: wrong\n```',
++                    '<think>Answer: wrong</think>', '<think>Answer: wrong',
++                    'Action: search {"q":"x"}\nAnswer: ' + PAYLOAD,
++                    'Answer: ' + PAYLOAD + '\nAction: search {"q":"x"}'):
++            with self.subTest(raw=raw):
++                self.assertIsNone(parse_final_answer(raw))
++
++    def test_text_transport_bare_prose_is_not_implicitly_promoted(self):
++        self.assertIsNone(parse_final_answer('Ada Lovelace', allow_unlabelled=False))
++        self.assertEqual(parse_final_answer('Ada Lovelace'), 'Ada Lovelace')
++        self.assertEqual(parse_final_answer('Answer: Ada Lovelace', allow_unlabelled=False),
++                         'Ada Lovelace')
++
++
++class AuditWrapperV2Test(unittest.TestCase):
++    def setUp(self):
++        doc = Document(1, 'fixture', [], {'nda-1': {'choice': 'Entailment', 'spans': [1]}})
++        with patch('expgym.task_evidence_audit._get_doc', return_value=doc), \
++                patch('expgym.task_evidence_audit._get_labels', return_value={'nda-1': {}}):
++            self.evaluator = build_answer_evaluator(0)
++
++    def test_scorer_and_vote_share_wrapper_acceptance(self):
++        for value in (PAYLOAD, PAYLOAD + ';', FENCED, FENCED + ';',
++                      '```\n' + PAYLOAD + ';\n```;',
++                      FENCED + '\nThe answer: follows the evidence in segment [1].',
++                      FENCED + '\nReasoning: segment [1] is explicit.'):
++            with self.subTest(value=value):
++                score = self.evaluator(value, [])
++                aggregate = aggregate_results('evidence_audit', [
++                    {'answer': value, 'answer_perf': score['label_acc']},
++                ], answer_evaluator=self.evaluator)
++                self.assertEqual(score['label_acc'], 1.)
++                self.assertEqual(score['evidence_acc'], 1.)
++                self.assertEqual(aggregate['answer_metrics'], score)
++                self.assertEqual(aggregate['diagnostics']['audit_parse_policy'],
++                                 AUDIT_ANSWER_PROTOCOL_VERSION)
++
++    def test_three_fenced_votes_beat_one_conflicting_plain_vote(self):
++        wrong = '{"nda-1":{"label":"Contradiction","evidence_ids":[2]}}'
++        aggregate = aggregate_results('evidence_audit', [
++            {'answer': answer} for answer in (FENCED, FENCED, FENCED, wrong)
++        ], answer_evaluator=self.evaluator)
++        self.assertEqual(aggregate['answer_metrics']['label_acc'], 1.)
++        self.assertEqual(aggregate['answer_metrics']['evidence_acc'], 1.)
++        self.assertEqual(aggregate['diagnostics']['audit_parse_status'], ['object'] * 4)
++
++    def test_ambiguous_wrappers_are_rejected_in_both_paths(self):
++        for value in ('For example: ' + PAYLOAD, '```json\n' + PAYLOAD,
++                      '```python\n' + PAYLOAD + '\n```',
++                      FENCED + '\nAnswer: {}', FENCED + '\nAction: search {}',
++                      FENCED + '\n{}', FENCED + '\n[1, 2]',
++                      FENCED + '\n[\n1,\n2\n]', FENCED + '\n```json\n{}\n```'):
++            with self.subTest(value=value):
++                with self.assertRaises(ValueError):
++                    parse_audit_answer(value)
++                score = self.evaluator(value, [])
++                aggregate = aggregate_results('evidence_audit', [{'answer': value}],
++                                              answer_evaluator=self.evaluator)
++                self.assertEqual(score['label_acc'], 0.)
++                self.assertEqual(score['evidence_acc'], 0.)
++                self.assertEqual(json.loads(aggregate['answer']), {})
++                self.assertEqual(aggregate['answer_metrics'], score)
++
++    def test_audit_wrapper_policy_does_not_relax_generic_json(self):
++        value = FENCED + '\nExplanation of evidence [1].'
++        self.assertEqual(parse_audit_answer(value), json.loads(PAYLOAD))
++        with self.assertRaises(ValueError):
++            parse_json_answer(value)
++
++    def test_fields_and_historical_evidence_coercion_are_unchanged(self):
++        value = '{"nda-1":{"label":"entailed","evidence_ids":["1"]}}'
++        self.assertEqual(parse_audit_answer(value), json.loads(value))
++        score = self.evaluator(value, [])
++        self.assertEqual(score['label_acc'], 0.)  # Do not repair label spelling.
++        self.assertEqual(score['evidence_acc'], 1.)  # Historical int coercion.
++
++    def test_votes_cannot_repair_individually_incorrect_label_spellings(self):
++        for label in ('entailed', 'entailment', ' Entailment ', 'neutral',
++                      'not_mentioned', 'Entailment!', None, ['Entailment']):
++            value = json.dumps({'nda-1': {'label': label, 'evidence_ids': [1]}})
++            with self.subTest(label=label):
++                individual = self.evaluator(value, [])
++                aggregate = aggregate_results('evidence_audit', [{'answer': value}],
++                                              answer_evaluator=self.evaluator)
++                self.assertEqual(individual['label_acc'], 0.)
++                self.assertEqual(aggregate['answer_metrics'], individual)
++                self.assertEqual(aggregate['diagnostics']['audit_field_policy'],
++                                 AUDIT_FIELD_PROTOCOL_VERSION)
++
++    def test_vote_evidence_keys_match_scorer_iterable_and_all_or_empty_semantics(self):
++        for value, expected in ((['1', 1.9, True], (1,)), ('1', (1,)),
++                                ({'1': 'ignored'}, (1,)), ([1, 'bad'], ()),
++                                (None, ()), (1, ()), ([float('inf')], ())):
++            with self.subTest(value=value):
++                self.assertEqual(audit_evidence_key(value), expected)
++                answer = json.dumps({'nda-1': {'label': 'Entailment', 'evidence_ids': value}})
++                individual = self.evaluator(answer, [])
++                aggregate = aggregate_results('evidence_audit', [{'answer': answer}],
++                                              answer_evaluator=self.evaluator)
++                self.assertEqual(aggregate['answer_metrics'], individual)
++
++
++class SearchAcceptanceV2Test(unittest.TestCase):
++    def test_vote_uses_scorer_name_set_including_long_prose_filter(self):
++        plain = 'Ada Lovelace'
++        prose = 'Ada Lovelace\nThis explanatory sentence has more than five separate words'
++        self.assertEqual(_extract_names(plain), _extract_names(prose))
++        aggregate = aggregate_results('restricted_search', [
++            {'answer': 'Grace Hopper'}, {'answer': plain}, {'answer': prose},
++        ], answer_evaluator=lambda prediction: _name_f1(prediction, ['Ada Lovelace']))
++        self.assertEqual(aggregate['answer'], plain)
++        self.assertEqual(aggregate['answer_perf'], 1.)
++
++    def test_parser_preserves_historical_json_array_and_text_rules(self):
++        cases = {
++            '1. Ada Lovelace; - Grace Hopper': {'ada lovelace', 'grace hopper'},
++            '["Ada Lovelace", "Grace Hopper"]': {'ada lovelace', 'grace hopper'},
++            '["1. Ada Lovelace"]': {'1. ada lovelace'},
++            'This has six words in total': set(),
++        }
++        for value, expected in cases.items():
++            with self.subTest(value=value):
++                self.assertEqual(parse_search_answer(value), expected)
++                self.assertEqual(_extract_names(value), expected)
++
++
++class RuntimeBoundaryV2Test(unittest.TestCase):
++    def test_ambiguous_turn_requires_new_final_instead_of_choosing_a_payload(self):
++        class Replay:
++            supports_native_tools = True
++
++            def __init__(self):
++                self.outputs = iter(('Answer: first\nAnswer: second', 'Answer: final'))
++
++            def generate(self, messages, **kwargs):
++                return LLMOutput(next(self.outputs))
++
++        result = run_react_loop(Replay(), {}, max_steps=1)
++        self.assertEqual(result['answer'], 'final')
++        self.assertEqual(result['answer_source'], 'forced_model_answer')
++        self.assertEqual(result['api_calls'], 2)
++        self.assertTrue(result['protocol_failures'])
++
++    def test_natural_and_forced_final_use_same_parser_and_version(self):
++        class Replay:
++            supports_native_tools = True
++
++            def generate(self, messages, **kwargs):
++                return LLMOutput('Here is my final answer:\n**Answer:**\n' + FENCED)
++
++        for max_steps in (0, 1):
++            with self.subTest(max_steps=max_steps):
++                result = run_react_loop(Replay(), {}, max_steps=max_steps)
++                self.assertEqual(result['answer'], FENCED)
++                self.assertEqual(result['answer_protocol_version'], ANSWER_PROTOCOL_VERSION)
++                self.assertEqual(result['api_calls'], 1)
++                self.assertEqual(result['answer_source'],
++                                 'natural_model_answer' if max_steps else 'forced_model_answer')
++
++
++if __name__ == '__main__':
++    unittest.main()
+--- a/tests/test_json_answer_lookup.py
++++ b/tests/test_json_answer_lookup.py
+@@ -35,7 +35,7 @@
+         self.assertEqual(_lookup_answer_metrics('{"id":"cfg_1"}', records), (None, None))
+         self.assertEqual(_lookup_answer_metrics("anything", []), (None, None))
+ 
+-    def test_known_zero_unseen_and_multiple_answers_keep_existing_fallback(self):
++    def test_known_zero_unseen_answers_keep_existing_fallback(self):
+         configs = ['{"x": 1}', '{"x": 2}', '{"x": 3}']
+         scores = {1: 0.9, 2: 0.4, 3: 0.0}
+ 
+@@ -49,8 +49,6 @@
+             ("Answer: " + configs[1], configs[1], 0.4, "natural_model_answer"),
+             ("Answer: " + configs[2], configs[2], 0.0, "natural_model_answer"),
+             ('Answer: {"x": 99}', configs[0], 0.9, "best_evaluated_fallback"),
+-            ("Answer: I should continue exploring.\n\nAnswer: " + configs[1], configs[0], 0.9, "best_evaluated_fallback"),
+-            ("Answer: " + configs[1] + "\nAnswer: " + configs[2], configs[0], 0.9, "best_evaluated_fallback"),
+         ]
+         for final, expected_answer, expected_perf, source in cases:
+             with self.subTest(final=final):
+@@ -73,7 +71,7 @@
+ 
+                 replies = ['Action: evaluate_config {"x": 1}',
+                            'Action: evaluate_config {"x": 2}',
+-                           'Answer: deliberating\nAnswer: {"x": 2}']
++                           'Answer: selected an unparseable configuration']
+                 result = run_react_loop(llm=RecordedReplies(replies), tools={"evaluate_config": tool}, time_budget=5.0, max_steps=4, capture_trace_v2=True)
+                 self.assertEqual(result["answer"], '{"x": 1}')
+                 self.assertEqual(result["answer_perf"], visible_perf)
+@@ -88,7 +86,7 @@
+         cases = [
+             ("invalid_config", None, 'Answer: {"x": 1}', 0.0),
+             ("valid", 1.0, 'Answer: {"x": 1}', 0.99),
+-            ("valid", 1.0, 'Answer: deliberating\nAnswer: {"x": 1}', 0.0),
++            ("valid", 1.0, 'Answer: selected an unparseable configuration', 0.0),
+         ]
+         for mode, budget, final, expected in cases:
+             with self.subTest(mode=mode, final=final):
+--- a/tests/test_poolact.py
++++ b/tests/test_poolact.py
+@@ -339,7 +339,7 @@
+             {"nda1": {"label": "E", "evidence_ids": [1]}},
+         )
+ 
+-    def test_audit_vote_normalizes_labels_and_evidence_ids(self):
++    def test_audit_vote_keeps_literal_labels_and_legacy_evidence_ids(self):
+         results = [
+             {
+                 "answer": json.dumps(
+@@ -360,7 +360,7 @@
+         aggregate = aggregate_results("evidence_audit", results)
+         self.assertEqual(
+             json.loads(aggregate["answer"]),
+-            {"nda1": {"label": "NotMentioned", "evidence_ids": [1, 2]}},
++            {"nda1": {"label": "not_mentioned", "evidence_ids": [1, 2]}},
+         )
+ 
+     def test_parallel_runner_preserves_agent_order(self):
+--- a/tests/test_poolact_aggregate_validation.py
++++ b/tests/test_poolact_aggregate_validation.py
+@@ -1,4 +1,4 @@
+-"""Aggregation input validation without changing the original voting rules."""
++"""Aggregation input validation under the versioned, shared task/voting acceptance rules."""
+ import json
+ import unittest
+ 
+@@ -6,7 +6,7 @@
+ 
+ 
+ class AggregateValidationTest(unittest.TestCase):
+-    def test_audit_vote_acceptance_preserves_historical_json_loads_policy(self):
++    def test_audit_vote_acceptance_matches_task_wrapper_policy(self):
+         answer = '{"h":{"label":"Entailment","evidence_ids":[1]}}'
+         plain = aggregate_results('evidence_audit', [{'answer': answer, 'answer_perf': 1.}])
+         self.assertEqual(json.loads(answer), json.loads(plain['answer']))
+@@ -14,8 +14,8 @@
+                         '```\n' + answer + '\n```;'):
+             with self.subTest(wrapped=wrapped):
+                 actual = aggregate_results('evidence_audit', [{'answer': wrapped, 'answer_perf': 1.}])
+-                self.assertEqual('{}', actual['answer'])
+-                self.assertEqual('legacy_json_loads_v1', actual['diagnostics']['audit_parse_policy'])
++                self.assertEqual(json.loads(answer), json.loads(actual['answer']))
++                self.assertEqual('audit-json-wrapper-v2', actual['diagnostics']['audit_parse_policy'])
+ 
+     def test_finite_zero_scores_remain_valid(self):
+         actual = aggregate_results('tuning', [{'answer': '{}', 'answer_perf': 0.}])
+@@ -73,11 +73,11 @@
+         empty = aggregate_results('restricted_search', [{'answer': ''}, {'answer': ''}, {'answer': 'B'}])
+         self.assertEqual('', empty['answer'])
+ 
+-    def test_audit_nonfinite_evidence_id_is_invalid_text_not_crash(self):
++    def test_audit_nonfinite_evidence_id_uses_scorer_empty_set_rule(self):
+         actual = aggregate_results('evidence_audit', [{'answer': json.dumps({
+             'h': {'label': 'Entailment', 'evidence_ids': [float('inf')]},
+         })}])
+-        self.assertEqual(['inf'], json.loads(actual['answer'])['h']['evidence_ids'])
++        self.assertEqual([], json.loads(actual['answer'])['h']['evidence_ids'])
+ 
+     def test_audit_exact_evidence_set_vote_still_only_uses_winning_label_supporters(self):
+         answers = [
+--- a/tests/test_poolact_graph_identity.py
++++ b/tests/test_poolact_graph_identity.py
+@@ -0,0 +1,345 @@
++"""No-model regressions for full-configuration PoolAct graph identity.
++
++These synthetic NAS-like payloads deliberately share the first 80 canonical
++JSON characters. No evaluator, model, benchmark data, or saved run is used.
++"""
++import hashlib
++import json
++import unittest
++from unittest.mock import patch
++
++from expgym.extras.parallel_cache import _parse_evaluate_config
++from expgym.poolact import PoolActCoordinator, SharedExplorationGraph
++
++
++def nas_payload(variant):
++    config = {"edge_{}_{}".format(i, j): 1 if j == i + 1 else 0
++              for i in range(6) for j in range(i + 1, 7)}
++    config.update({"op_node_{}".format(i): "conv3x3-bn-relu"
++                   for i in range(1, 6)})
++    config["op_node_5"] = ("conv3x3-bn-relu", "conv1x1-bn-relu",
++                           "maxpool3x3")[variant]
++    return json.dumps(config, sort_keys=True, separators=(",", ":"))
++
++
++class EvaluationGraphIdentityTest(unittest.TestCase):
++    def setUp(self):
++        self.payloads = [nas_payload(i) for i in range(3)]
++        self.keys = self.payloads  # Already canonical, as required by the API.
++        self.displays = [_parse_evaluate_config(p, "0.5")[1]
++                         for p in self.payloads]
++        self.assertGreater(len(self.keys[0]), 80)
++        self.assertEqual(1, len({key[:80] for key in self.keys}))
++        self.assertEqual(3, len(set(self.keys)))
++
++    def record(self, graph, variant, agent_id=0, completion_time=0.0, perf=None):
++        graph.record_evaluate_config(
++            agent_id, self.keys[variant], self.displays[variant],
++            perf if perf is not None else 0.1 * (variant + 1), 1.0,
++            completion_time=completion_time,
++        )
++
++    def test_full_identity_is_stable_and_bounded_not_a_json_prefix(self):
++        graph = SharedExplorationGraph()
++        ids = [graph._eval_key(key) for key in self.keys]
++        self.assertEqual(3, len(set(ids)))
++        for key, node_id in zip(self.keys, ids):
++            self.assertEqual("E:sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest(),
++                             node_id)
++            self.assertEqual(73, len(node_id))
++            self.assertEqual(node_id, SharedExplorationGraph()._eval_key(key))
++        long_key = json.dumps({"text": "configuration" * 1000})
++        self.assertEqual(73, len(graph._eval_key(long_key)))
++
++    def test_distinct_long_configs_do_not_create_false_self_loops(self):
++        graph = SharedExplorationGraph(diversity_mode=True)
++        for i in range(3):
++            self.record(graph, i)
++        ids = [graph._eval_key(key) for key in self.keys]
++        self.assertEqual(3, graph.stats()["eval_nodes"])
++        self.assertEqual({(ids[0], ids[1]), (ids[1], ids[2])}, set(graph._edges))
++        self.assertEqual(2, graph.stats()["edges"])
++        self.assertTrue(all(src != dst for src, dst in graph._edges))
++
++    def test_repeating_the_same_config_keeps_real_self_loop(self):
++        graph = SharedExplorationGraph()
++        self.record(graph, 0)
++        self.record(graph, 0)
++        node_id = graph._eval_key(self.keys[0])
++        self.assertEqual(1, graph.stats()["eval_nodes"])
++        self.assertEqual(2, graph.stats()["total_visits"])
++        self.assertEqual({(node_id, node_id)}, set(graph._edges))
++        self.assertEqual(1, graph._edges[(node_id, node_id)].count)
++
++    def test_identical_transitions_merge_counts_not_distinct_nodes(self):
++        graph = SharedExplorationGraph()
++        for agent in (0, 1):
++            self.record(graph, 0, agent_id=agent)
++            self.record(graph, 1, agent_id=agent)
++        ids = [graph._eval_key(key) for key in self.keys]
++        self.assertEqual(2, graph.stats()["eval_nodes"])
++        self.assertNotEqual(ids[0], ids[1])
++        self.assertEqual({(ids[0], ids[1])}, set(graph._edges))
++        edge = graph._edges[(ids[0], ids[1])]
++        self.assertEqual(2, edge.count)
++        self.assertEqual({0, 1}, edge.agents)
++
++    def test_display_rows_bind_full_configs_to_the_path_ids(self):
++        for diversity in (False, True):
++            with self.subTest(diversity=diversity):
++                graph = SharedExplorationGraph(diversity_mode=diversity)
++                self.record(graph, 0)
++                self.record(graph, 1)
++                aliases = graph._eval_display_keys(graph._eval_nodes)
++                text = graph.format_for_injection()
++                for key, display in zip(self.keys[:2], self.displays[:2]):
++                    row = next(line for line in text.splitlines() if display in line)
++                    self.assertIn(aliases[graph._eval_key(key)], row)
++                if diversity:
++                    paths = text.split("== Exploration Paths ==", 1)[1].split(
++                        "== Coverage Gap ==", 1)[0]
++                    self.assertIn("{} --> {}".format(aliases[graph._eval_key(self.keys[0])],
++                                                     aliases[graph._eval_key(self.keys[1])]), paths)
++                    self.assertNotIn("edge_", paths)
++
++    def test_rebuilt_snapshot_preserves_ids_without_future_nodes_or_edges(self):
++        graph = SharedExplorationGraph(diversity_mode=True)
++        self.record(graph, 2, agent_id=1, completion_time=30, perf=0.987654)
++        self.record(graph, 0, completion_time=5)
++        self.record(graph, 1, completion_time=10)
++        self.record(graph, 0, completion_time=15, perf=0.876543)
++        aliases = graph._eval_display_keys(graph._eval_nodes)
++        ids = [aliases[graph._eval_key(key)] for key in self.keys]
++        early = graph.format_for_injection(visible_before=10, agent_id=2)
++        self.assertIn(ids[0], early)
++        self.assertIn(ids[1], early)
++        self.assertNotIn(ids[2], early)
++        self.assertIn("{} --> {}".format(ids[0], ids[1]), early)
++        self.assertNotIn("{} --> {}".format(ids[1], ids[0]), early)
++        self.assertNotIn("0.987654", early)
++        self.assertNotIn("0.876543", early)
++        later = graph.format_for_injection(visible_before=20)
++        self.assertIn("{} --> {}".format(ids[1], ids[0]), later)
++        self.assertNotIn(ids[2], later)
++        strict = graph.format_for_injection(visible_before=20, completion_before=10)
++        self.assertIn(ids[0], strict)
++        self.assertNotIn(ids[1], strict)
++        self.assertNotIn("-->", strict)
++
++    def test_end_nodes_still_hidden_from_time_gated_graph(self):
++        graph = SharedExplorationGraph(diversity_mode=True)
++        self.record(graph, 0, completion_time=1)
++        graph.record_end(0, "unpublished-final-answer")
++        visible = graph.format_for_injection(visible_before=100)
++        self.assertNotIn("END:", visible)
++        self.assertNotIn("unpublished-final-answer", visible)
++
++
++class EvaluationGraphCacheContractTest(unittest.TestCase):
++    def test_full_payload_cache_and_claim_semantics_survive_graph_fix(self):
++        calls = []
++
++        def evaluate(payload):
++            canonical = json.dumps(json.loads(payload), sort_keys=True,
++                                   separators=(",", ":"))
++            calls.append(canonical)
++            return (0.8 if canonical == nas_payload(0) else 0.9, 3.0)
++
++        coordinator = PoolActCoordinator(2)
++        first = coordinator.bind_tools({"evaluate_config": evaluate}, 0, time_budget=100)
++        second = coordinator.bind_tools({"evaluate_config": evaluate}, 1, time_budget=100)
++        for variant, expected in ((0, 0.8), (1, 0.9)):
++            payload = nas_payload(variant)
++            first.pre_tool_hook("evaluate_config", payload)
++            self.assertEqual((expected, 3.0), first.tools["evaluate_config"](payload))
++            first.clock.advance(3.0)  # The ReAct loop owns advancement.
++        second.clock.advance(10.0)
++        reordered = json.dumps(dict(reversed(list(json.loads(nas_payload(0)).items()))), indent=2)
++        second.pre_tool_hook("evaluate_config", reordered)
++        self.assertTrue(coordinator.graph.has_pending_claim("evaluate_config", nas_payload(0), 1))
++        self.assertEqual((0.8, 0.0), second.tools["evaluate_config"](reordered))
++        self.assertEqual([nas_payload(0), nas_payload(1)], calls)
++        self.assertEqual({"hits": 1, "misses": 2, "size": 2}, coordinator.cache.stats())
++        self.assertEqual(0, coordinator.graph.stats()["pending_claims"])
++        self.assertEqual(2, coordinator.graph.stats()["eval_nodes"])
++        self.assertEqual(3, coordinator.graph.stats()["total_visits"])
++        ids = [coordinator.graph._eval_key(nas_payload(i)) for i in (0, 1)]
++        self.assertNotEqual(*ids)
++        self.assertEqual({(ids[0], ids[1])}, set(coordinator.graph._edges))
++
++    def test_future_result_is_still_a_paid_miss_then_earliest_completion_wins(self):
++        coordinator = PoolActCoordinator(1)
++        payload = nas_payload(0)
++        coordinator.cache.put("evaluate_config", payload, (0.9, 2.0), completion_time=20)
++        calls = []
++
++        def evaluate(value):
++            calls.append(value)
++            return (0.4, 2.0)
++
++        runtime = coordinator.bind_tools({"evaluate_config": evaluate}, 0, time_budget=100)
++        self.assertEqual((0.4, 2.0), runtime.tools["evaluate_config"](payload))
++        runtime.clock.advance(2)
++        self.assertEqual((0.4, 0.0), runtime.tools["evaluate_config"](payload))
++        self.assertEqual([payload], calls)
++        self.assertEqual({"hits": 1, "misses": 1, "size": 1}, coordinator.cache.stats())
++        text = coordinator.graph.format_for_injection(visible_before=2)
++        self.assertIn("0.400000", text)
++        self.assertNotIn("0.900000", text)
++
++    def test_audit_feedback_rows_also_bind_distinct_full_payload_identities(self):
++        coordinator = PoolActCoordinator(1)
++        runtime = coordinator.bind_tools(
++            {"human_feedback": lambda payload: ("Evidence Correct", 1.0)},
++            0, time_budget=100,
++        )
++        keys = []
++        for nda_id in (1, 2):
++            payload = json.dumps({"evidence_ids": list(range(40)), "nda_id": nda_id},
++                                 sort_keys=True, separators=(",", ":"))
++            keys.append(payload)
++            runtime.tools["human_feedback"](payload)
++            runtime.clock.advance(1)
++        self.assertEqual(keys[0][:80], keys[1][:80])
++        aliases = coordinator.graph._eval_display_keys(coordinator.graph._eval_nodes)
++        ids = [aliases[coordinator.graph._eval_key(key)] for key in keys]
++        self.assertNotEqual(*ids)
++        text = runtime.observation_augmenter("Feedback retained.")
++        for nda_id, node_id in zip((1, 2), ids):
++            row = next(line for line in text.splitlines() if "nda:{} ".format(nda_id) in line)
++            self.assertIn(node_id, row)
++            self.assertIn("Evidence Correct", row)
++        self.assertIn("{} --> {}".format(*ids), text)
++        self.assertIn("2 NDAs attempted so far.", text)
++
++
++class CompactEvaluationDisplayTest(unittest.TestCase):
++    def test_short_audit_graph_is_byte_equivalent_to_legacy_display(self):
++        graph = SharedExplorationGraph(n_agents=2, diversity_mode=True)
++        for nda_id in (1, 2):
++            key = json.dumps({"evidence_ids": [1], "nda_id": nda_id},
++                             sort_keys=True, separators=(",", ":"))
++            graph.record_evaluate_config(0, key,
++                                         "nda:{}  ev:[1]  [Evidence Correct]".format(nda_id),
++                                         1.0, 1.0, completion_time=nda_id)
++        expected = "\n".join([
++            "[Parallel Exploration — Agent 1 of 2]",
++            "You are one of 2 agents solving this task in parallel.",
++            "Shared state below shows what other agents have explored and are exploring.",
++            "Use this to plan your next action — prioritize paths not yet explored.",
++            "", "== In Progress ==", "  None.", "", "== Already Explored ==",
++            "  nda:1  ev:[1]  [Evidence Correct] [agents 0]",
++            "  nda:2  ev:[1]  [Evidence Correct] [agents 0]",
++            "", "== Exploration Paths ==",
++            '  E:{"evidence_ids":[1],"nda_id":1} --> E:{"evidence_ids":[1],"nda_id":2} [agents 0]',
++            "", "== Coverage Gap ==", "  2 NDAs attempted so far.",
++        ])
++        self.assertEqual(expected, graph.format_for_injection(visible_before=2, agent_id=1))
++
++    def test_short_default_tuning_graph_is_byte_equivalent_to_legacy_display(self):
++        graph = SharedExplorationGraph(n_agents=2)
++        graph.record_evaluate_config(0, '{"x":1}', '{x:1}', 0.5, 2.0)
++        expected = "\n".join([
++            "[Shared Exploration Graph]", "You are one of 2 agents tuning in parallel.",
++            "Use this to avoid redundant configs and learn from others' results.",
++            "Cached evaluations cost 0s.", "", "=== Evaluated Configs ===",
++            "  {x:1} -> perf=0.500000, cost=2s (1x by [0])",
++            "", "=== Best So Far ===", "  perf=0.500000 {x:1} (by agent 0)",
++        ])
++        self.assertEqual(expected, graph.format_for_injection())
++
++    def test_80_character_boundary_and_mixed_short_long_paths(self):
++        graph = SharedExplorationGraph(diversity_mode=True)
++        keys = [json.dumps({"x": "a" * (length - 8)}, separators=(",", ":"))
++                for length in (80, 81)]
++        self.assertEqual([80, 81], list(map(len, keys)))
++        for key in keys:
++            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
++        aliases = graph._eval_display_keys(graph._eval_nodes)
++        self.assertEqual("E:" + keys[0], aliases[graph._eval_key(keys[0])])
++        long_alias = aliases[graph._eval_key(keys[1])]
++        self.assertEqual("E:h:" + hashlib.sha256(keys[1].encode()).hexdigest()[:12], long_alias)
++        text = graph.format_for_injection()
++        self.assertIn("\n  {} -> 0.500000".format(keys[0]), text)
++        self.assertIn("\n  {} {} -> 0.500000".format(long_alias, keys[1]), text)
++        self.assertIn("E:{} --> {}".format(keys[0], long_alias), text)
++
++    @staticmethod
++    def colliding_digest(_graph, key):
++        variant = [nas_payload(i) for i in range(3)].index(key)
++        return "E:sha256:" + "0" * 12 + str(variant) + "0" * 51
++
++    def test_colliding_prefixes_extend_all_aliases_independent_of_node_order(self):
++        with patch.object(SharedExplorationGraph, "_eval_key", self.colliding_digest):
++            maps = []
++            for order in ((0, 1, 2), (2, 1, 0)):
++                graph = SharedExplorationGraph(diversity_mode=True)
++                for i in order:
++                    graph.record_evaluate_config(0, nas_payload(i), "config {}".format(i), 0.5, 1.0)
++                aliases = graph._eval_display_keys(graph._eval_nodes)
++                self.assertEqual(3, len(set(aliases.values())))
++                self.assertTrue(all(len(alias) == 17 for alias in aliases.values()))
++                self.assertNotIn("E:h:" + "0" * 12, aliases.values())
++                text = graph.format_for_injection()
++                for i in order:
++                    self.assertIn("{} config {}".format(aliases[graph._eval_key(nas_payload(i))], i), text)
++                maps.append(aliases)
++            self.assertEqual(*maps)
++
++    def test_future_prefix_collision_does_not_change_past_visible_aliases(self):
++        with patch.object(SharedExplorationGraph, "_eval_key", self.colliding_digest):
++            graph = SharedExplorationGraph(diversity_mode=True)
++            graph.record_evaluate_config(0, nas_payload(0), "visible config", 0.5, 1.0,
++                                         completion_time=1)
++            before = graph.format_for_injection(visible_before=1)
++            graph.record_evaluate_config(0, nas_payload(1), "future config", 0.9, 1.0,
++                                         completion_time=10)
++            self.assertEqual(before, graph.format_for_injection(visible_before=1))
++            self.assertEqual(before, graph.format_for_injection(visible_before=10, completion_before=10))
++            after = graph.format_for_injection(visible_before=10)
++            old_alias = "E:h:" + "0" * 12
++            self.assertIn(old_alias + " visible config", before)
++            self.assertNotIn(old_alias + " ", after)
++            self.assertIn(old_alias + "0 visible config", after)
++            self.assertIn(old_alias + "1 future config", after)
++
++    def test_full_digest_collision_fails_before_graph_state_mutation(self):
++        graph = SharedExplorationGraph()
++        with patch.object(SharedExplorationGraph, "_eval_key", return_value="E:sha256:" + "0" * 64):
++            graph.record_evaluate_config(0, nas_payload(0), "first", 0.5, 1.0)
++            before = (graph.stats(), list(graph._observations), dict(graph._agent_last_node),
++                      dict(graph._eval_key_payloads))
++            with self.assertRaisesRegex(ValueError, "identity digest collision"):
++                graph.record_evaluate_config(0, nas_payload(1), "second", 0.8, 1.0)
++            after = (graph.stats(), list(graph._observations), dict(graph._agent_last_node),
++                     dict(graph._eval_key_payloads))
++            self.assertEqual(before, after)
++
++    def test_short_and_long_display_namespace_collision_is_not_silent(self):
++        # Normal canonical dict/list keys cannot start with 'h:'. Even direct
++        # library misuse must not silently create a short/long alias collision.
++        graph = SharedExplorationGraph()
++        long_key = nas_payload(0)
++        digest = hashlib.sha256(long_key.encode()).hexdigest()
++        short_key = "h:" + digest[:12]
++        for key in (short_key, long_key):
++            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
++        aliases = graph._eval_display_keys(graph._eval_nodes)
++        self.assertEqual("E:" + short_key, aliases[graph._eval_key(short_key)])
++        self.assertEqual("E:h:" + digest[:13], aliases[graph._eval_key(long_key)])
++        self.assertEqual(2, len(set(aliases.values())))
++
++    def test_full_width_display_namespace_collision_fails_closed(self):
++        graph = SharedExplorationGraph()
++        long_key = nas_payload(0)
++        digest = hashlib.sha256(long_key.encode()).hexdigest()
++        for width in range(12, 65):
++            key = "h:" + digest[:width]
++            graph.record_evaluate_config(0, key, key, 0.5, 1.0)
++        graph.record_evaluate_config(0, long_key, long_key, 0.5, 1.0)
++        with self.assertRaisesRegex(ValueError, "distinct evaluation graph display IDs"):
++            graph.format_for_injection()
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tests/test_poolact_graph_observed.py
++++ b/tests/test_poolact_graph_observed.py
+@@ -0,0 +1,64 @@
++"""Regression from the saved Gemini NAS101 A Moderate graph message.
++
++Only an already visible graph is reconstructed here. This is not a replay of
++the model's actions and cannot estimate the effect of the repair on its score.
++"""
++import hashlib
++import json
++from pathlib import Path
++import unittest
++
++from expgym.extras.parallel_cache import SharedExplorationGraph
++
++
++class ObservedGraphCollisionTest(unittest.TestCase):
++    def test_observed_path_selects_the_actual_full_configuration(self):
++        fixture = json.loads((Path(__file__).parent / "fixtures" /
++                              "poolact_gemini_graph_collision.json").read_text())
++        graph = SharedExplorationGraph(n_agents=4, diversity_mode=True)
++        for event in fixture["events"]:
++            graph.record_evaluate_config(
++                event["agent_id"], event["config_key"], event["config_display"],
++                event["perf"], event["cost"],
++            )
++        for pending in fixture["pending"]:
++            graph.record_claim("evaluate_config", pending["payload"],
++                               pending["agent_id"])
++        message = graph.format_for_injection(visible_before=1, agent_id=0)
++        keys = fixture["ambiguous_keys"]
++        self.assertNotEqual(*keys)
++        self.assertEqual(keys[0][:80], keys[1][:80])
++        aliases = ["E:h:" + hashlib.sha256(k.encode()).hexdigest()[:12]
++                   for k in keys]
++        self.assertNotEqual(*aliases)
++        for key, alias in zip(keys, aliases):
++            event = next(e for e in fixture["events"] if e["config_key"] == key)
++            self.assertIn(alias + " " + event["config_display"], message)
++        paths = message.split("== Exploration Paths ==\n", 1)[1].split(
++            "\n\n== Coverage Gap ==", 1)[0]
++        # Agent 0 actually reached the edge_15=1 configuration. The other
++        # ambiguous legacy target was evaluated by agent 2, not this path.
++        self.assertEqual(1, json.loads(keys[1])["edge_15"])
++        self.assertIn(" --> " + aliases[1] + " [agents 0]", paths)
++        self.assertNotIn(aliases[0], paths)
++        self.assertNotIn('E:{"edge_', paths)
++        self.assertEqual(1, len(paths.splitlines()))
++        self.assertEqual(5, graph.stats()["eval_nodes"])
++        self.assertEqual(3, graph.stats()["pending_claims"])
++        # Labels change; the visible feedback, agent attribution, pending
++        # display and coverage summary do not.
++        old = fixture["historical_graph"]
++        for section in ("== In Progress ==", "== Coverage Gap =="):
++            old_part = old.split(section, 1)[1].split("\n\n==", 1)[0]
++            new_part = message.split(section, 1)[1].split("\n\n==", 1)[0]
++            self.assertEqual(old_part, new_part)
++        for event in fixture["events"]:
++            old_row = next(line.strip() for line in old.splitlines()
++                           if event["config_display"] + " -> " in line)
++            new_row = next(line.strip() for line in message.splitlines()
++                           if event["config_display"] + " -> " in line)
++            self.assertEqual(old_row, new_row.split(" ", 1)[1])
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tests/test_repair_runtime_compatibility.py
++++ b/tests/test_repair_runtime_compatibility.py
+@@ -0,0 +1,94 @@
++"""No-network checks for the merged historical transports and repaired parser."""
++import copy
++import json
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++
++from demo_experiment import build_llm
++from expgym.llm_clients import OpenAICompatibleLLM
++from expgym.react_loop import LLMOutput, run_react_loop
++from scripts import run_paper_sweep as sweep, run_poolact as pool
++from scripts.run_study_queue import make_plan
++
++
++class RepairRuntimeCompatibilityTest(unittest.TestCase):
++    def test_historical_cache_field_changes_only_selected_wire_field(self):
++        for field in ("prompt_cache_key", "cache_salt"):
++            for key in (None, "invocation-isolation"):
++                with self.subTest(field=field, key=key):
++                    requests = []
++
++                    def transport(request, timeout):
++                        requests.append(json.loads(request.data))
++                        return json.dumps({"choices": [{"message": {"role": "assistant", "content": "Answer: done"}, "finish_reason": "stop"}]}).encode()
++
++                    client = OpenAICompatibleLLM(api_key="test-only", model="model", prompt_cache_key=key,
++                                                 prompt_cache_key_field=field, transport=transport)
++                    client.generate("test")
++                    body = requests[0]
++                    if key is None:
++                        self.assertNotIn("prompt_cache_key", body)
++                        self.assertNotIn("cache_salt", body)
++                    else:
++                        self.assertEqual(body[field], key)
++                        self.assertNotIn("cache_salt" if field == "prompt_cache_key" else "prompt_cache_key", body)
++
++    def test_cache_field_survives_both_runners_and_resume_identity(self):
++        args = sweep.parse_args(["--backend", "openai", "--models", "model", "--prompt-cache-key-field", "cache_salt"])
++        job = sweep._build_jobs(args)[0]
++        namespace = sweep._namespace_for_job(args, job, "test-only")
++        self.assertEqual(build_llm("openai", [], namespace).config.prompt_cache_key_field, "cache_salt")
++        old_key = sweep._resume_key(args, job, evaluation={"sha256": "fixture"})
++        args.prompt_cache_key_field = "prompt_cache_key"
++        self.assertNotEqual(old_key, sweep._resume_key(args, job, evaluation={"sha256": "fixture"}))
++        args = pool.parse_args(["--backend", "openai", "--model", "model", "--prompt-cache-key-field", "cache_salt"])
++        namespace = pool._agent_namespace(args, "poolact", 0, "test-only")
++        client = build_llm("openai", [], namespace)
++        self.assertEqual(client.config.prompt_cache_key_field, "cache_salt")
++        self.assertIsNone(client.config.prompt_cache_key)
++        self.assertEqual(pool._resolved_config(args, None)["prompt_cache_key_field"], "cache_salt")
++
++    def test_queue_provider_override_keeps_historical_no_namespace(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            plan = make_plan({"stages": [{"label": "fixture", "runner": "poolact", "args": [
++                "--backend", "fake", "--model", "fake", "--scenario", "tuning",
++                "--tuning-task", "neural_network_training", "--strategies", "poolact",
++            ]}]}, study_id="compatibility", output_root=Path(tmp), default_python=sys.executable)
++            job = plan["jobs"][0]
++            self.assertTrue(job["args"]["prompt_cache_key"].startswith("queue-"))
++            self.assertIsNone(job["identity"]["args"]["prompt_cache_key"])
++            job["args"]["prompt_cache_key"] = None
++            # Worker reconstructs Namespace from these explicit job arguments.
++            import argparse
++            namespace = argparse.Namespace(**copy.deepcopy(job["args"]))
++            agent = pool._agent_namespace(namespace, "poolact", 0, "test-only")
++            self.assertIsNone(agent.prompt_cache_key)
++
++    def test_all_final_entrypoints_share_repaired_parser(self):
++        from expgym.tool_protocol import ANSWER_PROTOCOL_VERSION, parse_final_answer
++        answer = 'Here is my final answer:\n\n**Answer:** {"x":1}'
++
++        class Replay:
++            def __init__(self, native, forced):
++                self.supports_native_tools = native
++                self.outputs = iter(([LLMOutput("", finish_reason="length")] if forced else []) + [LLMOutput(answer, finish_reason="stop")])
++
++            def generate(self, messages, **kwargs):
++                return next(self.outputs)
++
++        for native in (False, True):
++            for forced in (False, True):
++                with self.subTest(native=native, forced=forced):
++                    result = run_react_loop(Replay(native, forced), {}, max_steps=1,
++                                            answer_evaluator=lambda text: float(json.loads(text)["x"]),
++                                            capture_trace_v2=True)
++                    self.assertEqual(result["answer"], parse_final_answer(answer))
++                    self.assertEqual(result["answer_perf"], 1.)
++                    self.assertEqual(result["answer_protocol_version"], ANSWER_PROTOCOL_VERSION)
++                    self.assertEqual(result["answer_source"], "forced_model_answer" if forced else "natural_model_answer")
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tests/test_tool_protocol.py
++++ b/tests/test_tool_protocol.py
+@@ -112,8 +112,7 @@
+         for text in ('Answer: {"x":1}\nAnswer: {"x":2}',
+                      'Answer: thinking\nAnswer: {"x":1}',
+                      '{"x":2}\nAnswer: {"x":1}',
+-                     'Answer: {"x":1} trailing explanation',
+-                     'Thought: consider Answer: {"x":2}.Answer: {"x":1}'):
++                     'Answer: {"x":1} trailing explanation'):
+             with self.subTest(text=text):
+                 self.assertIsNone(structured_final_answer(text))
+ 
+@@ -201,16 +200,16 @@
+ 
+ 
+ class LegacyTextAnswerTests(unittest.TestCase):
+-    def test_line_final_preserves_original_payload_format_and_legacy_markdown(self):
++    def test_line_final_preserves_original_payload_format_without_label_markup(self):
+         payload = '{\n  "x": 1\n}'
+         self.assertEqual(extract_text_answer('Thought: done\nAnswer: ' + payload), payload)
+-        self.assertEqual(extract_text_answer('**Answer:** hello_world'), '** hello_world')
++        self.assertEqual(extract_text_answer('**Answer:** hello_world'), 'hello_world')
+         self.assertEqual(extract_text_answer('Answer: plain text\nsecond line'), 'plain text\nsecond line')
+ 
+-    def test_multiple_line_finals_preserve_first_entire_suffix(self):
++    def test_multiple_nonempty_line_finals_are_rejected(self):
+         payload = 'thinking\nAnswer: {"x":1}'
+-        self.assertEqual(extract_text_answer('Answer: ' + payload), payload)
+-        self.assertEqual(extract_text_answer('Answer: {"x":2}\nAnswer: {"x":1}'), '{"x":2}\nAnswer: {"x":1}')
++        self.assertIsNone(extract_text_answer('Answer: ' + payload))
++        self.assertIsNone(extract_text_answer('Answer: {"x":2}\nAnswer: {"x":1}'))
+ 
+     def test_line_final_rejects_reasoning_quotations_and_negation(self):
+         for text in ('<think>\nAnswer: fake', '<think>\nAnswer: fake\n</think>',
+@@ -224,8 +223,7 @@
+         for text in ('Thought: done.Answer: {"x":1}', '{"x":1}'):
+             self.assertEqual(json.loads(extract_text_answer(text)), {'x': 1})
+         for text in ('Thought: done.Answer: plain text',
+-                     'Thought: done.Answer: {"x":NaN}',
+-                     'Thought: consider Answer: {"x":2}\nAnswer: {"x":1}'):
++                     'Thought: done.Answer: {"x":NaN}'):
+             self.assertIsNone(extract_text_answer(text))
+ 
+ 
+--- a/tools/publication/validate_bundle_v2.py
++++ b/tools/publication/validate_bundle_v2.py
+@@ -0,0 +1,415 @@
++#!/usr/bin/env python3
++"""Version 2: explicit sealed files and JSONL, retaining the v1 fail-closed policy.
++
++Forked from validate_bundle.py SHA256
++33613ed9b1f35f78cf48c147f4102eb6aaf5549545f9b5e2dbc9c6dfeb0a6295.
++No git/network/copy/extraction. The original validator and locks are unchanged.
++"""
++from __future__ import annotations
++
++import argparse
++from collections import Counter
++from datetime import datetime, timezone
++import hashlib
++from io import BytesIO
++import json
++import os
++from pathlib import Path, PurePosixPath
++import re
++import stat
++import tarfile
++
++
++WARN_BYTES = 50 * 1024 * 1024
++MAX_BYTES = 100 * 1024 * 1024
++MAX_ARCHIVE_EXPANDED = 512 * 1024 * 1024
++DENY_PARTS = {"private", ".git", ".ssh", ".aws", ".config", ".venv", "venv", "env", "uv", ".uv", "environments", "cache", ".cache", "__pycache__", "weights", "ckpts", "checkpoints", "node_modules"}
++DENY_SUFFIXES = {".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle", ".pem", ".key", ".p12", ".pfx", ".pyc", ".so", ".dll"}
++FIELDS = {"authorization", "proxy_authorization", "api_key", "apikey", "x_api_key", "access_token", "refresh_token", "client_secret", "password", "secret"}
++SAFE_PLACEHOLDERS = {"[REDACTED]", "Bearer [REDACTED]", "REDACTED", "EXPGYM_SMOKE_NOAUTH_PLACEHOLDER_20260908_NOT_A_SECRET", "EXPGYM_LOCAL_NOAUTH_PLACEHOLDER_20260907"}
++TOKEN_PATTERNS = [
++    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
++    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
++    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b"),
++    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
++]
++
++
++class CheckError(Exception):
++    """Only safe constant rule identifiers belong in exception messages."""
++
++
++def relative(value):
++    if not isinstance(value, str) or not value or "\\" in value or "\0" in value:
++        raise CheckError("invalid_relative_path")
++    path = PurePosixPath(value)
++    if path.is_absolute() or any(part in {"..", "."} for part in value.split("/")):
++        raise CheckError("path_escape_or_ambiguous_path")
++    if any(ord(char) < 32 for char in value):
++        raise CheckError("control_character_in_path")
++    return path
++
++
++def denied(value):
++    path = relative(value)
++    for part in path.parts:
++        lower = part.lower()
++        if (lower in DENY_PARTS or lower == ".env" or lower.startswith(".env.")
++                or lower in {"router_api_key", "id_rsa", "id_ed25519", "credentials"}
++                or lower.endswith(("_api_key", "_private_key"))):
++            return True
++    return path.suffix.lower() in DENY_SUFFIXES
++
++
++def safe_path(workspace, value):
++    path = relative(value)
++    if denied(value):
++        raise CheckError("forbidden_path")
++    current = workspace
++    for part in path.parts:
++        current = current / part
++        if current.is_symlink():
++            raise CheckError("symlink_forbidden")
++    return current
++
++
++def stable_read(path, limit=MAX_BYTES):
++    before = path.lstat()
++    if not stat.S_ISREG(before.st_mode):
++        raise CheckError("non_regular_file")
++    if before.st_size > limit:
++        raise CheckError("github_file_size_block" if limit == MAX_BYTES else "expanded_file_size_block")
++    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
++    try:
++        opened = os.fstat(descriptor)
++        with os.fdopen(descriptor, "rb", closefd=False) as handle:
++            raw = handle.read(limit + 1)
++        after = os.fstat(descriptor)
++    finally:
++        os.close(descriptor)
++    final = path.lstat()
++    signature = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns)
++    if not (signature(before) == signature(opened) == signature(after) == signature(final)) or len(raw) != before.st_size:
++        raise CheckError("file_changed_during_read")
++    return raw
++
++
++def load_secrets(paths):
++    """No secret hashing, serialization, snippets or exception values."""
++    values = []
++    for path in paths:
++        # These explicit private inputs are never part of the source whitelist.
++        raw = stable_read(Path(path), limit=16384).rstrip(b"\r\n")
++        if len(raw) < 8:
++            raise CheckError("secret_source_invalid")
++        try:
++            text = raw.decode("utf-8")
++        except UnicodeDecodeError:
++            raise CheckError("secret_source_encoding_invalid")
++        values.append((raw, text))
++    return values
++
++
++def business_path(path):
++    # Only actual payload content/schema subtrees, not arbitrary metadata keys.
++    if "parameters" in path and "tools" in path:
++        return True
++    if "arguments" in path and ("tool_calls" in path or "function" in path):
++        return True
++    return "content" in path and ("messages" in path or "message" in path or "tool_result" in path)
++
++
++def scan_bytes(raw, name, secrets):
++    findings, advisories = Counter(), Counter()
++    for secret, _ in secrets:
++        if secret in raw:
++            findings["known_secret_value"] += 1
++    try:
++        text = raw.decode("utf-8")
++    except UnicodeDecodeError:
++        findings["unreviewed_binary_file"] += 1
++        return findings, advisories
++    for pattern in TOKEN_PATTERNS:
++        findings["high_confidence_credential_pattern"] += len(pattern.findall(text))
++
++    def walk(value, path=(), depth=0):
++        if depth > 80:
++            findings["json_nesting_limit"] += 1
++            return
++        if isinstance(value, dict):
++            if not path and value.get("state") == "in_progress":
++                findings["in_progress_artifact"] += 1
++            for key, item in value.items():
++                key = str(key)
++                for _, secret in secrets:
++                    if secret in key:
++                        findings["known_secret_value"] += 1
++                normalized = key.lower().replace("-", "_")
++                credential = normalized in FIELDS or normalized.endswith(("_api_key", "_access_token", "_client_secret"))
++                if credential and isinstance(item, str) and item.strip() and item not in SAFE_PLACEHOLDERS:
++                    if business_path(path + (key,)):
++                        advisories["credential_named_business_field"] += 1
++                    else:
++                        findings["credential_metadata_field"] += 1
++                walk(item, path + (key,), depth + 1)
++        elif isinstance(value, list):
++            for item in value:
++                walk(item, path + ("[]",), depth + 1)
++        elif isinstance(value, str):
++            for _, secret in secrets:
++                if secret in value:
++                    findings["known_secret_value"] += 1
++            for pattern in TOKEN_PATTERNS:
++                findings["high_confidence_credential_pattern"] += len(pattern.findall(value))
++            # Decode the protocol's explicit raw envelope, not arbitrary user prose.
++            if path and path[-1] == "response_raw":
++                try:
++                    nested = json.loads(value)
++                except ValueError:
++                    pass
++                else:
++                    walk(nested, path + ("decoded_envelope",), depth + 1)
++    if name.lower().endswith(".jsonl"):
++        for line in text.splitlines():
++            if not line.strip():
++                continue
++            try:
++                value = json.loads(line)
++            except (ValueError, RecursionError):
++                findings["invalid_jsonl_file"] += 1
++            else:
++                walk(value)
++    elif name.lower().endswith(".json"):
++        try:
++            value = json.loads(text)
++        except (ValueError, RecursionError):
++            findings["invalid_json_file"] += 1
++        else:
++            walk(value)
++    return +findings, +advisories
++
++
++def inspect_archive(raw, secrets):
++    members, findings, advisories = [], Counter(), Counter()
++    expanded, seen = 0, set()
++    for secret, _ in secrets:
++        if secret in raw:
++            findings["known_secret_value"] += 1
++    try:
++        with tarfile.open(fileobj=BytesIO(raw), mode="r:gz") as archive:
++            errors, notes = scan_bytes(json.dumps(archive.pax_headers).encode(), "archive_header.json", secrets)
++            findings.update(errors); advisories.update(notes)
++            for member in archive:
++                name = member.name.rstrip("/")
++                errors, notes = scan_bytes(json.dumps({"name": name, "pax_headers": member.pax_headers,
++                                                       "uname": member.uname, "gname": member.gname}).encode(), "member_metadata.json", secrets)
++                findings.update(errors); advisories.update(notes)
++                if errors:
++                    continue
++                try:
++                    if denied(name):
++                        raise CheckError("forbidden_archive_member")
++                except CheckError:
++                    findings["forbidden_archive_member"] += 1
++                    continue
++                if name in seen:
++                    findings["duplicate_archive_member"] += 1
++                seen.add(name)
++                if member.isdir():
++                    continue
++                if not member.isfile():
++                    findings["archive_link_or_special_member"] += 1
++                    continue
++                expanded += member.size
++                if member.size > MAX_BYTES or expanded > MAX_ARCHIVE_EXPANDED:
++                    findings["archive_expansion_limit"] += 1
++                    break
++                handle = archive.extractfile(member)
++                if handle is None:
++                    findings["archive_read_error"] += 1
++                    continue
++                data = handle.read(MAX_BYTES + 1)
++                if len(data) != member.size:
++                    findings["archive_member_size_mismatch"] += 1
++                    continue
++                errors, notes = scan_bytes(data, name, secrets)
++                findings.update(errors); advisories.update(notes)
++                # Never produce a SHA inventory for rejected secret-bearing data.
++                if not errors:
++                    members.append({"path": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
++    except (tarfile.TarError, OSError, EOFError, ValueError):
++        findings["invalid_source_archive"] += 1
++    return members, +findings, +advisories
++
++
++def tree_files(root):
++    result = []
++    for directory, names, files in os.walk(root, followlinks=False):
++        for name in names:
++            path = Path(directory) / name
++            relative_name = path.relative_to(root).as_posix()
++            if path.is_symlink() or denied(relative_name):
++                raise CheckError("forbidden_or_linked_directory")
++        for name in files:
++            path = Path(directory) / name
++            relative_name = path.relative_to(root).as_posix()
++            if path.is_symlink() or denied(relative_name):
++                raise CheckError("forbidden_or_linked_file")
++            result.append(relative_name)
++    return sorted(result)
++
++
++def validate(spec, workspace, secrets, seal=False):
++    """All errors contain only rule codes and safe relative source paths."""
++    if spec.get("approved") is not True or not spec.get("artifacts"):
++        raise CheckError("spec_not_approved_or_empty")
++    spec_errors, _ = scan_bytes(json.dumps(spec).encode(), "spec.json", secrets)
++    if spec_errors:
++        raise CheckError("unsafe_spec")
++    if spec.get("require_secret_sources") is True and not secrets:
++        raise CheckError("required_secret_scan_missing")
++    artifacts = spec["artifacts"]
++    if any(item.get("sealed") is not True for item in artifacts):
++        raise CheckError("active_or_unsealed_artifact")
++    workspace = Path(workspace).resolve()
++    result = {"schema_version": 1, "created_at_utc": datetime.now(timezone.utc).isoformat(),
++              "scope": spec.get("scope"), "safe_to_stage": False, "publication_performed": False,
++              "secret_sources_checked": len(secrets), "files": [], "archive_members": [],
++              "findings": [], "advisories": [], "artifacts": []}
++    result["spec_canonical_sha256"] = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
++    result["validator_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
++    identities, targets = set(), set()
++    lock = json.loads(json.dumps(spec))
++    for item, locked in zip(artifacts, lock["artifacts"]):
++        artifact_id = item["id"]
++        if not isinstance(artifact_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", artifact_id) or artifact_id in identities:
++            raise CheckError("invalid_or_duplicate_artifact_id")
++        identities.add(artifact_id)
++        source_name = relative(item["source"]).as_posix()
++        target_root = relative(item["target"]).as_posix()
++        if denied(target_root):
++            raise CheckError("forbidden_target_path")
++        artifact_errors, artifact_notes = Counter(), Counter()
++        records, member_records = [], []
++        try:
++            source = safe_path(workspace, source_name)
++            kind = item["kind"]
++            if kind not in {"sealed_directory", "source_archive", "sealed_file"}:
++                raise CheckError("unknown_artifact_kind")
++            if not isinstance(item.get("anchor"), dict):
++                raise CheckError("missing_sealed_anchor")
++            anchor = item["anchor"]
++            if not re.fullmatch(r"[0-9a-f]{64}", anchor.get("sha256", "")):
++                raise CheckError("invalid_anchor_sha256")
++            if kind == "sealed_directory":
++                if not source.is_dir():
++                    raise CheckError("source_not_directory")
++                before = tree_files(source)
++                relative(anchor["path"])
++                if anchor["path"] not in before:
++                    raise CheckError("anchor_not_in_artifact")
++                files = before
++            else:
++                if kind == "source_archive" and not source_name.endswith(".tar.gz"):
++                    raise CheckError("source_archive_must_be_tar_gz")
++                if anchor.get("path") != source.name:
++                    raise CheckError("archive_anchor_path_mismatch")
++                before = [source.name]
++                files = [source.name]
++            expected = {entry["path"]: entry for entry in item.get("files", [])}
++            if not seal and (len(expected) != len(item.get("files", [])) or sorted(expected) != before):
++                raise CheckError("file_inventory_mismatch")
++            stamps = {}
++            signature = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
++            for name in files:
++                path = source / name if kind == "sealed_directory" else source
++                file_source = source_name + "/" + name if kind == "sealed_directory" else source_name
++                target = target_root + "/" + name if kind == "sealed_directory" else target_root
++                if target in targets:
++                    raise CheckError("duplicate_target_path")
++                targets.add(target)
++                stamps[path] = signature(path.lstat())
++                raw = stable_read(path)
++                if kind == "source_archive":
++                    members, errors, notes = inspect_archive(raw, secrets)
++                    member_records = [{"artifact_id": artifact_id, **entry} for entry in members]
++                else:
++                    errors, notes = scan_bytes(raw, name, secrets)
++                artifact_errors.update(errors); artifact_notes.update(notes)
++                for rule, count in errors.items():
++                    result["findings"].append({"artifact_id": artifact_id, "path": file_source, "rule": rule, "count": count})
++                for rule, count in notes.items():
++                    result["advisories"].append({"artifact_id": artifact_id, "path": file_source, "rule": rule, "count": count})
++                if errors:
++                    continue
++                checksum = hashlib.sha256(raw).hexdigest()
++                record = {"artifact_id": artifact_id, "source": file_source, "target": target,
++                          "path": name, "bytes": len(raw), "sha256": checksum}
++                if not seal and (expected[name]["bytes"] != len(raw) or expected[name]["sha256"] != checksum):
++                    artifact_errors["file_digest_or_size_mismatch"] += 1
++                if name == anchor.get("path") or kind == "source_archive":
++                    if anchor.get("sha256") != checksum:
++                        artifact_errors["sealed_anchor_sha_mismatch"] += 1
++                if len(raw) > WARN_BYTES:
++                    result["advisories"].append({"artifact_id": artifact_id, "path": file_source, "rule": "github_file_size_warning", "count": 1})
++                records.append(record)
++            if kind == "sealed_directory" and tree_files(source) != before:
++                artifact_errors["directory_changed_during_scan"] += 1
++            if any(signature(path.lstat()) != stamp for path, stamp in stamps.items()):
++                artifact_errors["file_changed_during_scan"] += 1
++        except (OSError, KeyError, TypeError, ValueError, CheckError) as exc:
++            artifact_errors[str(exc) if isinstance(exc, CheckError) else "source_or_spec_read_error"] += 1
++        if artifact_errors:
++            existing = {entry["rule"] for entry in result["findings"] if entry["artifact_id"] == artifact_id}
++            for rule, count in artifact_errors.items():
++                if rule not in existing:
++                    result["findings"].append({"artifact_id": artifact_id, "path": source_name, "rule": rule, "count": count})
++        else:
++            result["files"].extend(records)
++            result["archive_members"].extend(member_records)
++            locked["files"] = [{key: record[key] for key in ("path", "bytes", "sha256")} for record in records]
++        result["artifacts"].append({"id": artifact_id, "sealed": item["sealed"], "file_count": len(records), "passed": not artifact_errors})
++    result["safe_to_stage"] = not result["findings"]
++    missing = sorted(set(spec.get("required_stages", [])) - identities)
++    result["missing_required_stages"] = missing
++    result["all_required_stages_present"] = not missing
++    result["complete_project_publishable"] = result["safe_to_stage"] and not missing
++    result["total_bytes"] = sum(item["bytes"] for item in result["files"])
++    result["github_regular_git_limits_bytes"] = {"warning_above": WARN_BYTES, "block_above": MAX_BYTES}
++    result["finding_counts"] = dict(Counter({rule: sum(x["count"] for x in result["findings"] if x["rule"] == rule) for rule in {x["rule"] for x in result["findings"]}}))
++    return result, lock
++
++
++def main(argv=None):
++    class SafeParser(argparse.ArgumentParser):
++        def error(self, message):
++            raise CheckError("invalid_arguments")
++    try:
++        parser = SafeParser(description=__doc__)
++        parser.add_argument("--spec", required=True)
++        parser.add_argument("--workspace", default=str(Path(__file__).resolve().parent.parent))
++        parser.add_argument("--output-dir", required=True)
++        parser.add_argument("--secret-file", action="append", default=[])
++        parser.add_argument("--seal", action="store_true", help="Build a complete inventory only for explicitly approved sealed artifacts.")
++        args = parser.parse_args(argv)
++        spec = json.loads(Path(args.spec).read_text())
++        if spec.get("approved") is not True:
++            raise CheckError("spec_not_approved_or_empty")
++        secrets = load_secrets(args.secret_file)
++        result, lock = validate(spec, args.workspace, secrets, seal=args.seal)
++        output = Path(args.output_dir)
++        output.mkdir(parents=True, exist_ok=False)
++        # Generated reports contain no input snippets or secret fingerprints.
++        for name, value in (("manifest.json", result), ("lock.json", lock if result["safe_to_stage"] else {"valid": False, "reason": "security_or_integrity_check_failed"})):
++            with (output / name).open("x", encoding="utf-8") as handle:
++                json.dump(value, handle, indent=2, ensure_ascii=False)
++                handle.write("\n")
++        print(json.dumps({"safe_to_stage": result["safe_to_stage"], "complete_project_publishable": result["complete_project_publishable"], "files": len(result["files"]), "findings": len(result["findings"]), "publication_performed": False}))
++        return 0 if result["safe_to_stage"] else 1
++    except Exception as exc:
++        print(json.dumps({"safe_to_stage": False, "rule": str(exc) if isinstance(exc, CheckError) else "validation_failed", "publication_performed": False}))
++        return 2
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

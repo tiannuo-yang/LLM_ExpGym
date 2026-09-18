@@ -78,7 +78,18 @@ def json_configuration(answer):
 
 
 def old_parser(commit, source_root=None):
-    raw = (Path(source_root) / "expgym/tool_protocol.py").read_bytes() if source_root else subprocess.check_output(["git", "show", commit + ":expgym/tool_protocol.py"], cwd=REPO)
+    if source_root:
+        raw = (Path(source_root) / "expgym/tool_protocol.py").read_bytes()
+    else:
+        capsule = REPO / "tools/historical_scorers" / commit
+        manifest_raw = (capsule / "MANIFEST.json").read_bytes()
+        if commit != BASELINE or sha(manifest_raw) != "c7a1fa99c6a4b874e8d64e2013f53f2ae10fc6b0de7fda5491b02d6f0fdb8ed3":
+            raise RuntimeError("Historical parser capsule identity mismatch")
+        manifest = json.loads(manifest_raw)
+        record = next(item for item in manifest["files"] if item["path"] == "expgym/tool_protocol.py")
+        raw = (capsule / record["path"]).read_bytes()
+        if sha(raw) != record["sha256"] or len(raw) != record["bytes"]:
+            raise RuntimeError("Historical parser capsule source mismatch")
     module = types.ModuleType("_historical_hpo_tool_protocol_" + sha(raw)[:16])
     sys.modules[module.__name__] = module
     exec(compile(raw, commit + ":expgym/tool_protocol.py", "exec"), module.__dict__)

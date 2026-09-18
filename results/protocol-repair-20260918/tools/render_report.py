@@ -56,6 +56,7 @@ def main():
     ap.add_argument('--secondary',type=Path,required=True)
     ap.add_argument('--audit',type=Path,required=True)
     ap.add_argument('--hpo',type=Path,required=True,help='Official 486 behavior directory')
+    ap.add_argument('--existing-rescore',type=Path,help='Frozen existing-trace rescore layer, separate from new runtime adoption')
     ap.add_argument('--output',type=Path,required=True)
     ap.add_argument('--public-prefix',default='../protocol-repair-20260918')
     args=ap.parse_args()
@@ -68,6 +69,21 @@ def main():
         template=prior/'README.zh.md'
     doc=template.read_text()
     version=json.loads((args.main/'SCORE_VERSIONS.json').read_text())
+    existing_rescore=args.existing_rescore or args.repo/'results/protocol-repair-20260918/rescore/main'
+    legacy_diffs=read(existing_rescore/'sample_diff.csv')
+    assert len(legacy_diffs)==4698
+    legacy_any=sum(r['score_changed']=='True' for r in legacy_diffs)
+    legacy_endpoint=sum(r['endpoint_score_changed']=='True' for r in legacy_diffs)
+    legacy_primary=0
+    for row in legacy_diffs:
+        before,after=json.loads(row['old_metrics_json']),json.loads(row['new_metrics_json'])
+        key=({'restricted_search':'f1','evidence_audit':'evidence_acc','tuning':'gap0'} if row['system']=='expgym' else {'restricted_search':'f1_mv','evidence_audit':'evidence_acc_mv','tuning':'gap0_mi'})[row['scenario']]
+        a,b=before.get(key),after.get(key)
+        legacy_primary+=((a is None)!=(b is None)) or (a is not None and b is not None and not math.isclose(a,b,rel_tol=0,abs_tol=1e-12))
+    fairness=version.get('runtime_fairness') or version.get('hpo_fairness') or {}
+    runtime_commit=fairness.get('runtime_snapshot_commit','尚未采用运行补跑')
+    auxiliary_runtime_commits=fairness.get('auxiliary_runtime_snapshot_commits',{})
+    core_commit=fairness.get('runtime_core_commit',version['new']['code_commit'])
     checks=json.loads((args.main/'CHECKS.json').read_text())
     findings=json.loads((args.main/'FINDINGS.json').read_text())
     dcheck=json.loads((args.display/'CHECKS.json').read_text())
@@ -88,6 +104,10 @@ def main():
     ac=read(args.audit/'n1/diagnostic_counts.csv')
     patterns=read(args.audit/'n1/paired_completion_patterns.csv')
     coords=read(args.audit/'coordination/audit_groups.csv')
+    coord_pools=read(args.audit/'coordination/audit_pools.csv')
+    audit_check=json.loads((args.audit/'CHECKS.json').read_text())
+    case_population=audit_check.get('case_population',[])
+    current_case_population=next((r for r in reversed(case_population) if r.get('score_version')!='old'),{})
     deep=read(args.secondary/'cases/deepseek_delivery.csv');di={r['regime']:r for r in deep}
     transitions=read(args.secondary/'cases/deepseek_delivery_transitions.csv');both=next(r for r in transitions if r['transition']=='scored_to_scored')
     allslots={r['slot_id']:r for r in read(args.main/'slot_scalars.csv')}
@@ -99,7 +119,7 @@ def main():
         for field in ['label_acc','evidence_acc']:
             assert abs(float(row[field])-metrics[field])<1e-12,(row['slot_id'],field,'Audit evidence/main scoring versions differ')
         matched_audit+=1
-    for row in read(args.audit/'coordination/audit_pools.csv'):
+    for row in coord_pools:
         metrics=json.loads(allslots[row['slot_id']]['metrics_json'])
         assert row['source_sha256']==allsources[row['slot_id']]['result_sha256']
         for field in ['label_acc','evidence_acc']:
@@ -121,8 +141,12 @@ def main():
     audit_both=sum(float(r['delta_vs_stronger_baseline'])>0 for r in p1 if r['scenario']=='evidence_audit')
     adopted=version['new']['adoption_state']=='official'
     state='正式采用的新评分' if adopted else '全量新评分候选（尚未封版采用）'
-    note=f"**2026-09-18 协议修复：**本页使用{state}。全部 4,698 个主实验槽位均进入重新提取、重新评分和聚合，不仅修补此前定位的个例；旧分数、早期诊断分数与新评分分别留存。终答提取与 Audit 投票使用统一接受规则，工具历史、原件和旧成绩不被反写。HPO 行为覆盖全部 486 条 N1 轨迹。[评分版本]({prefix}/main/SCORE_VERSIONS.json) · [逐样本变化]({prefix}/rescore/sample_diff.csv) · [结论对照]({prefix}/conclusion_delta.csv) · [原 297c3d0 报告](https://github.com/tiannuo-yang/LLM_ExpGym/blob/297c3d00a006f33fc5a8ca799ce91d327d92839e/results/paper-analysis-20260916/README.zh.md)。"
+    sweep_gate=fairness.get('sweep_control_gate',{})
+    sweep_note=(f'独立报告还采用 {sweep_gate["verified_slots"]} 条必要的实际控制流补跑；该层的新分数和实际 token、墙钟成本按独立报告及其来源解释，不混称为离线评分变化。' if adopted and sweep_gate.get('status')=='PASS' else '另行控制流补跑如被采用，须按该独立报告的最终来源解释，不能混称为离线评分变化。')
+    adoption_note=(f'正式主表已采用全部 {fairness.get("hpo_verified_pools")}/{fairness.get("hpo_required_pools")} 个预注册 HPO 修复/提供方对照池，以及 {fairness.get("auxiliary_verified_main_slots")}/{fairness.get("auxiliary_required_main_slots")} 个 Search/Audit 中间终答控制流对照槽位；逐运行来源、失败/正常无配置状态和选择规则单独留档。' if adopted else '统一版本的实际运行对照尚未全部采用；以下候选表不得代替总采用闸门完成后的正式结果。')
+    note=f"**2026-09-18 协议修复：**本页使用{state}。全部 4,698 个主实验槽位均进入重新提取、重新评分和聚合，不仅修补此前定位的个例；旧分数、早期诊断分数与新评分分别留存。终答提取与 Audit 投票使用统一接受规则，工具历史、原件和旧成绩不被反写。HPO 行为覆盖全部 486 条 N1 轨迹。Gemini* 仍表示历史 Sub2 与 OpenRouter 来源的组合。[评分版本]({prefix}/main/SCORE_VERSIONS.json) · [旧轨迹逐样本评分变化]({prefix}/rescore/main/sample_diff.csv) · [含实际补跑的逐样本正式采用对照]({prefix}/control_flow_adoption/new_official/sample_diff.csv) · [结论对照]({prefix}/conclusion_delta.csv) · [原 297c3d0 报告](https://github.com/tiannuo-yang/LLM_ExpGym/blob/297c3d00a006f33fc5a8ca799ce91d327d92839e/results/paper-analysis-20260916/README.zh.md)。"
     doc=replace_paragraph(doc,'**2026-09-18 更新：**',note)
+    doc=doc.replace(note,note+'\n\n'+adoption_note,1)
     doc=replace_paragraph(doc,'这是已观察任务与模型设置上的描述性分析。',f'这是已观察任务与模型设置上的描述性分析。“最佳”指最高观察均分，不意味着统计上显著优于其他模型。现有注册主实验覆盖 4,698/4,698 项，其中 Gemini 783/783；本评分版本严格评分完整 {strict:,} 项。正常无配置、零分与失败/未完成保持分开。完整分数、轨迹证据与来源见[数据附件](APPENDIX.zh.md)，不将不同任务指标合成为一个总榜。')
     abstract=f'LLM 智能体的表现不仅取决于如何推理，也取决于能够获取哪些外部反馈。我们基于 EXPGYM 的六模型结果，研究反馈预算如何改变任务表现、模型排序与部署选型。预算从 Free 收紧到 Tight 时，多跳搜索 F1 与证据集合准确率分别有 {findings["n1_budget"]["restricted_search"]["declined"]}/6、{findings["n1_budget"]["evidence_audit"]["declined"]}/6 个模型下降；七个评价维度中，{leaders} 个更换了最高均分模型。Free 下的领先不保证 Tight 下的最佳选择，排序变化也不必然意味着大的部署损失。我们在完整 486 条调优轨迹、1,314 条搜索轨迹和 702 条审计轨迹上分析获取、停止与最终提交，并以四智能体比较 POOLACT、独立运行与共享缓存。Tight Search 相对独立运行的模型间 F1 增益中位数为 {search_med:.2f} 个百分点；审计 {audit_both}/12 个模型—预算组合高于两种基线。终答提取和投票接受修复后，本文使用全量新评分，并将受运行时共享版本影响的 HPO 比较单独追溯。'
     doc=replace_paragraph(doc,'LLM 智能体的表现不仅取决于如何推理，',abstract)
@@ -145,7 +169,7 @@ def main():
     doc=replace_paragraph(doc,'九个调优任务中，',f'九个调优任务中，{dcheck["task_positive_regret_optimistic_tie"]} 个任务即使采用最有利的 Free 并列选择也有正 regret，{dcheck["task_positive_regret_pessimistic_tie"]} 个在至少一种 Free 并列选择下有正 regret。最大的观察上界出现在 {maxreg["task"]}，为 {float(maxreg["regret_max"]):.2f} Gap points；其 Free 领先者为 {names(maxreg["free_leaders"])}，Tight 领先者为 {names(maxreg["tight_leaders"])}。逐任务表保留完整候选集合与并列区间。')
     dimi={r['dimension']:r for r in dims}
     doc=replace_paragraph(doc,'排名与损失幅度需要同时报告。',f'排名与损失幅度需要同时报告。NAS201、NAS101、ParamNet 三家族的 Free 选型 regret 上界分别为 {f(dimi["NAS201"]["regret_max"])}、{f(dimi["NAS101"]["regret_max"])}、{f(dimi["ParamNet"]["regret_max"])}。这有助于区分近似并列和有实质幅度的部署差异。regret 是同一批观测均分的回顾性比较，不是独立留出集上的选型泛化保证。[逐任务分数]({prefix}/display/hpo_task_scores.csv) · [并列与 regret]({prefix}/display/hpo_task_regret.csv)。')
-    doc=replace_paragraph(doc,'本章从结构化 trajectory 出发，',f'本章全量覆盖 1,314 条 Search、702 条 Audit 和 486 条 HPO 单智能体轨迹。HPO 每预算由 160 条补至 162 条。动作和终止原因描述实际已发生的运行；依赖最终答案的成功率、证据质量、配对和案例用本评分版本重新计算。离线评分修复不会被描述成模型已经采取了不同动作。')
+    doc=replace_paragraph(doc,'本章从结构化 trajectory 出发，',f'本章全量覆盖 1,314 条 Search、702 条 Audit 和 486 条 HPO 单智能体轨迹。HPO 每预算由 160 条补至 162 条。动作和终止原因来自最终采用的实际运行；有真实控制流补跑时，行为表也切换到相应新原件。仅做离线评分的旧轨迹不虚构不同动作。最终答案的成功率、证据质量、配对和案例均按本评分版本重新计算。')
     doc=replace_paragraph(doc,'Free 下 336 次自主提交中，',f'Free 下 {sbi["cost_free"]["natural_stop"]} 次自主提交中，有 {sbi["cost_free"]["natural_stop_imperfect"]} 次 F1 未满分，其中 {sbi["cost_free"]["natural_stop_zero"]} 次为零分。即使没有反馈预算强制终止，模型仍可能在答案不完整或错误时提交；这一成功分类已经按新评分全量重算。Tight 的主要终止来源是预算先结束获取，两种终止不能合并解释。')
     doc=replace_paragraph(doc,'模型也没有统一的停止风格：',f'模型也没有统一的停止风格：GPT 在 Free 下 {smi["gpt-5.6-sol","cost_free"]["natural_stop"]}/73 次自主提交，平均获取 {f(smi["gpt-5.6-sol","cost_free"]["mean_unique_articles"])} 篇不同文章，F1 为 {float(smi["gpt-5.6-sol","cost_free"]["mean_score"])*100:.2f}；Gemini 为 {smi["gemini-3.8-flash-medium","cost_free"]["natural_stop"]}/73 次、{f(smi["gemini-3.8-flash-medium","cost_free"]["mean_unique_articles"])} 篇及 {float(smi["gemini-3.8-flash-medium","cost_free"]["mean_score"])*100:.2f}。这些是获取与停止风格的描述，不证明延长任一模型的轨迹都会带来同等收益。')
     doc=replace_paragraph(doc,'任务之间也不同。',f'任务之间也不同。全部 486 条已完成调优轨迹中，Free 的 162 条有 {hi["cost_free"]["cap_n"]} 条触及步数/评估上限，自主回答 {hi["cost_free"]["natural_n"]} 条；Moderate 自主回答为 {hi["cost_moderate"]["natural_n"]}/162，Tight 为 {hi["cost_tight"]["natural_n"]}/162。自然结束的调优轨迹在 Moderate/Tight 平均已使用 {float(hi["cost_moderate"]["natural_stop_budget_fraction_mean"])*100:.1f}%/{float(hi["cost_tight"]["natural_stop_budget_fraction_mean"])*100:.1f}% 的可见有效反馈预算。全部轨迹相应均值为 {float(hi["cost_moderate"]["delivered_budget_fraction_mean"])*100:.2f}%/{float(hi["cost_tight"]["delivered_budget_fraction_mean"])*100:.2f}%。预算利用率先按轨迹计算，再等权平均；Free 没有此分母。')
@@ -160,13 +184,14 @@ def main():
     af,at=ai['cost_free'],ai['cost_tight']; cf,ct=subset['cost_free','nonempty'],subset['cost_tight','nonempty']
     confirmed=sum(int(r['free_exact_feedback_seen']) for r in patterns)
     pattern_doc=len({r['doc_index'] for r in patterns});pattern_models=len({r['model'] for r in patterns})
+    qwen_case_text=('Qwen 文档 10、顺序 1、nda-13 的固定案例仍满足完整配对条件：Free 先引用第三方来源子条款，再在不完整反馈后补充上位例外条款；Tight 只提交部分证据。' if current_case_population.get('qwen_frozen_case_still_qualifies') else 'Qwen 文档 10、顺序 1、nda-13 的历史固定案例已按当前采用轨迹重新核对；其新旧答案和筛选状态见案例核验，不能继续把历史案例自动算作当前合格配对。')
     sec=f'''### 3.3 标签仍然正确时，证据可能已经退化
 
 全部 702 条审计轨迹重新提取终答后，逐假设重算标签正确、证据集合精确及两者联合正确。EA 不要求标签正确，不能直接当作联合正确率。
 
 {abody}
 
-Free→Tight 的 LA 下降 {(float(af['label_acc'])-float(at['label_acc']))*100:.2f} 个百分点，EA 下降 {(float(af['evidence_acc'])-float(at['evidence_acc']))*100:.2f}，联合正确率下降 {(float(af['joint_acc'])-float(at['joint_acc']))*100:.2f}。终答提取修复改变了旧稿的具体差距，应使用这里的完整新结果，不再引用旧诊断或旧解析下的数字。
+Free→Tight 的 LA 下降 {(float(af['label_acc'])-float(at['label_acc']))*100:.2f} 个百分点，EA 下降 {(float(af['evidence_acc'])-float(at['evidence_acc']))*100:.2f}，联合正确率下降 {(float(af['joint_acc'])-float(at['joint_acc']))*100:.2f}。终答修复及必要控制运行改变了旧稿的具体差距，应使用这里的完整新结果，不再引用旧诊断或旧解析下的数字。
 
 仅看标准证据非空的假设并维持文档等权，LA 从 {float(af['nonempty_label_correct'])*100:.2f}% 到 {float(at['nonempty_label_correct'])*100:.2f}%，EA 从 {float(af['nonempty_evidence_exact'])*100:.2f}% 到 {float(at['nonempty_evidence_exact'])*100:.2f}%，联合正确率从 {float(af['nonempty_joint_correct'])*100:.2f}% 到 {float(at['nonempty_joint_correct'])*100:.2f}%。另按标签正确的假设呈现次数合并计数，证据不完全正确的比例为 Free {cf['label_correct_wrong_evidence']}/{cf['label_correct']}（{int(cf['label_correct_wrong_evidence'])/int(cf['label_correct'])*100:.1f}%）、Tight {ct['label_correct_wrong_evidence']}/{ct['label_correct']}（{int(ct['label_correct_wrong_evidence'])/int(ct['label_correct'])*100:.1f}%）。该合并条件比例不同于文档宏均值，不把重复顺序当独立任务。
 
@@ -174,9 +199,9 @@ Free→Tight 的 LA 下降 {(float(af['label_acc'])-float(at['label_acc']))*100:
 
 严格“反馈补全”配对要求：Free 首次可见提案缺证据并收到不完整反馈，最后标签与证据均正确；Tight 标签正确，却提交与 Free 首次提案相同的部分集合，且未获得该假设的可见反馈。全量新评分下匹配到 {len(patterns)} 个假设呈现，覆盖 {pattern_models} 个模型、{pattern_doc}/13 份文档；其中 {confirmed} 个在 Free 下实际获得完整集合的正确确认。这些独立生成的 Free/Tight 配对不是同一随机轨迹的截断实验，不能推断额外一次反馈一定修复 Tight 错误。
 
-Qwen 文档 10、顺序 1、nda-13 的原案例保留其实际动作：Free 先引用第三方来源子条款，再在不完整反馈后补充上位例外条款；Tight 只提交部分证据。案例的新旧终答、筛选条件与总体匹配数均重新核对，不能仅因旧稿已经选中就跳过复核。[配对与案例核验]({prefix}/audit/README.zh.md)。
+{qwen_case_text} 案例的新旧终答、筛选条件与总体匹配数均重新核对，不能仅因旧稿已经选中就跳过复核。[配对与案例核验]({prefix}/audit/README.zh.md)。
 
-审计反馈验证所提交证据集合，不直接提供正确标签。历史单智能体提示包含固定示例，可能影响查询对象；本次未改提示或调度。`verification_eff` 保留历史“曾提交正确证据”的定义，若只统计模型实际收到的正确反馈，则另记 `visible_verification_eff`，不混改旧字段含义。'''
+审计反馈验证所提交证据集合，不直接提供正确标签。历史单智能体提示包含固定示例，可能影响查询对象；本次未改提示或调度。`verification_eff` 保留历史定义：在终答标签与证据均正确的假设中，曾向工具提交该正确证据集合的比例，包含返回因预算被隐藏的尝试。`visible_verification_eff` 使用相同分母，只计模型实际收到的正确核验，不混改旧字段含义。'''
     doc=replace_section(doc,'### 3.3 标签仍然正确时，','### 3.4 可检验的后续问题',sec)
     pt=table(['模型','预算','Search F1-MV：Δnaive / Δcached','Audit EA-MV：Δnaive / Δcached','NAS Gap0-MI：Δnaive / Δcached'],[[NAMES[m],b.removeprefix('cost_').title(),*[' / '.join(f'{float(pi[m,s,b]["delta_vs_"+base]):+.2f}' for base in ['naive','cached']) for s in ['restricted_search','evidence_audit','tuning']]] for m in MODELS for b in BUDGETS[1:]])
     doc=replace_table(doc,'| 模型 | 预算 | Search F1-MV：',pt)
@@ -187,7 +212,7 @@ Qwen 文档 10、顺序 1、nda-13 的原案例保留其实际动作：Free 先�
     la_gain=lambda b:mean(float(r['delta_vs_naive']) for r in pa if r['scenario']=='evidence_audit' and r['regime']==b and r['metric']=='label_acc_mv')
     doc=replace_paragraph(doc,'**审计的收益最一致，而且主要体现为证据质量。**',f'**审计的证据收益保持广泛，但幅度需要更新。** {audit_both}/12 个模型—预算组合高于两种基线。Moderate EA-MV 对 naive/cached 的模型平均增益为 {f(am["mean_delta_vs_naive"])}/{f(am["mean_delta_vs_cached"])} 个百分点；Tight 为 {f(atp["mean_delta_vs_naive"])}/{f(atp["mean_delta_vs_cached"])}。LA-MV 对 naive 的对应增益为 {la_gain("cost_moderate"):.2f}/{la_gain("cost_tight"):.2f}。修复既可能提高基线也可能提高 POOLACT，不能只列正向变化。')
     ht=psi['tuning','cost_tight']
-    doc=replace_paragraph(doc,'**调优的收益在 Tight 下更大。**',f'**调优必须在统一运行版本的对照范围内解释。** 当前采用表的 Tight Gap0-MI 均值为 naive {f(ht["naive_model_macro"])}、cached {f(ht["cached_model_macro"])}、POOLACT {f(ht["poolact_model_macro"])}，高于两基线的模型数为 {ht["positive_vs_stronger_baseline"]}/6。图路径标识碰撞会改变运行时共享内容，无法靠离线重算分数消除；历史混合版本表与统一修复版本的控制实验分别留档，不把历史表当作修复运行的替代。[全部端点与增益]({prefix}/poolact/poolact_all_metrics.csv)。')
+    doc=replace_paragraph(doc,'**调优的收益在 Tight 下更大。**',f'**调优在修复版本的对照范围内重新比较。** 当前采用表的 Tight Gap0-MI 均值为 naive {f(ht["naive_model_macro"])}、cached {f(ht["cached_model_macro"])}、POOLACT {f(ht["poolact_model_macro"])}，高于两基线的模型数为 {ht["positive_vs_stronger_baseline"]}/6。{adoption_note} 图路径碰撞改变过运行时共享内容，因此其影响通过实际对照处理；旧分数重算、历史混合版本和新实际运行三层分别保留。[全部端点与增益]({prefix}/poolact/poolact_all_metrics.csv)。')
     # Acquisition metrics remain actual historical observations; vote EA is new.
     coord_macro=lambda b,s,k:mean(float(r[k]) for r in coords if r['regime']==b and r['strategy']==s)
     cb=[]
@@ -196,15 +221,28 @@ Qwen 文档 10、顺序 1、nda-13 的原案例保留其实际动作：Free 先�
                    [label+'：获得反馈的不同假设数',*[f(coord_macro(b,s,'mean_visible_hypotheses')) for s in STRATEGIES]],
                    [label+'：最终投票 EA（%）',*[f(psi['evidence_audit',b][s+'_model_macro']) for s in STRATEGIES]]])
     doc=replace_table(doc,'| 六模型审计池均值 |',table(['六模型审计池均值','naive','cached','POOLACT'],cb))
+    coord_lookup={(r['model'],r['regime'],r['strategy']):r for r in coords}
+    coverage_wins={base:sum(float(coord_lookup[m,b,'poolact']['mean_visible_hypotheses'])>float(coord_lookup[m,b,base]['mean_visible_hypotheses']) for m in MODELS for b in BUDGETS[1:]) for base in ['naive','cached']}
+    doc=replace_paragraph(doc,'Moderate 下，POOLACT 在较少的直接反馈调用下',f'将每池可见调用与假设覆盖分开后，POOLACT 的覆盖在 {coverage_wins["cached"]}/12 个模型—预算组高于 cached，在 {coverage_wins["naive"]}/12 组高于 naive。表中调用数来自最终采用成员实际看到的工具回复，图内共享内容不重复记作新工具获取，也不等同于计算或金钱开销。覆盖与分数的共同变化可以支持获取分配的描述，仍不能独立识别哪一种共享机制造成了改进。')
+    if not (coord_macro('cost_moderate','poolact','mean_feedback_visible')<coord_macro('cost_moderate','naive','mean_feedback_visible') and coord_macro('cost_moderate','poolact','mean_visible_hypotheses')>coord_macro('cost_moderate','naive','mean_visible_hypotheses')):
+        doc=doc.replace('### 4.2 更广的验证覆盖，而不是简单增加调用','### 4.2 验证覆盖、调用与共享的关系')
     # Explicitly avoid silently inheriting the old fixed example score triplet.
     case_scalars=read(args.main/'slot_scalars.csv')
     kc={r['strategy']:json.loads(r['metrics_json'])['evidence_acc_mv']*100 for r in case_scalars if r['system']=='poolact' and r['scenario']=='evidence_audit' and r['model']=='kimi-k3' and r['regime']=='cost_moderate' and r['item'].endswith(':3')}
     assert set(kc)==set(STRATEGIES)
-    doc=replace_paragraph(doc,'Kimi 的一个 Moderate 审计池展示了',f'Kimi 的 Moderate 审计文档 3 保留作共享案例：naive、cached、POOLACT 分别用 40、46、38 次可见反馈覆盖 10、12、16 个假设，新评分的投票 EA 依次为 {kc["naive"]:.2f}%、{kc["cached"]:.2f}%、{kc["poolact"]:.2f}%。POOLACT 一名成员验证证据，另一名未亲自查询该假设的成员实际收到共享验证消息，最终提交相同证据。新接受规则下的最终答案匹配与候选筛选重新核对；该案例不证明共享消息是唯一答案来源。[池级案例复核]({prefix}/audit/README.zh.md)。')
+    kp={r['strategy']:r for r in coord_pools if r['model']=='kimi-k3' and r['regime']=='cost_moderate' and r['question_index']=='3'}
+    assert set(kp)==set(STRATEGIES)
+    call_text='、'.join(kp[s]['feedback_visible'] for s in STRATEGIES)
+    cover_text='、'.join(kp[s]['visible_hypotheses'] for s in STRATEGIES)
+    sharing_text=('该固定案例在新版本仍满足共享证据筛选条件：一名成员实际验证了证据，另一名未直接查询该假设的成员收到共享验证消息并提交相同证据。' if current_case_population.get('kimi_frozen_case_still_qualifies') else '该固定案例是否仍满足共享证据机制筛选条件已单独核验；不把旧运行中的共享消息自动归给新采用轨迹。')
+    doc=replace_paragraph(doc,'Kimi 的一个 Moderate 审计池展示了',f'Kimi 的 Moderate 审计文档 3 保留作固定对照：naive、cached、POOLACT 分别用 {call_text} 次可见反馈覆盖 {cover_text} 个假设，新评分的投票 EA 依次为 {kc["naive"]:.2f}%、{kc["cached"]:.2f}%、{kc["poolact"]:.2f}%。{sharing_text} 该案例不证明共享消息是唯一答案来源。[池级案例复核]({prefix}/audit/README.zh.md)。')
     bvals={s:bi['cost_tight',s] for s in STRATEGIES}
     bon_gain=float(bvals['poolact']['gap0_bon'])-float(bvals['naive']['gap0_bon'])
     mi_gain=float(bvals['poolact']['gap0_mi'])-float(bvals['naive']['gap0_mi'])
-    doc=replace_paragraph(doc,'调优的两个端点提供了一个补充视角：',f'调优的两个端点提供了一个补充视角：当前采用表中 Tight 的 POOLACT−naive 个体均分差为 {mi_gain:.2f} points，事后四成员最高分差为 {bon_gain:.2f}。BoN−MI 差距在 naive、cached、POOLACT 中依次为 {f(bvals["naive"]["bon_minus_mi"])}/{f(bvals["cached"]["bon_minus_mi"])}/{f(bvals["poolact"]["bon_minus_mi"])}。这些数值及“提高池内平均表现”的解释必须与统一修复版本对照同时核对，不能利用旧图运行得到的分数替代实际补跑。')
+    spread_conclusion=('本版个体平均分的改善大于最佳成员端点的改善，与收益更广泛分布的解释相容；不意味着每个池、每个成员都改善。' if mi_gain>0 and mi_gain>bon_gain else '本版不支持沿用“个体平均分改善大于最佳成员端点”的旧概括，应按这两个端点分别解释。')
+    doc=replace_paragraph(doc,'调优的两个端点提供了一个补充视角：',f'调优的两个端点提供了一个补充视角：当前采用表中 Tight 的 POOLACT−naive 个体均分差为 {mi_gain:.2f} points，事后四成员最高分差为 {bon_gain:.2f}。BoN−MI 差距在 naive、cached、POOLACT 中依次为 {f(bvals["naive"]["bon_minus_mi"])}/{f(bvals["cached"]["bon_minus_mi"])} / {f(bvals["poolact"]["bon_minus_mi"])}。{spread_conclusion}')
+    if not (mi_gain>0 and mi_gain>bon_gain):
+        doc=doc.replace('### 4.3 协调不只是制造一条更幸运的轨迹','### 4.3 区分个体均值与最佳成员')
     # All live references move to new versioned tables; preserved sources stay explicit.
     links={'../gemini-openrouter-20260917/main/':prefix+'/main/','gemini-update-20260918/':prefix+'/display/','cases/CASE_INDEX.zh.md':prefix+'/cases/CASE_INDEX.zh.md','cases/deepseek_delivery.csv':prefix+'/cases/deepseek_delivery.csv'}
     for a,b in links.items():
@@ -226,9 +264,11 @@ Qwen 文档 10、顺序 1、nda-13 的原案例保留其实际动作：Free 先�
     qvals={r['regime']:float(r['score']) for r in qcase}
     assert len(qvals)==3
     doc=replace_paragraph(doc,'一个具体例子是 Qwen 的一条 Free 搜索轨迹：',f'一个固定保留的例子是 Qwen 的 phantom_seed2 第 31 题 Free 轨迹：前四次不同查询连续返回同一人物文章，全程 16 次可见反馈仅覆盖 11 篇不同文章。新评分 Free F1={qvals["cost_free"]:.4f}、Tight F1={qvals["cost_tight"]:.4f}。这说明查询多样性不等于信息增量；案例不替代全量获取统计，也不用于证明预算导致退化。[重算后的代表案例索引]({prefix}/search/representative_case_index.csv)。')
-    limitations='本次保留的解释限制包括：Audit 固定首步示例未改；不同模型思考强度、输出上限、提供方和实际计算资源并不完全相同；等反馈预算不等于等 token、等金钱或等墙钟时间。真实调度会影响共享缓存可用时刻，未证明与提供方时延无关。NAS101 A/B/C 不是三个独立数据集，数值库版本影响并列处理的复现。早期筛选过的运行版本与统一修复补跑分别标注，不能把跨版本差值全部归因于模型能力。'
-    doc+='\n## 6. 评分版本、结论变化与复算\n\n'+note+'\n\n'+limitations+f'\n\n[逐项旧→新结论对照]({prefix}/conclusion_delta.csv)列出保留、需修改及尚待统一运行对照确认的结论，并给出对应 CSV。全部分析脚本、输入哈希、评分代码提交和新旧完整成绩公开保存；原始 dump 与完整 trajectory 沿用本地归档。公开 CSV 的重放核验与私有原件重新评分分层记录，不冒充同一种验证。\n'
-    (args.output/'README.zh.md').write_text(doc)
+    limitations='本次保留的解释限制包括：Audit 固定首步示例未改；不同模型思考强度、输出上限、提供方和实际计算资源并不完全相同；等反馈预算不等于等 token、等金钱或等墙钟时间。真实调度会影响共享缓存可用时刻，未证明与提供方时延无关。NAS101 A/B/C 不是三个独立数据集，数值库版本影响并列处理的复现。早期筛选过的运行版本与统一修复补跑分别标注；补跑也包含新采样和并发时序差异，不能把其差值全部归因于修复本身或模型能力。'
+    count_note=f'旧轨迹全量重评分有 {legacy_any} 个槽位的任一指标变化；{legacy_endpoint} 个任务端点变化（Audit 的 LA 或 EA 任一项均计入）；按论文主指标——Search F1、Audit EA、HPO Gap0-MI/Gap0——计数则为 {legacy_primary} 个。三者分母与事件定义不同，不能把 {legacy_endpoint} 误称为论文主指标变化数。统一图版本及真实中间终答控制流的新运行是另一层替换，最终采用的来源和效果另见补跑对照。'
+    auxiliary_code_note=('Search/Audit 控制流对照的执行快照按模型记录：'+ '；'.join(f'{model} `{commit}`' for model,commit in sorted(auxiliary_runtime_commits.items()))+'。') if auxiliary_runtime_commits else ''
+    code_note=f'评分与图修复核心代码为 `{core_commit}`；HPO 原生 API 执行快照为 `{runtime_commit}`。{auxiliary_code_note}执行快照包含提供方兼容接入与环境绑定；其与统一评分核心分别留档，不把不同快照写成同一提交。'
+    doc+='\n## 6. 评分版本、结论变化与复算\n\n'+count_note+'\n\n'+code_note+'\n\n'+limitations+f'\n\n[逐项旧→新结论对照]({prefix}/conclusion_delta.csv)列出保持与需要修改的结论，并给出对应 CSV。采用状态由总运行对照闸门明确记录。全部分析脚本、输入哈希、评分代码提交和新旧完整成绩公开保存；原始 dump 与完整 trajectory 沿用本地归档。公开 CSV 的重放核验与私有原件重新评分分层记录，不冒充同一种验证。\n'
     # Every highlighted interpretation has a named old/new comparison and evidence.
     delta=[]
     def add(name,old,new,evidence,unit=''):
@@ -237,12 +277,18 @@ Qwen 文档 10、顺序 1、nda-13 的原案例保留其实际动作：Free 先�
         delta.append(dict(conclusion=name,historical=old,new=new,unit=unit,status='保持' if unchanged else '修改',evidence=evidence,old_identity='published-297c3d0-historical-scoring',new_identity=version['new']['identity']))
     for r in read(args.main/'conclusion_changes.csv'):
         add(r['conclusion'],r['historical'],r['new'],'main/FINDINGS.json')
+    add('Existing-trace rescore: slots with any metric change',0,legacy_any,'rescore/main/sample_diff.csv','slots; any MI/MV or endpoint metric')
+    add('Existing-trace rescore: task endpoints changed',0,legacy_endpoint,'rescore/main/sample_diff.csv','slots; Audit LA or EA')
+    add('Existing-trace rescore: paper-primary endpoints changed',0,legacy_primary,'rescore/main/sample_diff.csv','slots; Audit EA only')
     old_display=prior/'gemini-update-20260918'
     olddims={r['dimension']:r for r in read(old_display/'dimension_selection.csv')}
+    old_leader_changes=sum(r['leader_set_changed']=='True' for r in olddims.values())
+    add('Dimension Free-to-Tight leader-set changes',old_leader_changes,leaders,'display/dimension_selection.csv','dimensions')
     for row in dims:
         for field in ['regret_min','regret_max']:
             add(row['dimension']+' selection '+field,olddims[row['dimension']][field],row[field],'display/dimension_selection.csv','reported points')
     oldregret={r['task']:r for r in read(old_display/'hpo_task_regret.csv')}
+    add('HPO maximum task-level regret',max(float(r['regret_max']) for r in oldregret.values()),float(maxreg['regret_max']),'display/hpo_task_regret.csv','Gap points')
     for row in regrets:
         for field in ['regret_min','regret_max']:
             add(row['task']+' '+field,oldregret[row['task']][field],row[field],'display/hpo_task_regret.csv','Gap points')
@@ -251,6 +297,18 @@ Qwen 文档 10、顺序 1、nda-13 的原案例保留其实际动作：Free 先�
         key=row['model'],row['scenario'],row['regime']
         for base in ['naive','cached']:
             add('POOLACT '+':'.join(key)+' gain over '+base,oldprimary[key]['poolact_minus_'+base],row['delta_vs_'+base],'poolact/poolact_primary.csv','pp or Gap points')
+    oldmacro={(r['scenario'],r['regime']):r for r in read(old_display/'poolact_scenario_summary.csv')}
+    for row in ps:
+        key=row['scenario'],row['regime']
+        for base in ['naive','cached']:
+            add('POOLACT model-macro '+':'.join(key)+' gain over '+base,oldmacro[key]['poolact_minus_'+base],row['mean_delta_vs_'+base],'poolact/poolact_scenario_summary.csv','pp or Gap points')
+        oldwins=sum(float(r['poolact_minus_naive'])>0 and float(r['poolact_minus_cached'])>0 for r in oldprimary.values() if (r['scenario'],r['regime'])==key)
+        add('POOLACT '+':'.join(key)+' models above both',oldwins,row['positive_vs_stronger_baseline'],'poolact/poolact_scenario_summary.csv','models')
+    oldbon={r['strategy']:r for r in read(old_display/'nas_best_minus_mean.csv') if r['regime']=='cost_tight'}
+    old_mi_gain=float(oldbon['poolact']['gap_mi'])-float(oldbon['naive']['gap_mi'])
+    old_bon_gain=float(oldbon['poolact']['gap_bon'])-float(oldbon['naive']['gap_bon'])
+    add('HPO Tight MI improvement exceeds BoN improvement',old_mi_gain>old_bon_gain and old_mi_gain>0,mi_gain>bon_gain and mi_gain>0,'display/nas_best_minus_mean.csv','boolean')
+    add('HPO Tight BoN model-macro PoolAct minus naive',old_bon_gain,bon_gain,'display/nas_best_minus_mean.csv','Gap0 points')
     oldab={r['budget']:r for r in read(prior/'audit/budget_metrics.csv')}
     for b in BUDGETS:
         for metric in ['label_acc','evidence_acc','joint_acc','nonempty_label_correct','nonempty_evidence_exact','nonempty_joint_correct','nonempty_missing_any','nonempty_extra_any']:
@@ -272,6 +330,24 @@ Qwen 文档 10、顺序 1、nda-13 的原案例保留其实际动作：Free 先�
             add('Search '+b+' '+field,oldrow[field],sbi[b][field],'search/overall_regime.csv')
     with (args.output/'conclusion_delta.csv').open('w',newline='') as stream:
         writer=csv.DictWriter(stream,list(delta[0]),lineterminator='\n');writer.writeheader();writer.writerows(delta)
+    delta_lookup={r['conclusion']:r for r in delta}
+    summary_specs=[
+        ('Search Free→Tight 下降模型数（/6）',['N1 restricted_search Free-to-Tight declined models'],0),
+        ('Audit EA Free→Tight 下降模型数（/6）',['N1 evidence_audit Free-to-Tight declined models'],0),
+        ('Free/Tight 领先集合变化（/7）',['Dimension Free-to-Tight leader-set changes'],0),
+        ('HPO 最大逐任务 regret（Gap points）',['HPO maximum task-level regret'],2),
+        ('POOLACT 高于两基线：全部 / Tight',['POOLACT all above both baselines','POOLACT tight above both baselines'],0),
+        ('HPO Tight POOLACT−naive 均值增益',['POOLACT model-macro tuning:cost_tight gain over naive'],2),
+        ('Audit 非空证据 LA：Free / Tight（%）',['Audit cost_free nonempty_label_correct','Audit cost_tight nonempty_label_correct'],2),
+        ('Audit 补全配对 / 实际确认完整证据',['Audit paired completion patterns','Audit paired confirmed complete evidence'],0),
+        ('HPO 行为轨迹数',['HPO behavioral trajectories'],0),
+    ]
+    summary_rows=[]
+    for label,keys,digits in summary_specs:
+        chosen=[delta_lookup[key] for key in keys]
+        summary_rows.append([label,' / '.join(f(r['historical'],digits) for r in chosen),' / '.join(f(r['new'],digits) for r in chosen),'保持' if all(r['status']=='保持' for r in chosen) else '修改'])
+    doc+='\n主要结论与支撑数值按最终采用结果逐项比较；“保持”只针对该行的定义与数值，不代表所有单样本、所有排名都未变化。\n\n'+table(['项目','原 297c3d0 报告','本版','结论处理'],summary_rows)+'\n\nAudit 非空证据标签准确率应报告上述实际差距，不再沿用“基本不变”的旧概括；同时保留其与证据集合准确率的不同变化幅度。HPO 的行为分母、最终可评分比例与真实提交配置分列，论文表格应使用本版全部行为 CSV。具体模型排名、每个预算的正负增益和固定案例资格见完整结论对照。\n'
+    (args.output/'README.zh.md').write_text(doc)
     # Companion appendix is a complete current methods/data guide, not an erratum.
     appendix=f'''# 数据、定义与完整证据
 
@@ -279,12 +355,15 @@ Qwen 文档 10、顺序 1、nda-13 的原案例保留其实际动作：Free 先�
 
 ## A. 数据范围与评分版本
 
-本页对应{state}，代码提交 `{version['new']['code_commit']}`。主实验 4,698 个固定槽位全量重新评分，旧运行原件保持不变。历史正式分数、2026-09-18 早期诊断与本次全量新评分各有独立身份；诊断中发现的 23 答案和 19 池不是本次重新评分的筛选范围。Gemini 783 项包含历史 Sub2 与 OpenRouter 补齐，提供方差异不能被视作已隔离的因果变量。
+本页对应{state}。{code_note} 主实验 4,698 个固定槽位全量重新评分，旧运行原件保持不变。历史正式分数、2026-09-18 早期诊断与本次全量新评分各有独立身份；诊断中发现的 23 答案和 19 池不是本次重新评分的筛选范围。{count_note} Gemini 783 项包含历史 Sub2 与 OpenRouter，提供方差异不能被视作已隔离的因果变量。
+
+{adoption_note}
 
 | 材料 | 入口 |
 | --- | --- |
 | 全部采用槽位与原件 SHA | [SOURCE_SELECTION.csv]({prefix}/main/SOURCE_SELECTION.csv) |
-| 新旧逐样本分数、原因 | [重评分对照]({prefix}/rescore/sample_diff.csv) |
+| 旧轨迹重新评分的逐样本分数、原因 | [离线重评分对照]({prefix}/rescore/main/sample_diff.csv) |
+| 旧历史→旧轨迹新评分→实际运行正式采用 | [4,698 行三层对照与采用原因]({prefix}/control_flow_adoption/new_official/sample_diff.csv) |
 | 全部绝对值、重复层、宽比较 | [absolute]({prefix}/main/absolute_settings.csv)、[by_repeat]({prefix}/main/by_repeat.csv)、[COMPARISON]({prefix}/main/COMPARISON.csv) |
 | 新旧聚合差与排名变化 | [聚合对照]({prefix}/main/all_aggregate_comparisons.csv)、[排名对照]({prefix}/main/ranking_changes.csv) |
 | 旧/诊断/新身份与输入 | [评分身份]({prefix}/main/SCORE_VERSIONS.json)、[输入]({prefix}/main/INPUTS.json) |
@@ -318,9 +397,9 @@ DeepSeek 分解固定每预算 27 槽位，条件严格 Gap 使用可评分重�
 
 ## D. 答案、证据与配对案例
 
-全部 702 N1 和 1,872 N4 成员的终答以统一接受规则处理；接受包装不等于修改 JSON 内容或标签。LA 与 EA 独立评分，联合正确率另列。缺失/多余证据按标准集合差计算，可能同时发生。总体及非空证据分层维持文档等权，合并条件分母另列，不混用宏均值和 pooled 比例。
+全部 702 N1 和 1,872 N4 成员的终答以统一接受规则处理，按既定包装、标签别名和证据 ID 类型规则归一化，不根据 gold 补造标签或证据。LA 与 EA 独立评分，联合正确率另列。缺失/多余证据按标准集合差计算，可能同时发生。总体及非空证据分层维持文档等权，合并条件分母另列，不混用宏均值和 pooled 比例。
 
-“反馈补全”配对完整定义见正文，目前 {len(patterns)} 呈现、{confirmed} 次完整确认。历史固定案例保留为解释性样例，并重新核对新分数与候选规则；不是随机样本或最大增益选例。`verification_eff` 保留“曾提交正确证据”的历史定义，反馈实际可见的效率若提供则另列 `visible_verification_eff`。
+“反馈补全”配对完整定义见正文，目前 {len(patterns)} 呈现、{confirmed} 次完整确认。历史固定案例保留为解释性样例，并重新核对新分数与候选规则；不是随机样本或最大增益选例。`verification_eff` 的分母为终答标签与证据均正确的假设，分子为其中曾向工具提交该正确证据集合的假设，包含预算隐藏返回；`visible_verification_eff` 使用相同分母，只计可见正确核验。
 
 [Audit 方法/案例变化]({prefix}/audit/README.zh.md) · [假设级]({prefix}/audit/n1/hypothesis_metrics.csv) · [轨迹级]({prefix}/audit/n1/trace_metrics.csv) · [模型预算]({prefix}/audit/n1/model_budget_metrics.csv) · [条件分母]({prefix}/audit/n1/diagnostic_counts.csv) · [配对]({prefix}/audit/n1/paired_completion_patterns.csv)。
 
@@ -332,6 +411,8 @@ N4 三策略均为四智能体、匹配每成员反馈预算。Search 限 whois 
 
 HPO 图路径原前缀标识会碰撞，原始观测/得分完整键与共享路径显示键需分开核验。已渲染进模型输入的路径不能靠离线改文件恢复为一次修复后的运行。代码版本、模型/预算/策略矩阵、实际受影响运行及统一修复版本的必要补跑选择均单独列出；禁止把修复前后的混合来源隐称相同协议。
 
+[HPO 逐运行代码版本（810 项）]({prefix}/rerun_adoption/adopted_hpo_code_versions.csv)与[模型—预算—策略版本矩阵（54 组）]({prefix}/rerun_adoption/adopted_hpo_model_budget_strategy.csv)分别记录实际执行版本和当前离线评分版本，[版本核验]({prefix}/rerun_adoption/ADOPTED_CODE_VERSION_CHECKS.json)绑定采用来源。旧 HPO 记录中 492 项未写 Git 提交号；这些空值保留，以完整源码树的已核验 SHA 标识执行版本，不补造提交号。旧源码对应八份完整源码树。最终采用的 97 项 HPO 新运行替换与其余 713 项历史执行分别列出。
+
 [全部指标与两基线差]({prefix}/poolact/poolact_all_metrics.csv) · [主增益]({prefix}/poolact/poolact_primary.csv) · [宏均值]({prefix}/poolact/poolact_scenario_summary.csv) · [MI/BoN]({prefix}/display/nas_best_minus_mean.csv) · [Audit 池]({prefix}/audit/coordination/audit_pools.csv) · [Audit 成员]({prefix}/audit/coordination/audit_agents.csv)。
 
 ## F. 解释边界与复算
@@ -340,7 +421,9 @@ HPO 图路径原前缀标识会碰撞，原始观测/得分完整键与共享路
 
 不报告 p 值，不将固定模型、重复顺序、共享题库或池成员当总体独立抽样。图/缓存/行动协调的各自因果贡献仍未由独立消融完全识别。
 
-主聚合脚本从完整新版 slot scalars 重算 7,767 聚合行、126 排名和 1,298 宽比较，再生成展示、regret、配对及全部 POOLACT 指标。公开 CSV 可重放聚合及行为投影；任务重新评分需要私有原件/数据的相同 SHA 与冻结代码版本。两层检查分别记录，不将公开表回放称为重读全部 HTTP 请求。
+主聚合脚本从完整新版 slot scalars 重算 7,767 聚合行、126 排名和 1,298 宽比较，再生成展示、regret、配对及全部 POOLACT 指标。公开最小评分包支持 Search/Audit/Whois 的终答重新提取、任务评分及池投票，也支持 HPO 的重新提取、可见评估匹配、回退和池聚合；HPO 数值性能使用配置 SHA 绑定的已核验 benchmark 证书，默认回放不重新读取完整 benchmark。公开逐事件/假设叶表支持行为汇总与评分连接重建。统一核验器的完整模式另验证实际补跑的最小包、全量采用来源和三份报告。上述公开重放不重新调用模型，也不等同于从完整原件重建最小包、逐次 HTTP 审查或再次验证全 turn 控制流。最后几项及可选完整 benchmark 复核仍需冻结本地归档与对应环境。
+
+Whois 预算 sweep 单列 [完整预算分析与图]({prefix}/whois/README.zh.md)，不额外累加到上述 4,698 主实验分母。其 1,170 个预算—模型—题目结果全量重评分，其中 beta=10 的 234 项已属于主实验，来源与新评分逐项连接；其余 936 项为主分母之外的独立预算设置。旧轨迹离线重评分层的两处终答文本变化均未改变分数。{sweep_note}
 
 [重建主分析]({prefix}/tools/rebuild_analysis.py) · [重建展示]({prefix}/tools/recompute_display.py) · [重建 Search/POOLACT/交付]({prefix}/tools/rebuild_secondary.py) · [生成本报告]({prefix}/tools/render_report.py) · [审阅记录](REVIEW.zh.md)。
 '''
@@ -354,7 +437,7 @@ All 4,698 registered main-experiment slots are included in the new scoring pass.
 [中文论文式报告](README.zh.md) · [Data, definitions, and scope](APPENDIX.zh.md)
 '''
     (args.output/'ABSTRACT.en.md').write_text(en)
-    manifest=dict(status='PASS',adoption_state=version['new']['adoption_state'],score_identity=version['new']['identity'],code_commit=version['new']['code_commit'],hpo_behavior_rows=sum(int(r['n']) for r in hpo),conclusion_rows=len(delta),changed_conclusions=sum(r['status']=='修改' for r in delta),sources={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in [args.main/'slot_scalars.csv',args.display/'n1_main.csv',args.audit/'n1/budget_metrics.csv',args.hpo/'by_regime.csv']})
+    manifest=dict(status='PASS',adoption_state=version['new']['adoption_state'],score_identity=version['new']['identity'],core_code_commit=core_commit,runtime_snapshot_commit=runtime_commit,auxiliary_runtime_snapshot_commits=auxiliary_runtime_commits,hpo_behavior_rows=sum(int(r['n']) for r in hpo),conclusion_rows=len(delta),changed_conclusions=sum(r['status']=='修改' for r in delta),existing_trace_change_counts=dict(any_metric_slots=legacy_any,task_endpoint_slots=legacy_endpoint,paper_primary_slots=legacy_primary),sources={role:hashlib.sha256(p.read_bytes()).hexdigest() for role,p in [('main/slot_scalars.csv',args.main/'slot_scalars.csv'),('display/n1_main.csv',args.display/'n1_main.csv'),('audit/n1/budget_metrics.csv',args.audit/'n1/budget_metrics.csv'),('hpo_behavior/official_rescored486/by_regime.csv',args.hpo/'by_regime.csv'),('template/README.pre-repair-297c3d0.zh.md',template),('rescore/main/sample_diff.csv',existing_rescore/'sample_diff.csv')]})
     (args.output/'RENDER_CHECKS.json').write_text(json.dumps(manifest,indent=2,ensure_ascii=False)+'\n')
     print(json.dumps(manifest,indent=2,ensure_ascii=False))
 

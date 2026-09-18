@@ -65,7 +65,21 @@ def csv_write(path, rows):
 
 
 def legacy_module(name, relative):
-    raw = subprocess.check_output(["git", "-C", str(REPO), "show", f"{BASELINE}:{relative}"])
+    # Exact public historical source allows depth-one clones and source ZIPs.
+    # The old scorer itself is unchanged; only its byte-loading mechanism differs.
+    capsule = REPO / "tools" / "historical_scorers" / BASELINE
+    manifest_raw = (capsule / "MANIFEST.json").read_bytes()
+    if sha_bytes(manifest_raw) != "c7a1fa99c6a4b874e8d64e2013f53f2ae10fc6b0de7fda5491b02d6f0fdb8ed3":
+        raise RuntimeError("Historical scorer capsule manifest identity mismatch")
+    manifest = json.loads(manifest_raw)
+    if manifest.get("commit") != BASELINE:
+        raise RuntimeError("Historical scorer capsule commit mismatch")
+    records = {record["path"]: record for record in manifest["files"]}
+    if relative not in records:
+        raise RuntimeError("Historical scorer absent from capsule manifest")
+    raw = (capsule / relative).read_bytes()
+    if sha_bytes(raw) != records[relative]["sha256"] or len(raw) != records[relative]["bytes"]:
+        raise RuntimeError("Historical scorer capsule byte identity mismatch: " + relative)
     module = types.ModuleType(name)
     module.__file__ = str(REPO / relative)
     sys.modules[name] = module

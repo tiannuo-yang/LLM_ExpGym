@@ -1,0 +1,16 @@
+--- LLM_ExpGym-lightweight-20260917/expgym/react_loop.py	2026-09-17 00:59:58.000000000 +0000
++++ /lustrefs/users/chufan.shi/codex_space_tn/LLM_ExpGym_api_studies_20260910/expgym/react_loop.py	2026-09-10 22:25:33.000000000 +0000
+@@ -240,7 +240,12 @@
+             message_allowance = max_context_tokens - schema_token_estimate
+             if message_allowance < 0:
+                 return None
+-            prepared = _trim_messages(messages, message_allowance)
++            # Signed/encrypted reasoning can be bound to earlier messages and
++            # tool results. Such backends require unchanged history: enforce
++            # the existing context cap by admission, without truncating or
++            # dropping content that a retained reasoning block depends on.
++            prepared = (messages if getattr(llm, "requires_immutable_history", False)
++                        else _trim_messages(messages, message_allowance))
+             if _estimate_tokens(prepared) + schema_token_estimate > max_context_tokens:
+                 return None
+         else:

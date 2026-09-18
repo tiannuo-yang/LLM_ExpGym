@@ -11,6 +11,24 @@ import sys
 import tempfile
 
 
+EXPECTED_CSVS = {
+    f'{prefix}{subdir}/{name}.csv'
+    for prefix in ('', 'old/')
+    for subdir, names in (
+        ('n1', ('trace_metrics', 'hypothesis_metrics', 'document_metrics',
+                'model_budget_metrics', 'budget_metrics', 'diagnostic_counts',
+                'paired_completion_patterns')),
+        ('coordination', ('audit_pools', 'audit_agents', 'audit_groups')))
+    for name in names
+} | {
+    f'changes/{name}.csv' for name in (
+        'traces', 'hypotheses', 'agents', 'pools', 'case_population',
+        'retained_cases', 'budgets', 'model_budgets', 'groups',
+        'diagnostic_counts', 'paired_pattern_membership')
+}
+assert len(EXPECTED_CSVS) == 31
+
+
 def rows(path):
     return list(csv.DictReader(path.open()))
 
@@ -58,11 +76,22 @@ def main():
                   total_cells_compared=sum(c['cells_compared'] for c in checks), mismatches=mismatches)
     (args.report/'OLD_BASELINE_CHECK.json').write_text(json.dumps(result, indent=2)+'\n')
     assert not mismatches, mismatches[:5]
+    published_csvs = {str(file.relative_to(args.report)) for file in args.report.rglob('*.csv')}
+    assert published_csvs == EXPECTED_CSVS, {
+        'missing_csvs': sorted(EXPECTED_CSVS - published_csvs),
+        'unexpected_csvs': sorted(published_csvs - EXPECTED_CSVS)}
     with tempfile.TemporaryDirectory(prefix='audit-public-replay-') as tmp:
         dest = Path(tmp)
         subprocess.run([sys.executable, str(args.report/'recompute_audit.py'),
                         '--replay-public', str(args.report), '--output', str(dest)],
                        check=True, stdout=subprocess.DEVNULL)
+        replayed_csvs = {str(file.relative_to(dest)) for file in dest.rglob('*.csv')}
+        assert replayed_csvs == EXPECTED_CSVS, {
+            'missing_replayed_csvs': sorted(EXPECTED_CSVS - replayed_csvs),
+            'unexpected_replayed_csvs': sorted(replayed_csvs - EXPECTED_CSVS)}
+        current_checks = json.loads((args.report/'CHECKS.json').read_text())
+        replayed_checks = json.loads((dest/'CHECKS.json').read_text())
+        assert current_checks['case_population'] == replayed_checks['case_population'], 'Case populations differ from the public replay'
         files, different = [], []
         for file in sorted(args.report.rglob('*.csv')):
             relative = file.relative_to(args.report)
@@ -71,9 +100,19 @@ def main():
                 different.append(str(relative))
             else:
                 files.append(dict(path=str(relative), sha256=hashlib.sha256(file.read_bytes()).hexdigest()))
-    replay = dict(status='PASS' if not different else 'FAIL', files=files, mismatches=different)
+    replay = dict(status='PASS' if not different else 'FAIL', files=files, mismatches=different,
+                  case_population_replayed=True)
     (args.report/'PUBLIC_REPLAY_CHECK.json').write_text(json.dumps(replay, indent=2)+'\n')
     assert not different, different
+    assert len(files) == 31
+    checks_path = args.report/'CHECKS.json'
+    adoption = json.loads(checks_path.read_text())
+    if adoption.get('status') == 'PENDING_PUBLIC_REPLAY':
+        assert adoption['adopted_source_replacements'] == {'expgym': 2, 'poolact': 18}
+        assert adoption['adopted_source_replacement_count'] == 20
+        adoption.update(status='PASS', delivery_validation_complete=True,
+                        public_csv_replayed=len(files), frozen_old_cells_checked=result['total_cells_compared'])
+        checks_path.write_text(json.dumps(adoption, ensure_ascii=False, indent=2)+'\n')
     print(json.dumps(dict(status='PASS', old_cells=result['total_cells_compared'], replayed_csvs=len(files))))
 
 

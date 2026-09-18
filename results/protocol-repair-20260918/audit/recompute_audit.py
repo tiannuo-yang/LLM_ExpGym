@@ -47,7 +47,21 @@ TEXT_FIELDS = {'slot_id', 'model', 'budget', 'regime', 'strategy', 'source_cohor
                'first_visible_evidence_ids', 'first_visible_feedback_status',
                'termination_reason', 'answer_source', 'answer_change_reason',
                'score_version', 'free_slot_id', 'tight_slot_id', 'free_source_sha256',
-               'tight_source_sha256', 'free_first_partial_and_tight_final_ids'}
+               'tight_source_sha256', 'free_first_partial_and_tight_final_ids',
+               'source_origin', 'historical_source_sha256', 'old_source_sha256', 'new_source_sha256'}
+
+PUBLIC_SOURCE_FIELDS = {'slot_id', 'model', 'system', 'scenario', 'item', 'regime',
+                        'strategy', 'seed', 'order', 'outer_repeat', 'execution_complete',
+                        'score_complete', 'provider', 'cohort_id', 'selection',
+                        'result_sha256', 'source_sha256', 'historical_source_sha256',
+                        'source_origin'}
+
+
+def read_leaf_dataset(base):
+    return {'traces': read_csv(base / 'n1/trace_metrics.csv'),
+            'hypotheses': read_csv(base / 'n1/hypothesis_metrics.csv'),
+            'pools': read_csv(base / 'coordination/audit_pools.csv'),
+            'agents': read_csv(base / 'coordination/audit_agents.csv')}
 
 
 def read_csv(path):
@@ -126,10 +140,21 @@ def extract_all(args):
         digest = sha(raw)
         assert digest == source['result_sha256'], source['slot_id']
         stored = json.loads(raw)
-        common = dict(slot_id=source['slot_id'], source_sha256=digest)
-        result = {'source': {k: source[k] for k in source if k not in
-                            {'source_path', 'historical_trajectory', 'new_result_index'}}}
-        for version in ('old', 'new'):
+        item_index = int(source['item'].rsplit(':', 1)[1])
+        if source['system'] == 'expgym':
+            assert int(stored['task']['item']['id']) == item_index
+            assert stored['task']['budget']['regime'] == source['regime']
+            assert int(stored['task']['rep']) == int(source['order'])
+        else:
+            assert int(stored['config']['question_index']) == item_index
+            assert stored['config']['cost_regime'] == source['regime']
+            assert stored['strategy'] == source['strategy']
+        origin = source.get('source_origin', 'existing_trace_rescored')
+        historical_sha = source.get('historical_source_sha256', digest)
+        common = dict(slot_id=source['slot_id'], source_sha256=digest,
+                      source_origin=origin, historical_source_sha256=historical_sha)
+        result = {'source': {k: source[k] for k in source if k in PUBLIC_SOURCE_FIELDS}}
+        for version in (('new',) if args.baseline_report else ('old', 'new')):
             obj = copy.deepcopy(stored)
             if source['system'] == 'expgym':
                 overlay = overlays[(source['slot_id'], '-1')]
@@ -145,9 +170,10 @@ def extract_all(args):
                 for row in [trace] + hypotheses:
                     row.pop('trace_path', None)
                     row.update(common, agent_id=-1, score_version=version,
-                               answer_change_reason=overlay.get('answer_changed_reason', overlay.get('reason', '')))
+                               answer_change_reason=(overlay.get('answer_changed_reason', overlay.get('reason', '')) or ''))
+                    if digest != historical_sha:
+                        row['answer_change_reason'] = 'adopted_complete_runtime_control:' + row['answer_change_reason']
                 trace.update(trace_sha256=digest, trace_bytes=len(raw),
-                             answer_change_reason=overlay.get('answer_changed_reason', overlay.get('reason', '')),
                              verification_eff=obj['outcome']['score']['metrics'].get('verification_eff'))
                 joint = sum(h['joint_correct'] for h in hypotheses)
                 trace['visible_verification_eff'] = (
@@ -178,6 +204,7 @@ def extract_all(args):
                         assert math.isclose(actual, agent['answer_metrics'][metric], abs_tol=1e-12), (
                             source['slot_id'], aid, version, metric, actual, agent['answer_metrics'][metric])
                 aggregate_overlay = overlays[(source['slot_id'], 'aggregate')]
+                assert aggregate_overlay['source_sha256'] == digest
                 if version == 'new':
                     obj['aggregate'].update(answer=aggregate_overlay['new_answer'],
                                             answer_metrics=aggregate_overlay['new_score_metrics'])
@@ -191,11 +218,15 @@ def extract_all(args):
                     row.update(common, model=source['model'], score_version=version)
                 pool.update(result_sha256=digest, bytes=len(raw))
                 pool['answer_change_reason'] = 'member_terminal_extraction_and_common_audit_wrapper_acceptance'
+                if digest != historical_sha:
+                    pool['answer_change_reason'] = 'adopted_complete_runtime_control_and_uniform_final_scoring'
                 pool.update({key: obj['aggregate']['answer_metrics'].get(key)
                              for key in ('label_acc', 'evidence_acc', 'verification_eff')})
                 for row in agents:
                     overlay = overlays[(source['slot_id'], str(row['agent_id']))]
-                    row['answer_change_reason'] = overlay.get('answer_changed_reason', overlay.get('reason', ''))
+                    row['answer_change_reason'] = (overlay.get('answer_changed_reason', overlay.get('reason', '')) or '')
+                    if digest != historical_sha:
+                        row['answer_change_reason'] = 'adopted_complete_runtime_control:' + row['answer_change_reason']
                     actual = next(a for i, a in enumerate(obj['agent_results'])
                                   if a.get('agent_id', i) == row['agent_id'])
                     row['verification_eff'] = actual['answer_metrics'].get('verification_eff')
@@ -208,8 +239,18 @@ def extract_all(args):
                 for v in ('old', 'new')}
     for item in extracted:
         for version in versions:
-            for key, rows in item[version].items():
+            for key, rows in item.get(version, {}).items():
                 versions[version][key].extend(rows)
+    if args.baseline_report:
+        versions['old'] = read_leaf_dataset(args.baseline_report / 'old')
+        baseline_hashes = {r['slot_id']: r['source_sha256'] for group in ('traces', 'pools')
+                           for r in versions['old'][group]}
+        assert set(baseline_hashes) == {r['slot_id'] for r in sources}
+        for source in sources:
+            expected_historical = source.get('historical_source_sha256', source['result_sha256'])
+            assert expected_historical == baseline_hashes[source['slot_id']], source['slot_id']
+            if source['result_sha256'] != expected_historical:
+                assert source.get('source_origin') == 'new_runtime_control', source['slot_id']
     for data in versions.values():
         data['traces'].sort(key=lambda r: (r['model'], r['budget'], r['doc_index'], r['order']))
         data['hypotheses'].sort(key=lambda r: (r['model'], r['budget'], r['doc_index'], r['order'], r['position']))
@@ -221,6 +262,15 @@ def extract_all(args):
                 'source_count': len(sources), 'raw_files_sha_verified': len(sources),
                 'overlay_count': len(overlays), 'model_calls': 0,
                 'source_files': [item['source'] for item in extracted]}
+    replacements = [r for r in sources if r.get('historical_source_sha256', r['result_sha256']) != r['result_sha256']]
+    metadata['adopted_source_replacements'] = dict(Counter(r['system'] for r in replacements))
+    metadata['adopted_source_replacement_count'] = len(replacements)
+    if args.require_adopted_controls:
+        assert Counter(r['system'] for r in replacements) == {'expgym': 2, 'poolact': 18}, replacements
+    if args.baseline_report:
+        metadata['frozen_baseline_leaf_sha256'] = {
+            name: sha((args.baseline_report / 'old' / name).read_bytes()) for name in
+            ('n1/trace_metrics.csv', 'n1/hypothesis_metrics.csv', 'coordination/audit_pools.csv', 'coordination/audit_agents.csv')}
     metadata['upstream_score_checks_sha256'] = sha(score_checks_raw)
     metadata['core_repair_commit'] = score_checks.get('core_repair_commit')
     assert overlay_sha == sha(args.overlays.read_bytes()), 'Scoring overlays changed during analysis'
@@ -303,6 +353,10 @@ def aggregate_coordination(data, target):
 
 def changes(versions, output):
     old, new = versions['old'], versions['new']
+    def same(left, right):
+        # CSV encodes an unavailable scalar as an empty field, while raw JSON
+        # uses null. A source override must not create a spurious behavior delta.
+        return left == right or (left in (None, '') and right in (None, ''))
     unchanged_behavior_fields = {
         'traces': ('tool_calls', 'visible_tool_calls', 'distinct_hypotheses', 'repeat_calls',
                    'first_fixed_example', 'termination_reason', 'answer_source', 'agent_steps',
@@ -324,10 +378,13 @@ def changes(versions, output):
         rows = []
         for key, a in before.items():
             b = after[key]
-            for behavior in unchanged_behavior_fields.get(dataset, ()):
-                assert a[behavior] == b[behavior], (dataset, key, behavior)
+            source_replaced = a['source_sha256'] != b['source_sha256']
+            if not source_replaced:
+                for behavior in unchanged_behavior_fields.get(dataset, ()):
+                    assert same(a[behavior], b[behavior]), (dataset, key, behavior)
             for field in a.keys() | b.keys():
-                if field in {'score_version', 'answer_change_reason'} or a.get(field) == b.get(field):
+                if field in {'score_version', 'answer_change_reason', 'source_origin',
+                             'historical_source_sha256'} or same(a.get(field), b.get(field)):
                     continue
                 av, bv = a.get(field), b.get(field)
                 if isinstance(av, (float, int)) and isinstance(bv, (float, int)) and math.isclose(av, bv, abs_tol=1e-12):
@@ -336,7 +393,9 @@ def changes(versions, output):
                 row.update(model=a['model'], budget=a.get('budget', a.get('regime')),
                            strategy=a.get('strategy', 'single'), metric=field, old=av, new=bv,
                            delta=(bv-av if isinstance(av, (float, int)) and isinstance(bv, (float, int)) else ''),
-                           source_sha256=a['source_sha256'], reason=b.get('answer_change_reason', 'accepted_final_answer_changed'))
+                           source_sha256=b['source_sha256'], old_source_sha256=a['source_sha256'],
+                           new_source_sha256=b['source_sha256'], source_replaced=int(source_replaced),
+                           reason=b.get('answer_change_reason', 'accepted_final_answer_changed'))
                 rows.append(row)
         rows.sort(key=lambda r: tuple(str(r[k]) for k in keys) + (r['metric'],))
         write_csv(output / 'changes' / (dataset + '.csv'), rows)
@@ -395,7 +454,9 @@ def changes(versions, output):
                                   slot_id=row['slot_id'], source_sha256=row['source_sha256'],
                                   evidence_acc=row['evidence_acc'], label_acc=row['label_acc'],
                                   target_label_correct=hypothesis['label_correct'], target_evidence_exact=hypothesis['evidence_exact'],
-                                  target_evidence_ids=hypothesis['submitted_evidence_ids']))
+                                  target_evidence_ids=hypothesis['submitted_evidence_ids'],
+                                  feedback_visible=row['visible_tool_calls'], visible_hypotheses=row['visible_distinct_hypotheses'],
+                                  frozen_case_still_qualifies=next(s['qwen_frozen_case_still_qualifies'] for s in summaries if s['score_version']==version)))
         for row in data['pools']:
             if row['model'] == 'kimi-k3' and row['regime'] == 'cost_moderate' and row['question_index'] == 3:
                 cases.append(dict(case='poolact_coverage_and_verified_observation_reuse', score_version=version,
@@ -403,7 +464,8 @@ def changes(versions, output):
                                   slot_id=row['slot_id'], source_sha256=row['source_sha256'],
                                   evidence_acc=row['evidence_acc'], label_acc=row['label_acc'],
                                   feedback_visible=row['feedback_visible'], visible_hypotheses=row['visible_hypotheses'],
-                                  final_matches_peer_only_verified_nonempty=row['final_matches_peer_only_verified_nonempty']))
+                                  final_matches_peer_only_verified_nonempty=row['final_matches_peer_only_verified_nonempty'],
+                                  frozen_case_still_qualifies=next(s['kimi_frozen_case_still_qualifies'] for s in summaries if s['score_version']==version)))
     write_csv(output / 'changes' / 'retained_cases.csv', cases)
     for dataset, keys in [('budgets', ('budget',)), ('model_budgets', ('model', 'budget')),
                           ('groups', ('model', 'regime', 'strategy')),
@@ -429,13 +491,27 @@ def changes(versions, output):
     keys = ('model', 'doc_index', 'order', 'hypothesis')
     pattern_before = {tuple(r[k] for k in keys): r for r in old['patterns']}
     pattern_after = {tuple(r[k] for k in keys): r for r in new['patterns']}
+    pair_sources = {
+        version: {(r['model'], r['budget'], r['doc_index'], r['order']): r['source_sha256']
+                  for r in data['traces']}
+        for version, data in versions.items()}
     membership = []
     for key in sorted(pattern_before.keys() | pattern_after.keys()):
         row = dict(pattern_after.get(key, pattern_before.get(key)))
+        model, doc_index, order, _ = key
+        paired_hashes = {
+            f'{version}_{label}_source_sha256': pair_sources[version][model, budget, doc_index, order]
+            for version in ('old', 'new')
+            for label, budget in (('free', 'cost_free'), ('tight', 'cost_tight'))}
+        source_replaced = any(paired_hashes[f'old_{label}_source_sha256'] !=
+                              paired_hashes[f'new_{label}_source_sha256']
+                              for label in ('free', 'tight'))
+        change_cause = 'runtime_control_adoption' if source_replaced else 'terminal_repair'
+        row.update(paired_hashes, source_replaced=int(source_replaced))
         row.update(old_included=int(key in pattern_before), new_included=int(key in pattern_after),
                    change=('unchanged' if key in pattern_before and key in pattern_after else
-                           'newly_recognized_after_terminal_repair' if key in pattern_after else
-                           'no_longer_matches_after_terminal_repair'))
+                           'newly_recognized_after_' + change_cause if key in pattern_after else
+                           'no_longer_matches_after_' + change_cause))
         membership.append(row)
     write_csv(output / 'changes' / 'paired_pattern_membership.csv', membership)
     return changed_counts, summaries
@@ -451,16 +527,17 @@ def main():
     parser.add_argument('--gold', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--replay-public', type=Path)
+    parser.add_argument('--baseline-report', type=Path,
+                        help='Original completed Audit report; read its old/ leaf tables as immutable old-score baseline')
+    parser.add_argument('--require-adopted-controls', action='store_true',
+                        help='Require exactly 2 N1 and 18 N4 Audit source replacements before producing official output')
     parser.add_argument('--workers', type=int, default=8)
     args = parser.parse_args()
     if args.replay_public:
         versions = {}
         for version in ('old', 'new'):
             base = args.replay_public / 'old' if version == 'old' else args.replay_public
-            versions[version] = {'traces': read_csv(base / 'n1/trace_metrics.csv'),
-                                 'hypotheses': read_csv(base / 'n1/hypothesis_metrics.csv'),
-                                 'pools': read_csv(base / 'coordination/audit_pools.csv'),
-                                 'agents': read_csv(base / 'coordination/audit_agents.csv')}
+            versions[version] = read_leaf_dataset(base)
         metadata = {'mode': 'public_row_replay', 'model_calls': 0}
     else:
         for name in ('repo', 'sources', 'overlays', 'gold'):
@@ -472,13 +549,22 @@ def main():
         aggregate_n1(data, base / 'n1')
         aggregate_coordination(data, base / 'coordination')
     changed, population = changes(versions, args.output)
-    metadata.update(status='PASS', n1_traces=702, n1_hypothesis_presentations=11934,
+    metadata.update(status=('PENDING_PUBLIC_REPLAY' if args.require_adopted_controls and not args.replay_public else 'PASS'),
+                    n1_traces=702, n1_hypothesis_presentations=11934,
                     n4_pools=468, n4_agents=1872, changed_samples=changed,
                     case_population=population,
-                    verification_eff_semantics='Historical submitted-correct-evidence semantics retained, including withheld submissions. visible_verification_eff is a separate N1 behavioral metric.',
-                    no_raw_trajectory_mutation=True, no_new_actions_or_prompts=True,
-                    n1_and_n4_individual_la_ea_checked_against_official_scores=True,
-                    behavioral_action_fields_unchanged=True,
+                    verification_eff_semantics='Among hypotheses with a jointly correct final label and evidence set, the fraction whose exact evidence set was submitted to human_feedback, including withheld results; null when the denominator is zero. visible_verification_eff uses the same denominator and requires a visible correct verification.',
+                    no_raw_trajectory_mutation=True, analysis_makes_no_model_calls=True,
+                    n1_and_n4_individual_la_ea_checked_against_official_scores=not bool(args.replay_public),
+                    public_replay_rebuilds_exported_leaf_aggregates_only=bool(args.replay_public),
+                    behavior_unchanged_for_retained_source_hashes=True,
+                    replaced_sources_use_actual_new_runtime_actions=True,
+                    score_layer=('public_replay_of_exported_rows' if args.replay_public else
+                                 'new_official_with_required_runtime_controls' if args.require_adopted_controls else
+                                 'analysis_only_without_adoption_gate'),
+                    required_runtime_adoption_checked=bool(args.require_adopted_controls and not args.replay_public),
+                    old_layer='historical_frozen_scoring',
+                    diagnostic_layer='audit_existing_trace',
                     analysis_scripts_sha256={name: sha((HERE / name).read_bytes()) for name in
                         ('recompute_audit.py', '_historical_n1.py', '_historical_coordination.py')})
     (args.output / 'CHECKS.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n')

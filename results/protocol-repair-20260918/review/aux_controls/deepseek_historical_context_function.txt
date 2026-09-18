@@ -1,0 +1,42 @@
+def _build_context(
+    doc: Document,
+    include_overhead: bool,
+    cc_split: str = "cc-large",
+    hypothesis_order: Optional[List[str]] = None,
+    *,
+    tool_protocol: str = "text",
+) -> str:
+    if tool_protocol not in ("text", "native"):
+        raise ValueError("build_context tool_protocol must be resolved text or native")
+    num_hyp = len(_get_labels(cc_split))
+    notes = [
+        "You are auditing a legal document against {} hypotheses.".format(num_hyp),
+        "Your goal: maximize the correctness of ALL labels and evidence IDs in your final answer.",
+        "For each hypothesis, determine: Entailment, Contradiction, or NotMentioned.",
+        "For Entailment/Contradiction, identify the exact evidence segment IDs.",
+        "",
+        "Tool: human_feedback — verify your proposed evidence for a hypothesis. Can be called multiple times.",
+        ('  Input: {{"nda_id": "...", "evidence_ids": [segment_ids]}}'
+         if tool_protocol == "text" else
+         "  Input: use the supplied function schema for nda_id and evidence_ids."),
+        "",
+        "Use human feedback to improve the correctness of your labels and evidence IDs.",
+    ]
+    notes.extend(
+        [
+            "",
+            ('Action: human_feedback {"nda_id": "nda-11", "evidence_ids": [3, 7]}'
+             if tool_protocol == "text" else
+             "Choose whether and what to verify from the current document and hypotheses. "
+             "Make at most one native tool call per assistant turn, then wait for its result."),
+            "Answer: {\"nda-11\": {\"label\": \"...\", \"evidence_ids\": [...]}, ...}",
+            "Your final answer MUST include ALL {} hypotheses.".format(num_hyp),
+            "",
+            "Document segments:",
+        ]
+    )
+    notes.extend(_format_segments(doc.segments))
+    notes.append("")
+    notes.append("Hypotheses:")
+    notes.extend(_format_hypotheses(cc_split, hypothesis_order=hypothesis_order))
+    return "\n".join(notes)

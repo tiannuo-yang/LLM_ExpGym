@@ -1,28 +1,20 @@
 # LLM ExpGym
 
-**主报告：已补齐 Gemini 结果**
+**正式主报告：协议修复、全量重评分与必要运行对照已采用**
 
-[完整主报告](results/paper-analysis-20260916/README.zh.md) · [数据与方法附件](results/paper-analysis-20260916/APPENDIX.zh.md) · [Gemini 补齐来源与数值表](results/gemini-openrouter-20260917/main/README.zh.md) · [六模型 Whois 预算报告](results/gemini-openrouter-20260917/whois/README.zh.md) · [接口与设置对应关系](results/gemini-openrouter-20260917/SETTINGS.zh.md)
+[完整主报告](results/paper-analysis-20260916/README.zh.md) · [数据与方法附件](results/paper-analysis-20260916/APPENDIX.zh.md) · [新版交付与全部 CSV](results/protocol-repair-20260918/README.zh.md) · [新旧评分层](results/protocol-repair-20260918/score_layers/README.zh.md) · [HPO 486 条行为表](results/protocol-repair-20260918/hpo_behavior/README.zh.md) · [Whois 预算分析](results/protocol-repair-20260918/whois/README.zh.md)
 
-2026-09-18 已将现有 Gemini 补齐结果合入主报告原路径，并同步更新排名、regret、附件与英文摘要。主实验保留原 4,682 个完成结果，只补 Gemini 的 16 个缺项，执行完成 4,698/4,698，严格评分完整 4,687；Gemini 为 783/783。此次文档更新没有新增模型调用。Whois sweep 的 Gemini β=1、5、15、20 各 39 题已完成，β10 复用原 39 份结果。新项使用 OpenRouter，历史 Gemini 使用 Sub2 API，报告中标明混合来源。
+2026-09-18 更新终答提取和投票规则，对全部相关 N1/N4 与 sweep 重新评分，并采用 97 个 HPO 池、21 个 Search/Audit 主实验槽和独立 1 个 sweep 槽的必要补对照。主实验 4,698 个结果全部采用，严格评分完整 4,687 个；正常无答案继续使用原有全分母规则，不将基础设施失败补零。 排名、regret、证据质量、配对案例和 POOLACT 增益同步重算；评分层与实际运行来源清楚区分。
 
-**冻结报告与原数据（`ad03e8c`）**
+历史报告和数据保持原字节：[修复前 297c3d0 报告](results/paper-analysis-20260916/README.pre-repair-297c3d0.zh.md) · [ad03 冻结报告](results/paper-analysis-20260916/README.ad03.zh.md) · [ad03 数据入口](results/paper-ad03e8c-delivery-20260916/README.zh.md) · [此前 Gemini 补齐](results/gemini-openrouter-20260917/README.zh.md)。原始 API dump、完整 trajectory、失败或被替换尝试继续本地留档；公开包保留最小复算输入、来源和代码身份。
 
-[冻结中文报告](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ad03e8c42ca501016176ee1bc407b38499178506/results/paper-analysis-20260916/README.zh.md) · [冻结附件](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ad03e8c42ca501016176ee1bc407b38499178506/results/paper-analysis-20260916/APPENDIX.zh.md) · [冻结合并比较 CSV](results/paper-ad03e8c-delivery-20260916/csv/COMPARISON.csv) · [冻结 72 行主比较](results/paper-ad03e8c-delivery-20260916/csv/MAIN_COMPARISON.csv) · [冻结数据入口与来源索引](results/paper-ad03e8c-delivery-20260916/README.zh.md)
-
-冻结版保留这份六模型报告所用的分析表、来源索引和工具。原报告五份被更新的文档另存同目录 `*.ad03.*`，原字节与 Git blob 身份仍受轻量清单校验；其余冻结分析数据保持原样。失败实验、被替换运行和中间结果的材料留在本地归档。原公开索引仍记录当时的缺失状态及 369 个整池替换；补齐后的采用关系见新版逐项来源表。原始 API dump 和完整 trajectory 未公开。
-
-在仓库根目录运行 `python3 tools/verify_lightweight.py` 可校验轻量包所有文件身份及原冻结版的计数；文件身份及原文归档映射见 [LIGHTWEIGHT_MANIFEST.json](LIGHTWEIGHT_MANIFEST.json) 和 [SHA256SUMS](SHA256SUMS)。[来源说明](results/paper-ad03e8c-delivery-20260916/provenance/README.zh.md) 区分冻结文件、历史构建脚本与完整本地交付。新增实验数据保留在独立补充目录，主报告通过明确链接采用；冻结 CSV 不被覆盖。关于 `expected_units` 与 Audit 调用计数的两处说明见 [CSV 字典](results/paper-ad03e8c-delivery-20260916/csv/CSV_DICTIONARY.zh.md)。
-
-获取轻量主分支时，请限定分支下载：
+`python3 tools/verify_lightweight.py` 校验所有公开文件及旧冻结版身份；`python3 tools/verify_protocol_repair.py --full` 重新执行新版评分与分析回放。见 [复算说明](tools/VERIFY_PROTOCOL_REPAIR.zh.md)、[LIGHTWEIGHT_MANIFEST.json](LIGHTWEIGHT_MANIFEST.json) 和 [SHA256SUMS](SHA256SUMS)。
 
 ```bash
-git clone --single-branch --branch main https://github.com/tiannuo-yang/LLM_ExpGym.git
+git clone --single-branch --branch main --depth 1 https://github.com/tiannuo-yang/LLM_ExpGym.git
 ```
 
-2026-09-17 的轻量整理已将当时的旧分支完整留在本地 Git 归档。本次补充只更新 `main`；其他并行研究分支的内容不属于本轻量发布。
-
-以下为仓库保留的运行与安装说明。根目录运行代码仍沿用冻结报告发布时的版本，其来源记录在轻量清单中；本次 OpenRouter 补跑使用独立运行时，版本与设置见补充实验目录。
+根目录包含正式 parser、投票与图身份修复；本次真实补跑所用原生客户端及冻结运行源码保存在 [studies/protocol-repair-20260918](studies/protocol-repair-20260918/README.zh.md)，版本不能与历史冻结结果混用。以下保留运行与安装说明。
 
 One repository, two experiment paths:
 

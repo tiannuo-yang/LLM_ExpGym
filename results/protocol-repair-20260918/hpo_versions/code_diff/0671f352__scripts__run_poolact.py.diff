@@ -1,0 +1,128 @@
+--- LLM_ExpGym-lightweight-20260917/scripts/run_poolact.py	2026-09-17 00:59:58.000000000 +0000
++++ /lustrefs/users/chufan.shi/codex_space_tn/portable_eval_20260908/source_cohorts/v5/LLM_ExpGym/scripts/run_poolact.py	2026-09-09 04:29:24.000000000 +0000
+@@ -182,59 +182,6 @@
+     return prefix[: 64 - len(suffix)] + suffix
+ 
+ 
+-def _pool_cache_namespace(args: argparse.Namespace) -> Optional[str]:
+-    """Bind an optional routing namespace to one independent pool invocation.
+-
+-    These are provider prompt-cache routing keys, not the observation cache.
+-    A provider may ignore them; this does not promise physical KV-cache isolation.
+-    Keep the identity allowlisted so credentials and arbitrary Namespace fields
+-    never enter the serialized input, and keep output paths out for relocation.
+-    """
+-    base = getattr(args, "prompt_cache_key", None)
+-    if not base:
+-        return None
+-    evaluation = getattr(args, "_evaluation_identity", None)
+-    identity = {
+-        "derivation": "expgym.pool-invocation.v1",
+-        "namespace": base,
+-        "backend": args.backend,
+-        "model": args.model,
+-        "task": {
+-            "scenario": args.scenario,
+-            "tuning_task": args.tuning_task,
+-            "question_index": args.question_index,
+-            "data_source": args.data_source,
+-            "cc_split": args.cc_split,
+-            "cost_regime": args.cost_regime,
+-            "evaluation_sha256": evaluation.get("sha256") if isinstance(evaluation, dict) else None,
+-        },
+-        "pool": {
+-            "agents": args.agents,
+-            "seed": args.seed,
+-            "base_seed": getattr(args, "base_seed", args.seed),
+-            "repeat_index": getattr(args, "repeat_index", 0),
+-        },
+-        "generation": {
+-            "temperature": args.temperature,
+-            "max_steps": args.max_steps,
+-            "max_evaluations": args.max_evals,
+-            "max_context_tokens": args.max_context_tokens,
+-            "probes": args.probes,
+-            **_generation_options(args),
+-        },
+-        "protocol": {
+-            "poolact": POOLACT_PROTOCOL_VERSION,
+-            "missing_final_policy": getattr(args, "missing_final_policy", "error"),
+-            **_loop_options(args),
+-        },
+-    }
+-    canonical = json.dumps(
+-        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+-        allow_nan=False,
+-    ).encode("utf-8")
+-    return "pool-" + hashlib.sha256(canonical).hexdigest()
+-
+-
+ def _agent_namespace(
+     args: argparse.Namespace,
+     strategy: str,
+@@ -244,8 +191,11 @@
+     namespace = argparse.Namespace(**vars(args))
+     namespace.seed = args.seed + agent_id
+     namespace.api_key = api_key
++    cache_namespace = args.prompt_cache_key
++    if cache_namespace and getattr(args, "repeats", 1) > 1:
++        cache_namespace = f"{cache_namespace}:repeat={getattr(args, 'repeat_index', 0)}"
+     namespace.prompt_cache_key = _agent_cache_key(
+-        _pool_cache_namespace(args),
++        cache_namespace,
+         strategy,
+         agent_id,
+     )
+@@ -662,7 +612,7 @@
+     return response
+ 
+ 
+-def parse_args(argv=None) -> argparse.Namespace:
++def parse_args() -> argparse.Namespace:
+     parser = argparse.ArgumentParser(description=__doc__)
+     _add_generation_arguments(parser)
+     parser.add_argument("--terminal-evidence-dir", type=Path, default=None,
+@@ -726,12 +676,11 @@
+     parser.add_argument("--output-dir", type=Path, default=Path("runs/poolact"))
+     parser.add_argument("--resume", action="store_true")
+     parser.add_argument("--dry-run", action="store_true")
+-    return parser.parse_args(argv)
++    return parser.parse_args()
+ 
+ 
+-def main(args=None, *, selected_repeat=None) -> int:
+-    """Run the CLI matrix, or one independent repeat selected by the queue."""
+-    args = parse_args() if args is None else args
++def main() -> int:
++    args = parse_args()
+     if not args.model:
+         args.model = _backend_model(args.backend)
+     if args.base_url is None:
+@@ -744,9 +693,6 @@
+         raise SystemExit("--agents must be at least 1")
+     if args.repeats < 1:
+         raise SystemExit("--repeats must be at least 1")
+-    if selected_repeat is not None and (type(selected_repeat) is not int
+-                                       or not 0 <= selected_repeat < args.repeats):
+-        raise SystemExit("selected_repeat must identify an existing repeat")
+     if args.max_steps < 1:
+         raise SystemExit("--max-steps must be at least 1")
+     if args.max_evals < 1:
+@@ -808,7 +754,7 @@
+     implementation = _implementation_manifest()
+     repetitions: Dict[str, Dict[str, Any]] = {}
+     observations: Dict[str, Dict[str, Dict[str, Any]]] = {}
+-    for repeat_index in (range(args.repeats) if selected_repeat is None else [selected_repeat]):
++    for repeat_index in range(args.repeats):
+         repeat_args = _repeat_namespace(args, repeat_index)
+         summary = _run_items(
+             repeat_args, question_indices, api_key, time_budget, mode, implementation,
+@@ -821,7 +767,7 @@
+                 f"repeat_{repeat_index}/item_{item}": strategies
+                 for item, strategies in summary["items"].items()
+             })
+-    if args.repeats > 1 and selected_repeat is None:
++    if args.repeats > 1:
+         with TerminalEvidence(
+             _terminal_evidence_root(args) / "repeat_summary",
+             owner={"runner": "poolact", "scope": "repeat_summary", "seed": args.seed},

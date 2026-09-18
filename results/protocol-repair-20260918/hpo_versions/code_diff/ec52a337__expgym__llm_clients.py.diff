@@ -1,0 +1,217 @@
+--- LLM_ExpGym-lightweight-20260917/expgym/llm_clients.py	2026-09-17 00:59:58.000000000 +0000
++++ /lustrefs/users/chufan.shi/codex_space_tn/gemini_openrouter_20260917/runtime/expgym/llm_clients.py	2026-09-11 08:25:34.000000000 +0000
+@@ -60,6 +60,16 @@
+     finish_reason = "abort"
+ 
+ 
++class PartialAPIResponseError(APIClientError):
++    """Interrupted after response bytes arrived; terminal, never resampled."""
++
++    def __init__(self, message: str, partial_response: bytes) -> None:
++        if not isinstance(partial_response, bytes):
++            raise TypeError("partial_response must be bytes")
++        super().__init__(message, [])
++        self.partial_response = partial_response
++
++
+ def _normalize_chat_completions_url(base_url: str) -> str:
+     """Accept either an OpenAI-compatible base URL or the full chat endpoint."""
+     parsed = urllib.parse.urlparse(base_url.rstrip("/"))
+@@ -257,6 +267,10 @@
+         self._dump_run_id = os.getenv("EXPGYM_RUN_ID")
+         self._dump_context = dict(dump_context or {})
+         self._dump_client_id = uuid.uuid4().hex
++        self._quota_gate = None
++        if os.getenv("EXPGYM_QUOTA_STATE_DIR"):
++            from expgym.quota_gate import QuotaGate
++            self._quota_gate = QuotaGate.from_environment(model)
+ 
+     @property
+     def dump_metadata(self) -> Optional[Dict[str, object]]:
+@@ -401,6 +415,15 @@
+         exponential = self.config.retry_base_seconds * (2 ** attempt)
+         return min(exponential, self.config.retry_max_seconds)
+ 
++    def _quota_error_response(self, raw: bytes):
++        """Optional native hook for an error-only success-status envelope.
++
++        Return (logical error status, JSON error bytes) only when the protocol
++        proves there was no delivered decision. Ordinary aborts and malformed
++        envelopes must return None. Actual response bytes stay in the dump.
++        """
++        return None
++
+     @staticmethod
+     def _normalize_tool_calls(value: object) -> List[Dict[str, object]]:
+         """Validate transport shape, not the model's argument content.
+@@ -506,6 +529,10 @@
+             # Invalid provider accounting is not usable as a token total. The
+             # original bytes remain in the attempt dump, without invented zeros.
+             record["usage_error"] = usage_error
++        for name in ("quota_wait_seconds", "quota_evidence_wait_seconds", "transport_wall_time_seconds",
++                     "quota_error_response_status"):
++            if name in metadata:
++                record[name] = metadata[name]
+         return record
+ 
+     @classmethod
+@@ -654,7 +681,10 @@
+         elif tool_choice is not None:
+             payload["tool_choice"] = copy.deepcopy(tool_choice)
+         generation_id = uuid.uuid4().hex
+-        for attempt in range(self.config.max_retries + 1):
++        attempt, transient_failures = -1, 0
++        while True:
++            quota_wait = self._quota_gate.before_attempt() if self._quota_gate is not None else None
++            attempt += 1
+             request = self._build_request(payload)
+             started = time.monotonic()
+             metadata = {
+@@ -664,9 +694,14 @@
+                 "max_attempts": self.config.max_retries + 1,
+                 "started_at_utc": datetime.now(timezone.utc).isoformat(),
+             }
++            if self._quota_gate is not None:
++                metadata.update(quota_wait_seconds=quota_wait, max_attempts=None,
++                                max_transient_retries=self.config.max_retries)
+             self._dump_attempt(metadata, payload, started, state="in_progress")
+             try:
+                 raw = self._transport(request, self.config.timeout)
++                if self._quota_gate is not None:
++                    metadata["transport_wall_time_seconds"] = time.monotonic() - started
+             except urllib.error.HTTPError as exc:
+                 code = exc.code
+                 try:
+@@ -676,56 +711,121 @@
+                     self._dump_attempt(metadata, payload, started, state="error", error=read_error, http_status=code)
+                     raise
+                 body = raw_error.decode("utf-8", "ignore")
++                if self._quota_gate is not None:
++                    metadata["transport_wall_time_seconds"] = time.monotonic() - started
+                 attempt_usage.append(self._attempt_usage_record(metadata, "error", raw_error, code))
+-                will_retry = code in self.config.retry_http_statuses and attempt < self.config.max_retries
+-                wait = self._retry_delay(attempt, exc.headers) if will_retry else None
++                if self._quota_gate is not None:
++                    # Persist the complete failed response before any bounded
++                    # wait for refreshed quota evidence can begin.
++                    self._dump_attempt(metadata, payload, started, state="error", raw=raw_error,
++                                       error=exc, http_status=code)
++                quota_probe_started = time.monotonic()
++                quota = (self._quota_gate.classify_http(code, raw_error, exc.headers)
++                         if self._quota_gate is not None else None)
++                if self._quota_gate is not None:
++                    metadata["quota_evidence_wait_seconds"] = time.monotonic() - quota_probe_started
++                    attempt_usage[-1]["quota_evidence_wait_seconds"] = metadata["quota_evidence_wait_seconds"]
++                will_retry = code in self.config.retry_http_statuses and transient_failures < self.config.max_retries
++                wait = self._retry_delay(transient_failures, exc.headers) if will_retry else None
++                if quota is not None:
++                    metadata["retry_classification"] = "quota_pause"
++                    # Exact elapsed wait is recorded on the next physical
++                    # attempt. Zero here denotes a queued shared gate wait,
++                    # not an immediate retry or an invented reset estimate.
++                    wait = 0.0
+                 self._dump_attempt(
+                     metadata, payload, started, state="error", raw=raw_error,
+                     error=exc, http_status=code, retry_delay=wait,
+                 )
++                if quota is not None:
++                    self._quota_gate.pause(quota, request_id=metadata["request_id"])
++                    continue
+                 if (
+                     code in self.config.retry_http_statuses
+-                    and attempt < self.config.max_retries
++                    and transient_failures < self.config.max_retries
+                 ):
+-                    wait = self._retry_delay(attempt, exc.headers)
++                    wait = self._retry_delay(transient_failures, exc.headers)
+                     logger.warning(
+                         "HTTP %d, retry %d/%d in %.1fs",
+                         code,
+-                        attempt + 1,
++                        transient_failures + 1,
+                         self.config.max_retries,
+                         wait,
+                     )
+                     import time as _time
+                     _time.sleep(wait)
++                    transient_failures += 1
+                     continue
+                 raise APIClientError(
+                     "API error: " + str(self._redact_dump_value(body)), attempt_usage,
+                 ) from exc
+             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
++                if self._quota_gate is not None:
++                    metadata["transport_wall_time_seconds"] = time.monotonic() - started
+                 attempt_usage.append(self._attempt_usage_record(metadata, "error"))
+-                wait = self._retry_delay(attempt) if attempt < self.config.max_retries else None
++                wait = self._retry_delay(transient_failures) if transient_failures < self.config.max_retries else None
+                 self._dump_attempt(
+                     metadata, payload, started, state="error", error=exc, retry_delay=wait,
+                 )
+-                if attempt < self.config.max_retries:
+-                    wait = self._retry_delay(attempt)
++                if transient_failures < self.config.max_retries:
++                    wait = self._retry_delay(transient_failures)
+                     logger.warning(
+                         "URLError, retry %d/%d in %.1fs: %s",
+-                        attempt + 1,
++                        transient_failures + 1,
+                         self.config.max_retries,
+                         wait,
+                         self._redact_dump_value(str(exc)),
+                     )
+                     import time as _time
+                     _time.sleep(wait)
++                    transient_failures += 1
+                     continue
+                 raise APIClientError(
+                     "API connection failed: " + str(self._redact_dump_value(str(exc))), attempt_usage,
+                 ) from exc
+             except Exception as exc:
+-                attempt_usage.append(self._attempt_usage_record(metadata, "error"))
+-                self._dump_attempt(metadata, payload, started, state="error", error=exc)
++                partial = exc.partial_response if isinstance(exc, PartialAPIResponseError) else None
++                if self._quota_gate is not None:
++                    metadata["transport_wall_time_seconds"] = time.monotonic() - started
++                if partial is not None:
++                    metadata["response_partial"] = True
++                attempt_usage.append(self._attempt_usage_record(metadata, "error", partial))
++                if partial is not None:
++                    attempt_usage[-1]["response_partial"] = True
++                    if attempt_usage[-1].get("usage") is not None:
++                        attempt_usage[-1]["usage_partial"] = True
++                    # Attach at the terminal boundary as well as in generate's
++                    # outer guard, so native/internal callers retain every
++                    # preceding attempt on this same exception object.
++                    exc.attempt_usage = copy.deepcopy(attempt_usage)
++                self._dump_attempt(metadata, payload, started, state="error", raw=partial, error=exc)
+                 raise
++            if self._quota_gate is not None:
++                try:
++                    quota_response = self._quota_error_response(raw)
++                except Exception as exc:
++                    attempt_usage.append(self._attempt_usage_record(metadata, "error", raw))
++                    self._dump_attempt(metadata, payload, started, state="error", raw=raw, error=exc)
++                    raise APIClientError("Native quota-error inspection failed", attempt_usage) from exc
++                if quota_response is not None:
++                    logical_status, quota_error_raw = quota_response
++                    metadata["quota_error_response_status"] = logical_status
++                    # HTTP status remains unknown through the bytes-only
++                    # transport. A logical SSE error code is not HTTP 429.
++                    attempt_usage.append(self._attempt_usage_record(metadata, "error", raw))
++                    self._dump_attempt(metadata, payload, started, state="error", raw=raw)
++                    quota_probe_started = time.monotonic()
++                    quota = self._quota_gate.classify_http(logical_status, quota_error_raw)
++                    metadata["quota_evidence_wait_seconds"] = time.monotonic() - quota_probe_started
++                    attempt_usage[-1]["quota_evidence_wait_seconds"] = metadata["quota_evidence_wait_seconds"]
++                    if quota is not None:
++                        metadata["retry_classification"] = "quota_pause"
++                        self._dump_attempt(metadata, payload, started, state="error", raw=raw, retry_delay=0.0)
++                        self._quota_gate.pause(quota, request_id=metadata["request_id"])
++                        continue
++                    # The ordinary decoder owns non-quota abort/malformed
++                    # semantics. Keep exactly one ledger row per attempt.
++                    attempt_usage.pop()
+             try:
+                 data, text, tool_calls, assistant_message, finish_reason = self._decode_response(raw)
+             except Exception as exc:

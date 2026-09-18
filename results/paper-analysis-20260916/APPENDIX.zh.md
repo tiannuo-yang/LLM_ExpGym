@@ -4,12 +4,15 @@
 
 ## A. 数据范围与评分版本
 
-本页对应已完成的既有轨迹全量重评分阶段报告（HPO 多智能体统一版本补跑尚未合入），代码提交 `0e6c51b6d86f42437038518c2fc8adc510901c0b`。主实验 4,698 个固定槽位全量重新评分，旧运行原件保持不变。历史正式分数、2026-09-18 早期诊断与本次全量新评分各有独立身份；诊断中发现的 23 答案和 19 池不是本次重新评分的筛选范围。Gemini 783 项包含历史 Sub2 与 OpenRouter 补齐，提供方差异不能被视作已隔离的因果变量。
+本页对应正式采用的新评分。评分与图修复核心代码为 `0e6c51b6d86f42437038518c2fc8adc510901c0b`；HPO 原生 API 执行快照为 `ffca5704580b75e254f6e52dd4fe9dff104b1be8`。Search/Audit 控制流对照的执行快照按模型记录：deepseek `885a5bd70dffe02b8dd610f1699e9f675da2b926`；glm `ffca5704580b75e254f6e52dd4fe9dff104b1be8`；qwen `ffca5704580b75e254f6e52dd4fe9dff104b1be8`。执行快照包含提供方兼容接入与环境绑定；其与统一评分核心分别留档，不把不同快照写成同一提交。 主实验 4,698 个固定槽位全量重新评分，旧运行原件保持不变。历史正式分数、2026-09-18 早期诊断与本次全量新评分各有独立身份；诊断中发现的 23 答案和 19 池不是本次重新评分的筛选范围。旧轨迹全量重评分有 57 个槽位的任一指标变化；41 个任务端点变化（Audit 的 LA 或 EA 任一项均计入）；按论文主指标——Search F1、Audit EA、HPO Gap0-MI/Gap0——计数则为 39 个。三者分母与事件定义不同，不能把 41 误称为论文主指标变化数。统一图版本及真实中间终答控制流的新运行是另一层替换，最终采用的来源和效果另见补跑对照。 Gemini 783 项包含历史 Sub2 与 OpenRouter，提供方差异不能被视作已隔离的因果变量。
+
+正式主表已采用全部 97/97 个预注册 HPO 修复/提供方对照池，以及 21/21 个 Search/Audit 中间终答控制流对照槽位；逐运行来源、失败/正常无配置状态和选择规则单独留档。
 
 | 材料 | 入口 |
 | --- | --- |
 | 全部采用槽位与原件 SHA | [SOURCE_SELECTION.csv](../protocol-repair-20260918/main/SOURCE_SELECTION.csv) |
-| 新旧逐样本分数、原因 | [重评分对照](../protocol-repair-20260918/rescore/main/sample_diff.csv) |
+| 旧轨迹重新评分的逐样本分数、原因 | [离线重评分对照](../protocol-repair-20260918/rescore/main/sample_diff.csv) |
+| 旧历史→旧轨迹新评分→实际运行正式采用 | [4,698 行三层对照与采用原因](../protocol-repair-20260918/control_flow_adoption/new_official/sample_diff.csv) |
 | 全部绝对值、重复层、宽比较 | [absolute](../protocol-repair-20260918/main/absolute_settings.csv)、[by_repeat](../protocol-repair-20260918/main/by_repeat.csv)、[COMPARISON](../protocol-repair-20260918/main/COMPARISON.csv) |
 | 新旧聚合差与排名变化 | [聚合对照](../protocol-repair-20260918/main/all_aggregate_comparisons.csv)、[排名对照](../protocol-repair-20260918/main/ranking_changes.csv) |
 | 旧/诊断/新身份与输入 | [评分身份](../protocol-repair-20260918/main/SCORE_VERSIONS.json)、[输入](../protocol-repair-20260918/main/INPUTS.json) |
@@ -53,9 +56,9 @@ DeepSeek 分解固定每预算 27 槽位，条件严格 Gap 使用可评分重�
 
 ## D. 答案、证据与配对案例
 
-全部 702 N1 和 1,872 N4 成员的终答以统一接受规则处理；接受包装不等于修改 JSON 内容或标签。LA 与 EA 独立评分，联合正确率另列。缺失/多余证据按标准集合差计算，可能同时发生。总体及非空证据分层维持文档等权，合并条件分母另列，不混用宏均值和 pooled 比例。
+全部 702 N1 和 1,872 N4 成员的终答以统一接受规则处理，按既定包装、标签别名和证据 ID 类型规则归一化，不根据 gold 补造标签或证据。LA 与 EA 独立评分，联合正确率另列。缺失/多余证据按标准集合差计算，可能同时发生。总体及非空证据分层维持文档等权，合并条件分母另列，不混用宏均值和 pooled 比例。
 
-“反馈补全”配对完整定义见正文，目前 272 呈现、264 次完整确认。历史固定案例保留为解释性样例，并重新核对新分数与候选规则；不是随机样本或最大增益选例。`verification_eff` 保留“曾提交正确证据”的历史定义，反馈实际可见的效率若提供则另列 `visible_verification_eff`。
+“反馈补全”配对完整定义见正文，目前 272 呈现、264 次完整确认。历史固定案例保留为解释性样例，并重新核对新分数与候选规则；不是随机样本或最大增益选例。`verification_eff` 的分母为终答标签与证据均正确的假设，分子为其中曾向工具提交该正确证据集合的假设，包含预算隐藏返回；`visible_verification_eff` 使用相同分母，只计可见正确核验。
 
 [Audit 方法/案例变化](../protocol-repair-20260918/audit/README.zh.md) · [假设级](../protocol-repair-20260918/audit/n1/hypothesis_metrics.csv) · [轨迹级](../protocol-repair-20260918/audit/n1/trace_metrics.csv) · [模型预算](../protocol-repair-20260918/audit/n1/model_budget_metrics.csv) · [条件分母](../protocol-repair-20260918/audit/n1/diagnostic_counts.csv) · [配对](../protocol-repair-20260918/audit/n1/paired_completion_patterns.csv)。
 
@@ -67,23 +70,25 @@ N4 三策略均为四智能体、匹配每成员反馈预算。Search 限 whois 
 | --- | --- | --- | --- | --- |
 | restricted_search | cost_moderate | 62.60 | 64.12 | 64.32 |
 | restricted_search | cost_tight | 17.10 | 18.06 | 24.15 |
-| evidence_audit | cost_moderate | 72.93 | 76.92 | 91.18 |
-| evidence_audit | cost_tight | 59.80 | 62.22 | 69.61 |
-| tuning | cost_moderate | 97.75 | 97.84 | 98.66 |
-| tuning | cost_tight | 91.00 | 90.89 | 96.04 |
-
-上表的 tuning 两行保留旧运行重评分，尚未合入 97 个必要补跑池，不作为统一修复版本的最终结果。
+| evidence_audit | cost_moderate | 73.38 | 76.85 | 91.40 |
+| evidence_audit | cost_tight | 59.80 | 62.22 | 69.53 |
+| tuning | cost_moderate | 97.77 | 97.82 | 98.67 |
+| tuning | cost_tight | 90.94 | 90.80 | 95.00 |
 
 HPO 图路径原前缀标识会碰撞，原始观测/得分完整键与共享路径显示键需分开核验。已渲染进模型输入的路径不能靠离线改文件恢复为一次修复后的运行。代码版本、模型/预算/策略矩阵、实际受影响运行及统一修复版本的必要补跑选择均单独列出；禁止把修复前后的混合来源隐称相同协议。
+
+[HPO 逐运行代码版本（810 项）](../protocol-repair-20260918/rerun_adoption/adopted_hpo_code_versions.csv)与[模型—预算—策略版本矩阵（54 组）](../protocol-repair-20260918/rerun_adoption/adopted_hpo_model_budget_strategy.csv)分别记录实际执行版本和当前离线评分版本，[版本核验](../protocol-repair-20260918/rerun_adoption/ADOPTED_CODE_VERSION_CHECKS.json)绑定采用来源。旧 HPO 记录中 492 项未写 Git 提交号；这些空值保留，以完整源码树的已核验 SHA 标识执行版本，不补造提交号。旧源码对应八份完整源码树。最终采用的 97 项 HPO 新运行替换与其余 713 项历史执行分别列出。
 
 [全部指标与两基线差](../protocol-repair-20260918/poolact/poolact_all_metrics.csv) · [主增益](../protocol-repair-20260918/poolact/poolact_primary.csv) · [宏均值](../protocol-repair-20260918/poolact/poolact_scenario_summary.csv) · [MI/BoN](../protocol-repair-20260918/display/nas_best_minus_mean.csv) · [Audit 池](../protocol-repair-20260918/audit/coordination/audit_pools.csv) · [Audit 成员](../protocol-repair-20260918/audit/coordination/audit_agents.csv)。
 
 ## F. 解释边界与复算
 
-本次保留的解释限制包括：Audit 固定首步示例未改；不同模型思考强度、输出上限、提供方和实际计算资源并不完全相同；等反馈预算不等于等 token、等金钱或等墙钟时间。真实调度会影响共享缓存可用时刻，未证明与提供方时延无关。NAS101 A/B/C 不是三个独立数据集，数值库版本影响并列处理的复现。早期筛选过的运行版本与统一修复补跑分别标注，不能把跨版本差值全部归因于模型能力。
+本次保留的解释限制包括：Audit 固定首步示例未改；不同模型思考强度、输出上限、提供方和实际计算资源并不完全相同；等反馈预算不等于等 token、等金钱或等墙钟时间。真实调度会影响共享缓存可用时刻，未证明与提供方时延无关。NAS101 A/B/C 不是三个独立数据集，数值库版本影响并列处理的复现。早期筛选过的运行版本与统一修复补跑分别标注；补跑也包含新采样和并发时序差异，不能把其差值全部归因于修复本身或模型能力。
 
 不报告 p 值，不将固定模型、重复顺序、共享题库或池成员当总体独立抽样。图/缓存/行动协调的各自因果贡献仍未由独立消融完全识别。
 
-主聚合脚本从完整新版 slot scalars 重算 7,767 聚合行、126 排名和 1,298 宽比较，再生成展示、regret、配对及全部 POOLACT 指标。公开 CSV 可重放聚合及行为投影；公开最小评分输入还支持答案提取与评分规则回放。HPO 的公开回放使用已核验的性能证书，重新认证原始请求和完整基准查表仍需本地原件/数据与冻结代码。不同检查范围分别记录，不将公开表回放称为重读全部 HTTP 请求。
+主聚合脚本从完整新版 slot scalars 重算 7,767 聚合行、126 排名和 1,298 宽比较，再生成展示、regret、配对及全部 POOLACT 指标。公开最小评分包支持 Search/Audit/Whois 的终答重新提取、任务评分及池投票，也支持 HPO 的重新提取、可见评估匹配、回退和池聚合；HPO 数值性能使用配置 SHA 绑定的已核验 benchmark 证书，默认回放不重新读取完整 benchmark。公开逐事件/假设叶表支持行为汇总与评分连接重建。统一核验器的完整模式另验证实际补跑的最小包、全量采用来源和三份报告。上述公开重放不重新调用模型，也不等同于从完整原件重建最小包、逐次 HTTP 审查或再次验证全 turn 控制流。最后几项及可选完整 benchmark 复核仍需冻结本地归档与对应环境。
+
+Whois 预算 sweep 单列 [完整预算分析与图](../protocol-repair-20260918/whois/README.zh.md)，不额外累加到上述 4,698 主实验分母。其 1,170 个预算—模型—题目结果全量重评分，其中 beta=10 的 234 项已属于主实验，来源与新评分逐项连接；其余 936 项为主分母之外的独立预算设置。旧轨迹离线重评分层的两处终答文本变化均未改变分数。独立报告还采用 1 条必要的实际控制流补跑；该层的新分数和实际 token、墙钟成本按独立报告及其来源解释，不混称为离线评分变化。
 
 [重建主分析](../protocol-repair-20260918/tools/rebuild_analysis.py) · [重建展示](../protocol-repair-20260918/tools/recompute_display.py) · [重建 Search/POOLACT/交付](../protocol-repair-20260918/tools/rebuild_secondary.py) · [生成本报告](../protocol-repair-20260918/tools/render_report.py) · [审阅记录](REVIEW.zh.md)。
