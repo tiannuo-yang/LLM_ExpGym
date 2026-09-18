@@ -1,0 +1,345 @@
+"""Public PoolAct API.
+
+PoolAct runs multiple agents on the same ExpGym item with three pieces of
+shared state: an observation cache, an exploration graph, and a reasoning
+lock. Tool executions remain parallel; only the LLM decision that reads the
+graph and records its next claim is serialized.
+
+The easiest entry point is ``scripts/eval_poolact.sh``. Library users can
+create a :class:`PoolActCoordinator`, bind each agent's tools, and pass the
+returned hooks to :func:`expgym.react_loop.run_react_loop`.
+"""
+from __future__ import annotations
+
+import inspect
+import json
+import math
+import threading
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from expgym.extras.aggregation_diagnostics import build_aggregation_diagnostics
+from expgym.tool_protocol import (
+    ANSWER_PROTOCOL_VERSION, audit_evidence_key, audit_label_key,
+    parse_audit_answer, parse_search_answer,
+)
+from expgym.extras.parallel_cache import (
+    ActionClaim,
+    AgentClock,
+    SharedExplorationGraph,
+    SharedExplorationLedger,
+    SharedObservationCache,
+    make_graph_augmenter,
+    make_ledger_augmenter,
+    make_pre_tool_hook,
+    wrap_tools_with_cache,
+    wrap_tools_with_ledger,
+    wrap_tools_with_polact,
+    wrap_tools_with_poolact,
+)
+
+POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v4"
+
+
+@dataclass
+class PoolActAgentRuntime:
+    """Per-agent values passed to ``run_react_loop``."""
+
+    tools: Dict[str, Callable]
+    clock: AgentClock
+    observation_augmenter: Callable[[str], str]
+    pre_tool_hook: Callable[[str, str], None]
+    reasoning_lock: threading.Lock
+
+
+class PoolActCoordinator:
+    """Own the shared state for one N-agent PoolAct run."""
+
+    def __init__(self, n_agents: int, *, diversity_mode: bool = True) -> None:
+        if n_agents < 1:
+            raise ValueError("n_agents must be at least 1")
+        self.n_agents = n_agents
+        self.cache = SharedObservationCache()
+        self.graph = SharedExplorationGraph(
+            n_agents=n_agents,
+            diversity_mode=diversity_mode,
+        )
+        self.reasoning_lock = threading.Lock()
+
+    def bind_tools(
+        self,
+        tools: Dict[str, Callable],
+        agent_id: int,
+        *,
+        overhead_scale: float = 1.0,
+        time_budget: Optional[float] = None,
+    ) -> PoolActAgentRuntime:
+        """Wrap one agent's tools and return all ReAct-loop hooks.
+
+        ``time_budget`` is the same strict ceiling, in scaled simulated seconds,
+        passed to ``run_react_loop``. It prevents withheld results being shared.
+        """
+        if agent_id < 0 or agent_id >= self.n_agents:
+            raise ValueError(
+                f"agent_id must be in [0, {self.n_agents}), got {agent_id}"
+            )
+        clock = AgentClock()
+        wrapped = wrap_tools_with_poolact(
+            tools,
+            self.cache,
+            self.graph,
+            agent_id,
+            clock=clock,
+            overhead_scale=overhead_scale,
+            time_budget=time_budget,
+        )
+        return PoolActAgentRuntime(
+            tools=wrapped,
+            clock=clock,
+            observation_augmenter=make_graph_augmenter(
+                self.graph,
+                clock=clock,
+                agent_id=agent_id,
+                time_budget=time_budget,
+            ),
+            pre_tool_hook=make_pre_tool_hook(
+                self.graph,
+                agent_id,
+                clock=clock,
+            ),
+            reasoning_lock=self.reasoning_lock,
+        )
+
+    def stats(self) -> Dict[str, Dict[str, Any]]:
+        """Return a serializable snapshot of the shared state."""
+        return {"cache": self.cache.stats(), "graph": self.graph.stats()}
+
+
+def run_agents_parallel(
+    n_agents: int,
+    run_agent: Callable[[int], Dict[str, Any]],
+    *,
+    max_workers: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Run agent callbacks concurrently and return results by agent ID."""
+    if n_agents < 1:
+        raise ValueError("n_agents must be at least 1")
+    workers = max_workers or n_agents
+    if workers < 1:
+        raise ValueError("max_workers must be at least 1")
+    indexed: Dict[int, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(workers, n_agents)) as executor:
+        futures = {
+            executor.submit(run_agent, agent_id): agent_id
+            for agent_id in range(n_agents)
+        }
+        for future in as_completed(futures):
+            agent_id = futures[future]
+            indexed[agent_id] = future.result()
+    return [indexed[agent_id] for agent_id in range(n_agents)]
+
+
+def _search_vote_key(answer: Any) -> tuple[str, ...]:
+    """Use exactly the name set accepted by the individual Search scorer."""
+    return tuple(sorted(parse_search_answer(str(answer or ""))))
+
+
+def _evaluate_aggregate(
+    evaluator: Optional[Callable], answer: str
+) -> tuple[Optional[float], Optional[Dict[str, Any]]]:
+    if evaluator is None:
+        return None, None
+    # Select the legacy one-argument form before execution. Catching a TypeError
+    # from the evaluator itself and trying again would mask/repeat a real error.
+    call_args = (answer, [])
+    try:
+        signature = inspect.signature(evaluator)
+    except (ValueError, TypeError):
+        signature = None  # Uninspectable callables use the public two-arg form.
+    if signature is not None:
+        try:
+            signature.bind(*call_args)
+        except TypeError:
+            signature.bind(answer)
+            call_args = (answer,)
+    score = evaluator(*call_args)
+    _require_finite_scores(score, "aggregate evaluator score")
+    if isinstance(score, dict):
+        primary = score.get("label_acc")
+        return (
+            float(primary) if isinstance(primary, (int, float)) else None,
+            score,
+        )
+    if isinstance(score, (int, float)):
+        return float(score), None
+    return None, None
+
+
+def _require_finite_scores(value: Any, location: str) -> None:
+    """Reject invalid score data rather than silently voting/scoring it as zero."""
+    if isinstance(value, (int, float)) and not math.isfinite(value):
+        raise ValueError(f"Non-finite score at {location}")
+    if isinstance(value, dict):
+        for key, child in value.items():
+            _require_finite_scores(child, f"{location}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _require_finite_scores(child, f"{location}[{index}]")
+
+
+def _canonical_audit_label(value: Any) -> str:
+    """Use the individual scorer's literal label interpretation."""
+    return audit_label_key(value)
+
+
+def _canonical_evidence_ids(value: Any) -> tuple[Any, ...]:
+    return audit_evidence_key(value)
+
+
+def aggregate_results(
+    scenario: str,
+    results: Sequence[Dict[str, Any]],
+    *,
+    answer_evaluator: Optional[Callable] = None,
+) -> Dict[str, Any]:
+    """Aggregate answers using the methods reported in the paper.
+
+    Tuning uses best-of-N, restricted search uses semantic majority vote over
+    name sets, and evidence audit votes independently per hypothesis.
+    """
+    if not results:
+        raise ValueError("results must not be empty")
+    individual_answers = [result.get("answer") or "" for result in results]
+    individual_perfs = [result.get("answer_perf") for result in results]
+    for index, result in enumerate(results):
+        _require_finite_scores(result.get("answer_perf"), f"agent[{index}].answer_perf")
+        _require_finite_scores(result.get("answer_metrics"), f"agent[{index}].answer_metrics")
+
+    if scenario == "tuning":
+        best = max(
+            results,
+            key=lambda result: (
+                float(result["answer_perf"])
+                if isinstance(result.get("answer_perf"), (int, float))
+                else float("-inf")
+            ),
+        )
+        return {
+            "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
+            "method": "best_of_n",
+            "answer": best.get("answer") or "",
+            "answer_perf": best.get("answer_perf"),
+            "answer_metrics": best.get("answer_metrics"),
+            "individual_answers": individual_answers,
+            "individual_perfs": individual_perfs,
+            "diagnostics": build_aggregation_diagnostics(
+                scenario, results,
+                selected_agent_index=next(index for index, result in enumerate(results)
+                                          if result is best),
+            ),
+        }
+
+    if scenario == "restricted_search":
+        keys = [_search_vote_key(answer) for answer in individual_answers]
+        counts = Counter(keys)
+        winning_key = max(
+            counts,
+            key=lambda key: (counts[key], bool(key), -keys.index(key)),
+        )
+        winner_index = keys.index(winning_key)
+        answer = str(individual_answers[winner_index])
+        perf, metrics = _evaluate_aggregate(answer_evaluator, answer)
+        return {
+            "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
+            "method": "majority_vote",
+            "answer": answer,
+            "answer_perf": perf,
+            "answer_metrics": metrics,
+            "individual_answers": individual_answers,
+            "individual_perfs": individual_perfs,
+            "diagnostics": build_aggregation_diagnostics(
+                scenario, results, selected_agent_index=winner_index, search_keys=keys,
+            ),
+        }
+
+    if scenario != "evidence_audit":
+        raise ValueError(f"Unknown scenario: {scenario}")
+
+    parsed_answers: List[Dict[str, Any]] = []
+    for answer in individual_answers:
+        try:
+            parsed = parse_audit_answer(answer)
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            parsed = {}
+        parsed_answers.append(parsed if isinstance(parsed, dict) else {})
+
+    hypothesis_ids = sorted(
+        {hypothesis_id for parsed in parsed_answers for hypothesis_id in parsed}
+    )
+    voted: Dict[str, Any] = {}
+    audit_votes: Dict[str, List[Dict[str, Any]]] = {}
+    for hypothesis_id in hypothesis_ids:
+        audit_votes[hypothesis_id] = [
+            {"agent_index": index,
+             "label": _canonical_audit_label(parsed[hypothesis_id].get("label")),
+             "evidence_key": _canonical_evidence_ids(parsed[hypothesis_id].get("evidence_ids"))}
+            for index, parsed in enumerate(parsed_answers)
+            if isinstance(parsed.get(hypothesis_id), dict)
+        ]
+        entries = [
+            parsed[hypothesis_id]
+            for parsed in parsed_answers
+            if isinstance(parsed.get(hypothesis_id), dict)
+        ]
+        labels = [_canonical_audit_label(entry.get("label")) for entry in entries]
+        if not labels:
+            continue
+        winning_label = Counter(labels).most_common(1)[0][0]
+        evidence = [
+            _canonical_evidence_ids(entry.get("evidence_ids"))
+            for entry, label in zip(entries, labels)
+            if label == winning_label
+        ]
+        winning_evidence = Counter(evidence).most_common(1)[0][0] if evidence else ()
+        voted[hypothesis_id] = {
+            "label": winning_label,
+            "evidence_ids": list(winning_evidence),
+        }
+
+    answer = json.dumps(voted, sort_keys=True)
+    perf, metrics = _evaluate_aggregate(answer_evaluator, answer)
+    return {
+        "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
+        "method": "per_hypothesis_majority_vote",
+        "answer": answer,
+        "answer_perf": perf,
+        "answer_metrics": metrics,
+        "individual_answers": individual_answers,
+        "individual_perfs": individual_perfs,
+        "diagnostics": build_aggregation_diagnostics(
+            scenario, results, parsed_answers=parsed_answers, audit_votes=audit_votes,
+        ),
+    }
+
+
+__all__ = [
+    "ActionClaim",
+    "AgentClock",
+    "PoolActAgentRuntime",
+    "PoolActCoordinator",
+    "POOLACT_PROTOCOL_VERSION",
+    "SharedExplorationGraph",
+    "SharedExplorationLedger",
+    "SharedObservationCache",
+    "aggregate_results",
+    "make_graph_augmenter",
+    "make_ledger_augmenter",
+    "make_pre_tool_hook",
+    "run_agents_parallel",
+    "wrap_tools_with_cache",
+    "wrap_tools_with_ledger",
+    "wrap_tools_with_polact",
+    "wrap_tools_with_poolact",
+]

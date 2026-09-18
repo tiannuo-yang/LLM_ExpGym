@@ -1,0 +1,55 @@
+#!/lustrefs/users/chufan.shi/codex_space_tn/kimi_k3_eval/data_runtime/.venv-hpo/bin/python
+"""Run the frozen CPU evaluator with invocation-local HPOBench state."""
+import json
+import os
+from pathlib import Path
+import sys
+
+
+def main():
+    repo = Path(__file__).resolve().parents[3]
+    python = Path("/lustrefs/users/chufan.shi/codex_space_tn/kimi_k3_eval/data_runtime/.venv-hpo/bin/python")
+    dump_value = os.environ.get("EXPGYM_API_DUMP_DIR")
+    if not dump_value or not Path(dump_value).is_absolute():
+        raise SystemExit("EXPGYM_API_DUMP_DIR must identify this invocation's absolute dump directory")
+    invocation = Path(dump_value).resolve().parent
+    state = invocation / "runtime" / "hpobench"
+    config_dir, cache_dir, socket_dir = (state / name for name in ("config", "cache", "sockets"))
+    data_dir = repo / "data" / "hpo_tuning" / "hpobench_data"
+    source_dir = repo / "data" / "hpo_tuning" / "HPOBench"
+    if not python.is_file() or not source_dir.is_dir() or not data_dir.is_dir():
+        raise SystemExit("Frozen HPO interpreter, source, and benchmark data must already exist")
+    config = {
+        "version": "0.0.10", "verbosity": 0,
+        "cache_dir": str(cache_dir), "data_dir": str(data_dir),
+        "socket_dir": str(socket_dir),
+        "container_dir": str(cache_dir / ("hpobench-" + str(os.getuid()))),
+        "container_source": "oras://gitlab.tf.uni-freiburg.de:5050/muelleph/hpobench-registry",
+        "pyro_connect_max_wait": 400,
+    }
+    # JSON is a YAML subset accepted by HPOBench. Stable bytes are fingerprinted
+    # by its evaluator identity and must remain unchanged during guarded resume.
+    body = json.dumps(config, indent=2, sort_keys=True) + "\n"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    socket_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / ".hpobenchrc"
+    if config_path.exists():
+        if config_path.read_text(encoding="utf-8") != body:
+            raise SystemExit("Invocation HPOBench configuration changed; refusing to overwrite it")
+    else:
+        with config_path.open("x", encoding="utf-8") as handle:
+            handle.write(body)
+    os.environ.update({
+        "HPOBENCH_ROOT": str(source_dir),
+        "PYTHONPATH": os.pathsep.join((str(repo), str(source_dir))),
+        "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+        "XDG_CONFIG_HOME": str(config_dir), "XDG_CACHE_HOME": str(cache_dir),
+        "XDG_DATA_HOME": str(data_dir), "TMPDIR": str(socket_dir),
+        "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+    })
+    os.execv(str(python), [str(python)] + sys.argv[1:])
+
+
+if __name__ == "__main__":
+    main()
