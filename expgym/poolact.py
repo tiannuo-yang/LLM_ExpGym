@@ -14,7 +14,6 @@ from __future__ import annotations
 import inspect
 import json
 import math
-import re
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +21,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from expgym.extras.aggregation_diagnostics import build_aggregation_diagnostics
+from expgym.tool_protocol import (
+    ANSWER_PROTOCOL_VERSION, audit_evidence_key, audit_label_key,
+    parse_audit_answer, parse_search_answer,
+)
 from expgym.extras.parallel_cache import (
     ActionClaim,
     AgentClock,
@@ -37,7 +40,7 @@ from expgym.extras.parallel_cache import (
     wrap_tools_with_poolact,
 )
 
-POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v3"
+POOLACT_PROTOCOL_VERSION = "paper-graph-lock-v4"
 
 
 @dataclass
@@ -139,31 +142,8 @@ def run_agents_parallel(
 
 
 def _search_vote_key(answer: Any) -> tuple[str, ...]:
-    """Canonicalize a search answer so name order does not split a vote."""
-    text = str(answer or "").strip()
-    if not text:
-        return ()
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        parsed = None
-    if isinstance(parsed, list):
-        parts = [str(value) for value in parsed]
-    else:
-        parts = re.split(r"[,;\n]", text)
-    normalized = {
-        " ".join(
-            re.sub(r"^\s*\d+[.)]\s*", "", part)
-            .strip()
-            .strip("-*•")
-            .lower()
-            .split()
-        )
-        for part in parts
-        if str(part).strip()
-    }
-    normalized.discard("")
-    return tuple(sorted(normalized))
+    """Use exactly the name set accepted by the individual Search scorer."""
+    return tuple(sorted(parse_search_answer(str(answer or ""))))
 
 
 def _evaluate_aggregate(
@@ -210,28 +190,12 @@ def _require_finite_scores(value: Any, location: str) -> None:
 
 
 def _canonical_audit_label(value: Any) -> str:
-    """Normalize common label spellings to the task's public answer format."""
-    raw = re.sub(r"[^a-z]", "", str(value or "").lower())
-    return {
-        "entailment": "Entailment",
-        "entailed": "Entailment",
-        "contradiction": "Contradiction",
-        "contradicted": "Contradiction",
-        "notmentioned": "NotMentioned",
-        "neutral": "NotMentioned",
-    }.get(raw, str(value or "").strip())
+    """Use the individual scorer's literal label interpretation."""
+    return audit_label_key(value)
 
 
 def _canonical_evidence_ids(value: Any) -> tuple[Any, ...]:
-    if not isinstance(value, list):
-        return ()
-    normalized = set()
-    for item in value:
-        try:
-            normalized.add(int(item))
-        except (TypeError, ValueError, OverflowError):
-            normalized.add(str(item))
-    return tuple(sorted(normalized, key=lambda item: (str(type(item)), str(item))))
+    return audit_evidence_key(value)
 
 
 def aggregate_results(
@@ -263,6 +227,7 @@ def aggregate_results(
             ),
         )
         return {
+            "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
             "method": "best_of_n",
             "answer": best.get("answer") or "",
             "answer_perf": best.get("answer_perf"),
@@ -287,6 +252,7 @@ def aggregate_results(
         answer = str(individual_answers[winner_index])
         perf, metrics = _evaluate_aggregate(answer_evaluator, answer)
         return {
+            "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
             "method": "majority_vote",
             "answer": answer,
             "answer_perf": perf,
@@ -304,10 +270,8 @@ def aggregate_results(
     parsed_answers: List[Dict[str, Any]] = []
     for answer in individual_answers:
         try:
-            # Preserve the historical vote acceptance set. Task evaluators may
-            # accept other wrappers; changing voting requires a separate policy.
-            parsed = json.loads(answer) if isinstance(answer, str) else answer
-        except (json.JSONDecodeError, TypeError):
+            parsed = parse_audit_answer(answer)
+        except (ValueError, TypeError, RecursionError, OverflowError):
             parsed = {}
         parsed_answers.append(parsed if isinstance(parsed, dict) else {})
 
@@ -347,6 +311,7 @@ def aggregate_results(
     answer = json.dumps(voted, sort_keys=True)
     perf, metrics = _evaluate_aggregate(answer_evaluator, answer)
     return {
+        "answer_protocol_version": ANSWER_PROTOCOL_VERSION,
         "method": "per_hypothesis_majority_vote",
         "answer": answer,
         "answer_perf": perf,

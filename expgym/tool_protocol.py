@@ -11,6 +11,15 @@ import math
 import re
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
+ANSWER_PROTOCOL_VERSION = "final-answer-boundary-v2"
+AUDIT_ANSWER_PROTOCOL_VERSION = "audit-json-wrapper-v2"
+AUDIT_FIELD_PROTOCOL_VERSION = "audit-literal-label-legacy-evidence-v2"
+SEARCH_ANSWER_PROTOCOL_VERSION = "search-name-set-v2"
+
+
+class AuditAnswerTypeError(ValueError):
+    """The parsed Audit payload is not an object."""
+
 
 def resolve_tool_protocol(llm: object, requested: str = "auto") -> str:
     """Resolve one protocol for both task instructions and loop transport."""
@@ -61,6 +70,9 @@ def parse_json_answer(text: str) -> Any:
 
 
 _LABEL = re.compile(r"\b(?P<label>Final\s+Answer|Answer|Action|Observation|Thought|System)\s*:", re.I)
+_ANSWER_LABEL = re.compile(
+    r"(?<![^\W_])(?P<label>Final\s+Answer|Answer)(?P<closing>\*\*|__|\*|_)?\s*:", re.I,
+)
 _REASONING_TAG = re.compile(r"<(/?)(think|analysis|reasoning)\s*>", re.I)
 _LINE_MARKUP = re.compile(r"[ \t]*(?:(?:[-+*]|\d+[.)])\s+)?(?:\#{1,6}\s+)?[*_]*[ \t]*\Z")
 _EXAMPLE_OR_NEGATION = re.compile(
@@ -120,7 +132,10 @@ def _protocol_view(text: str) -> Optional[str]:
             position = end
             continue
         if char in "\"'“‘":
-            if char == "'" and position > 0 and text[position - 1].isalnum():
+            if char == "'" and position > 0 and (
+                text[position - 1].isalnum()
+                or re.search(r"\w(?:\*{1,2}|_{1,2})$", text[:position])
+            ):
                 position += 1
                 continue
             delimiter = {"“": "”", "‘": "’"}.get(char, char)
@@ -196,17 +211,88 @@ def _content_start(text: str, end: int) -> int:
     return end + match.end()
 
 
+def _answer_content_start(text: str, match: re.Match) -> Optional[int]:
+    """Remove markup belonging to the label, never markup in its payload."""
+    prefix = text[:match.start()]
+    opening = re.search(r"(\*\*|__|\*|_)$", prefix)
+    marker = opening.group(1) if opening else ""
+    closing = match.group("closing") or ""
+    if closing and closing != marker:
+        return None
+    end = match.end()
+    if marker and not closing:
+        # **Answer:** and **Answer**: are both label wrappers.
+        if text.startswith(marker, end):
+            end += len(marker)
+        # **Answer: Ada** emphasizes the whole submission. Its closing marker
+        # belongs to the original payload and is retained, as in the historical
+        # line parser; task-level name/JSON rules decide how to interpret it.
+    while end < len(text) and text[end].isspace():
+        end += 1
+    return end
+
+
+def _answer_payload(text: str) -> Optional[Tuple[str, bool]]:
+    """Find one unambiguous directive and return its literal suffix.
+
+    An introduction ending in ``final answer:`` is not a submission. Consecutive
+    empty answer headings are wrappers, but two nonempty submissions are never
+    resolved by taking the first/last one or consulting task reference answers.
+    The boolean reports a line-start directive (which may contain plain text).
+    """
+    view = _protocol_view(text)
+    if view is None or extract_text_action(text) is not None:
+        return None
+    labels = list(_ANSWER_LABEL.finditer(view))
+    eligible = []
+    for match in labels:
+        if not _directive_boundary(text, view, match.start()):
+            # A mention in prose is not another submission. Quoted/code/example
+            # regions are already masked or rejected by _directive_boundary.
+            continue
+        start = _answer_content_start(text, match)
+        if start is None:
+            return None
+        eligible.append((match, start))
+    if not eligible:
+        return None
+    for (previous, start), (following, _) in zip(eligible, eligible[1:]):
+        line_start = text.rfind("\n", 0, following.start()) + 1
+        if text[start:line_start].strip():
+            return None
+        # Only line markup can separate adjacent empty headings.
+        if not _LINE_MARKUP.fullmatch(text[line_start:following.start()]):
+            return None
+    match, start = eligible[-1]
+    # A bare structured answer before a labelled one is a double submission.
+    first = eligible[0][0]
+    first_line_start = text.rfind("\n", 0, first.start()) + 1
+    prefix_end = (first_line_start
+                  if _LINE_MARKUP.fullmatch(text[first_line_start:first.start()])
+                  else first.start())
+    try:
+        earlier = parse_json_answer(text[:prefix_end])
+    except (ValueError, TypeError):
+        pass
+    else:
+        if isinstance(earlier, (dict, list)):
+            return None
+    line_start = view.rfind("\n", 0, match.start()) + 1
+    line_final = bool(_LINE_MARKUP.fullmatch(view[line_start:match.start()]))
+    candidate = text[start:].strip()
+    return (candidate, line_final) if candidate else None
+
+
 def structured_final_answer(text: str) -> Optional[str]:
     """Recognize a complete structured final, including an inline Answer label.
 
-    Only one visible final label is allowed, outside quoted examples and closed
-    reasoning regions. Its entire suffix must be a finite JSON object or list.
+    Only one nonempty final directive is allowed, outside quoted examples and
+    closed reasoning regions. Its suffix must be a finite JSON object or list.
     Callers still prefer explicit actions over textual answers in legacy mode.
     """
     if not isinstance(text, str):
         return None
-    view = _protocol_view(text)
-    if view is None:
+    if _protocol_view(text) is None or extract_text_action(text) is not None:
         return None
     try:
         value = parse_json_answer(text)
@@ -214,22 +300,10 @@ def structured_final_answer(text: str) -> Optional[str]:
         pass
     else:
         return json.dumps(value, ensure_ascii=False, allow_nan=False) if isinstance(value, (dict, list)) else None
-    labels = [match for match in _LABEL.finditer(view)
-              if re.fullmatch(r"(?:final\s+)?answer", match.group("label"), re.I)]
-    if len(labels) != 1:
+    payload = _answer_payload(text)
+    if payload is None:
         return None
-    match = labels[0]
-    if not _directive_boundary(text, view, match.start()):
-        return None
-    # Do not silently replace an already submitted bare JSON answer.
-    try:
-        earlier = parse_json_answer(text[:match.start()])
-    except (ValueError, TypeError):
-        pass
-    else:
-        if isinstance(earlier, (dict, list)):
-            return None
-    candidate = text[_content_start(text, match.end()):].strip()
+    candidate, _ = payload
     try:
         value = parse_json_answer(candidate)
     except (ValueError, TypeError):
@@ -240,25 +314,12 @@ def structured_final_answer(text: str) -> Optional[str]:
 
 
 def extract_text_answer(text: str) -> Optional[str]:
-    """Keep legacy line-final payloads verbatim, with conservative boundaries.
-
-    Multiple line-labelled answers remain one invalid submission beginning at
-    the first label, as in the legacy evaluator/fallback contract. Inline and
-    unlabelled finals use the stricter structured recognizer.
-    """
+    """Extract a unique final, preserving the payload's literal contents."""
     if not isinstance(text, str):
         return None
-    view = _protocol_view(text)
-    if view is None:
-        return None
-    labels = [match for match in _LABEL.finditer(view)
-              if re.fullmatch(r"(?:final\s+)?answer", match.group("label"), re.I)]
-    if labels:
-        first = labels[0]
-        line_start = view.rfind("\n", 0, first.start()) + 1
-        if (_LINE_MARKUP.fullmatch(view[line_start:first.start()])
-                and _directive_boundary(text, view, first.start())):
-            return text[first.end():].strip()
+    payload = _answer_payload(text)
+    if payload is not None and payload[1]:
+        return payload[0]
     return structured_final_answer(text)
 
 
@@ -274,10 +335,108 @@ def unlabelled_final_answer(text: str) -> Optional[str]:
     """
     if not isinstance(text, str) or not text.strip():
         return None
-    if (_protocol_view(text) is None or _LABEL.search(text)
+    if (_protocol_view(text) is None or _LABEL.search(text) or _ANSWER_LABEL.search(text)
             or _REASONING_TAG.search(text)):
         return None
     return text.strip()
+
+
+def parse_final_answer(text: str, *, allow_unlabelled: bool = True) -> Optional[str]:
+    """The shared runtime/offline text-to-final boundary, independent of task.
+
+    Callers must reject provider-native tool calls and length-truncated outputs
+    before invoking this text-only helper. Bare prose is enabled only where the
+    transport already permits it (native or forced-final responses).
+    """
+    if not isinstance(text, str) or extract_text_action(text) is not None:
+        return None
+    answer = extract_text_answer(text)
+    if answer is None and allow_unlabelled:
+        answer = unlabelled_final_answer(text)
+    return answer
+
+
+def parse_audit_answer(prediction: Any) -> Dict[str, Any]:
+    """Parse the same Audit payload for individual scoring and pool voting.
+
+    Accept one object, an optional semicolon, and a complete JSON/no-language
+    fence. Preserve the historical acceptance of explanation after a closing
+    fence, but reject another object, fence, or protocol directive in that tail.
+    Never extract a JSON example from arbitrary leading prose or alter fields.
+    """
+    if isinstance(prediction, dict):
+        return prediction
+    if not isinstance(prediction, str):
+        raise AuditAnswerTypeError("An Audit answer must be a JSON object")
+    # Keep the historical JSON field/coercion semantics. The versioned change
+    # concerns wrappers and voting acceptance, not evidence or label values.
+    cleaned = prediction.strip().rstrip(";").strip()
+    try:
+        value = json.loads(cleaned)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        match = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?```(.*)", cleaned, re.S | re.I)
+        if match is None:
+            raise ValueError("Invalid Audit JSON wrapper") from None
+        body, tail = match.groups()
+        tail = tail.lstrip().lstrip(";").strip()
+        view = _protocol_view(tail)
+        tail_directives = (view is not None and any(
+            _directive_boundary(tail, view, label.start())
+            for pattern in (_LABEL, _ANSWER_LABEL)
+            for label in pattern.finditer(view)
+        ))
+        if (view is None or "```" in tail or "~~~" in tail
+                or tail_directives
+                or "{" in view or "}" in view
+                or re.search(r"(?m)^\s*\[", view)):
+            raise ValueError("Ambiguous Audit answer after closing fence")
+        try:
+            value = json.loads(body.strip().rstrip(";").strip())
+        except (ValueError, TypeError, RecursionError, OverflowError) as exc:
+            raise ValueError("Invalid Audit JSON contents") from exc
+    if not isinstance(value, dict):
+        raise AuditAnswerTypeError("An Audit answer must be a JSON object")
+    return value
+
+
+def parse_search_answer(text: str) -> set[str]:
+    """The existing name-F1 acceptance set, shared with Search majority vote."""
+    if not text or not text.strip():
+        return set()
+    try:
+        parsed = json.loads(text.strip())
+        if isinstance(parsed, list):
+            return {" ".join(str(name).lower().split()) for name in parsed if str(name).strip()}
+    except (json.JSONDecodeError, TypeError):
+        pass
+    names = set()
+    for part in re.split(r"[,;\n]", text):
+        cleaned = re.sub(r"^\s*[\d]+[.)]\s*", "", part).strip().strip("-*•").strip()
+        if 1 <= len(cleaned.split()) <= 5:
+            names.add(" ".join(cleaned.lower().split()))
+    return names
+
+
+def audit_label_key(value: Any) -> str:
+    """Keep literal label strings; never turn an incorrect alias into a label.
+
+    Non-string labels cannot equal any public Audit label and share the invalid
+    empty-string key. They are still votes, rather than silent abstentions.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def audit_evidence_key(value: Any) -> Tuple[int, ...]:
+    """Match the historical individual metric's all-or-empty int-set rule.
+
+    Its acceptance of non-list iterables and int-convertible values is retained
+    for compatibility. This helper does not infer or repair evidence IDs.
+    """
+    try:
+        values = {int(item) for item in value}
+    except Exception:
+        values = set()
+    return tuple(sorted(values, key=str))
 
 
 class _TextAction(NamedTuple):

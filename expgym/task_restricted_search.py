@@ -9,6 +9,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from expgym.react_loop import build_system_prompt as build_react_system_prompt
 from expgym.errors import ToolInputError
+from expgym.tool_protocol import parse_search_answer
 
 # ---------------------------------------------------------------------------
 # Data paths
@@ -160,35 +161,8 @@ def _normalize_name(name: str) -> str:
 
 
 def _extract_names(text: str) -> Set[str]:
-    """Extract person names from LLM prediction text.
-
-    Handles: comma-separated, newline-separated, JSON arrays, numbered lists.
-    """
-    if not text or not text.strip():
-        return set()
-
-    # Try JSON array first
-    try:
-        parsed = json.loads(text.strip())
-        if isinstance(parsed, list):
-            return {_normalize_name(str(n)) for n in parsed if str(n).strip()}
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # Split by commas, newlines, semicolons
-    parts = re.split(r"[,;\n]", text)
-    names = set()
-    for part in parts:
-        # Strip list markers like "1.", "-", "*", "•"
-        cleaned = re.sub(r"^\s*[\d]+[.)]\s*", "", part)
-        cleaned = cleaned.strip().strip("-*•").strip()
-        if not cleaned:
-            continue
-        words = cleaned.split()
-        # Names are typically 2-3 words (Firstname Lastname)
-        if 1 <= len(words) <= 5:
-            names.add(_normalize_name(cleaned))
-    return names
+    """Extract the historical name-F1 set, shared with pool majority vote."""
+    return parse_search_answer(text)
 
 
 def _name_f1(prediction: str, gold_answers: List[str]) -> float:

@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from expgym.react_loop import build_system_prompt as build_react_system_prompt
 from expgym.errors import ToolInputError
+from expgym.tool_protocol import audit_evidence_key, audit_label_key, parse_audit_answer
 
 # Canonical native arguments do not redefine the historical metric. In
 # particular EA remains independent of LA and legacy int() evidence coercion
@@ -344,17 +345,8 @@ def build_answer_evaluator(
     ) -> Dict[str, object]:
         empty = {"label_acc": 0.0, "evidence_acc": 0.0, "verification_eff": None}
         try:
-            data = json.loads(prediction)
-        except (ValueError, RecursionError, OverflowError):
-            # Strip trailing non-JSON chars (e.g. ";", markdown fences)
-            cleaned = prediction.strip().rstrip(";").strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            try:
-                data = json.loads(cleaned)
-            except (ValueError, RecursionError, OverflowError):
-                return empty
-        if not isinstance(data, dict):
+            data = parse_audit_answer(prediction)
+        except (ValueError, TypeError, RecursionError, OverflowError):
             return empty
 
         # Collect all verified submissions from tool records
@@ -396,7 +388,7 @@ def build_answer_evaluator(
             if not isinstance(entry, dict):
                 continue
 
-            pred_label = entry.get("label")
+            pred_label = audit_label_key(entry.get("label"))
             pred_evidence = entry.get("evidence_ids", [])
             gold_choice = gold_entry["choice"]
             gold_spans = set(int(s) for s in gold_entry.get("spans", []))
@@ -407,10 +399,7 @@ def build_answer_evaluator(
                 label_correct += 1
 
             # (2) Evidence accuracy (exact match, binary)
-            try:
-                evidence_set = set(int(v) for v in pred_evidence)
-            except Exception:
-                evidence_set = set()
+            evidence_set = set(audit_evidence_key(pred_evidence))
             evidence_ok = evidence_set == gold_spans
             if evidence_ok:
                 evidence_correct += 1

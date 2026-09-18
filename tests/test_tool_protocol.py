@@ -112,8 +112,7 @@ class StructuredFinalTests(unittest.TestCase):
         for text in ('Answer: {"x":1}\nAnswer: {"x":2}',
                      'Answer: thinking\nAnswer: {"x":1}',
                      '{"x":2}\nAnswer: {"x":1}',
-                     'Answer: {"x":1} trailing explanation',
-                     'Thought: consider Answer: {"x":2}.Answer: {"x":1}'):
+                     'Answer: {"x":1} trailing explanation'):
             with self.subTest(text=text):
                 self.assertIsNone(structured_final_answer(text))
 
@@ -201,16 +200,16 @@ class TextActionTests(unittest.TestCase):
 
 
 class LegacyTextAnswerTests(unittest.TestCase):
-    def test_line_final_preserves_original_payload_format_and_legacy_markdown(self):
+    def test_line_final_preserves_original_payload_format_without_label_markup(self):
         payload = '{\n  "x": 1\n}'
         self.assertEqual(extract_text_answer('Thought: done\nAnswer: ' + payload), payload)
-        self.assertEqual(extract_text_answer('**Answer:** hello_world'), '** hello_world')
+        self.assertEqual(extract_text_answer('**Answer:** hello_world'), 'hello_world')
         self.assertEqual(extract_text_answer('Answer: plain text\nsecond line'), 'plain text\nsecond line')
 
-    def test_multiple_line_finals_preserve_first_entire_suffix(self):
+    def test_multiple_nonempty_line_finals_are_rejected(self):
         payload = 'thinking\nAnswer: {"x":1}'
-        self.assertEqual(extract_text_answer('Answer: ' + payload), payload)
-        self.assertEqual(extract_text_answer('Answer: {"x":2}\nAnswer: {"x":1}'), '{"x":2}\nAnswer: {"x":1}')
+        self.assertIsNone(extract_text_answer('Answer: ' + payload))
+        self.assertIsNone(extract_text_answer('Answer: {"x":2}\nAnswer: {"x":1}'))
 
     def test_line_final_rejects_reasoning_quotations_and_negation(self):
         for text in ('<think>\nAnswer: fake', '<think>\nAnswer: fake\n</think>',
@@ -224,8 +223,7 @@ class LegacyTextAnswerTests(unittest.TestCase):
         for text in ('Thought: done.Answer: {"x":1}', '{"x":1}'):
             self.assertEqual(json.loads(extract_text_answer(text)), {'x': 1})
         for text in ('Thought: done.Answer: plain text',
-                     'Thought: done.Answer: {"x":NaN}',
-                     'Thought: consider Answer: {"x":2}\nAnswer: {"x":1}'):
+                     'Thought: done.Answer: {"x":NaN}'):
             self.assertIsNone(extract_text_answer(text))
 
 

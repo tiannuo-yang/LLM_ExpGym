@@ -6,9 +6,11 @@ Unknown terminal provenance and abstention status are represented by ``None``.
 """
 from __future__ import annotations
 
-import json
-import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
+from expgym.tool_protocol import (
+    AUDIT_ANSWER_PROTOCOL_VERSION, AUDIT_FIELD_PROTOCOL_VERSION,
+    AuditAnswerTypeError, audit_evidence_key, audit_label_key, parse_audit_answer,
+)
 
 
 def _vote_groups(
@@ -35,39 +37,23 @@ def _top_groups(groups: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _parse_audit_answer(answer: Any) -> tuple[Dict[str, Any], str]:
-    """Match the historical aggregator, not a more permissive score parser."""
-    if isinstance(answer, str):
-        try:
-            answer = json.loads(answer)
-        except (json.JSONDecodeError, TypeError):
-            return {}, "invalid_json"
-    if not isinstance(answer, dict):
+    """Use the same wrapper acceptance as the scorer and aggregator."""
+    if not isinstance(answer, (str, dict)):
         return {}, "not_object"
-    return answer, "object"
+    try:
+        return parse_audit_answer(answer), "object"
+    except AuditAnswerTypeError:
+        return {}, "not_object"
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        return {}, "invalid_json"
 
 
 def _audit_label(value: Any) -> str:
-    raw = re.sub(r"[^a-z]", "", str(value or "").lower())
-    return {
-        "entailment": "Entailment",
-        "entailed": "Entailment",
-        "contradiction": "Contradiction",
-        "contradicted": "Contradiction",
-        "notmentioned": "NotMentioned",
-        "neutral": "NotMentioned",
-    }.get(raw, str(value or "").strip())
+    return audit_label_key(value)
 
 
 def _evidence_key(value: Any) -> tuple[Any, ...]:
-    if not isinstance(value, list):
-        return ()
-    normalized = set()
-    for item in value:
-        try:
-            normalized.add(int(item))
-        except (TypeError, ValueError, OverflowError):
-            normalized.add(str(item))
-    return tuple(sorted(normalized, key=lambda item: (str(type(item)), str(item))))
+    return audit_evidence_key(value)
 
 
 def build_aggregation_diagnostics(
@@ -240,7 +226,8 @@ def build_aggregation_diagnostics(
             "evidence_tied": len(evidence_leaders) > 1,
         }
     diagnostics.update({
-        "audit_parse_policy": "legacy_json_loads_v1",
+        "audit_parse_policy": AUDIT_ANSWER_PROTOCOL_VERSION,
+        "audit_field_policy": AUDIT_FIELD_PROTOCOL_VERSION,
         "audit_parse_status": [status for _, status in parsed_with_status],
         "observed_hypothesis_ids": hypothesis_ids,
         "hypotheses": hypotheses,

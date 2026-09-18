@@ -362,7 +362,7 @@ def build_trace_v2(result: Dict[str, Any], *, repo_root: Path) -> Dict[str, obje
     }
     if score_source is not None:
         outcome["answer_score_source"] = score_source
-    for optional in ("tool_protocol", "tuning_final_policy", "protocol_failures", "protocol_retries", "agent_steps", "http_request_attempts"):
+    for optional in ("tool_protocol", "answer_protocol_version", "tuning_final_policy", "protocol_failures", "protocol_retries", "agent_steps", "http_request_attempts"):
         if optional in result:
             outcome[optional] = copy.deepcopy(result[optional])
     if result.get("missing_final_policy") == "task-abstention-v1":

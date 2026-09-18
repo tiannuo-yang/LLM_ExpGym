@@ -90,10 +90,10 @@ class AggregationDiagnosticsTest(unittest.TestCase):
 
     def test_audit_label_tie_and_evidence_vote_use_only_label_supporters(self):
         parsed = [
-            {"h": {"label": "entailed", "evidence_ids": [2, "1", 2]}},
+            {"h": {"label": "Entailment", "evidence_ids": [2, "1", 2]}},
             {"h": {"label": "Contradiction", "evidence_ids": [9]}},
             {"h": {"label": "Entailment", "evidence_ids": [3]}},
-            {"h": {"label": "contradicted", "evidence_ids": [9]}},
+            {"h": {"label": "Contradiction", "evidence_ids": [9]}},
         ]
         out = build_aggregation_diagnostics(
             "evidence_audit", [{"answer": json.dumps(value)} for value in parsed],
@@ -140,7 +140,7 @@ class AggregationDiagnosticsTest(unittest.TestCase):
         self.assertEqual(out["observed_hypothesis_ids"], [])
         self.assertEqual(out["hypotheses"], {})
 
-    def test_audit_plain_json_matches_legacy_aggregation_for_every_strategy(self):
+    def test_audit_plain_json_matches_aggregation_for_every_strategy(self):
         from expgym.poolact import aggregate_results
 
         payload = json.dumps({"h": {"label": "Entailment", "evidence_ids": [1]}})
@@ -149,13 +149,13 @@ class AggregationDiagnosticsTest(unittest.TestCase):
                 results = [{"answer": payload, "strategy": strategy}]
                 out = build_aggregation_diagnostics("evidence_audit", results)
                 aggregate = aggregate_results("evidence_audit", results)
-                self.assertEqual(out["audit_parse_policy"], "legacy_json_loads_v1")
+                self.assertEqual(out["audit_parse_policy"], "audit-json-wrapper-v2")
                 self.assertEqual(out["audit_parse_status"], ["object"])
                 self.assertEqual(out["hypotheses"]["h"]["winning_label"], "Entailment")
                 self.assertEqual(out["hypotheses"]["h"]["winning_evidence"], [1])
                 self.assertEqual(json.loads(aggregate["answer"]), json.loads(payload))
 
-    def test_audit_wrapped_json_is_not_accepted_by_legacy_aggregation(self):
+    def test_audit_wrapped_json_is_accepted_by_shared_policy(self):
         from expgym.poolact import aggregate_results
 
         payload = json.dumps({"h": {"label": "Entailment", "evidence_ids": [1]}})
@@ -169,11 +169,11 @@ class AggregationDiagnosticsTest(unittest.TestCase):
                     results = [{"answer": answer, "strategy": strategy}]
                     out = build_aggregation_diagnostics("evidence_audit", results)
                     aggregate = aggregate_results("evidence_audit", results)
-                    self.assertEqual(out["audit_parse_policy"], "legacy_json_loads_v1")
-                    self.assertEqual(out["audit_parse_status"], ["invalid_json"])
-                    self.assertEqual(out["observed_hypothesis_ids"], [])
-                    self.assertEqual(out["hypotheses"], {})
-                    self.assertEqual(json.loads(aggregate["answer"]), {})
+                    self.assertEqual(out["audit_parse_policy"], "audit-json-wrapper-v2")
+                    self.assertEqual(out["audit_parse_status"], ["object"])
+                    self.assertEqual(out["observed_hypothesis_ids"], ["h"])
+                    self.assertEqual(out["hypotheses"]["h"]["winning_label"], "Entailment")
+                    self.assertEqual(json.loads(aggregate["answer"]), json.loads(payload))
 
     def test_audit_parser_does_not_extract_examples_from_prose_or_broken_fences(self):
         payload = json.dumps({"h": {"label": "Entailment", "evidence_ids": [1]}})

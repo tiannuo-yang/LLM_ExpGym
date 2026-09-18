@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from expgym.errors import ToolInputError
 from expgym.execution_contract import validate_execution_contracts
-from expgym.tool_protocol import native_system_prompt, native_tool_schemas, resolve_tool_protocol, structured_final_answer, unlabelled_final_answer
+from expgym.tool_protocol import ANSWER_PROTOCOL_VERSION, native_system_prompt, native_tool_schemas, resolve_tool_protocol, parse_final_answer
 
 logger = logging.getLogger("expgym")
 
@@ -391,7 +391,7 @@ def run_react_loop(
                 if _extract_action(text) is not None:
                     protocol_error = "Text Action is not a native function call"
                 elif text:
-                    answer = _extract_answer(text) or structured_final_answer(text) or unlabelled_final_answer(text)
+                    answer = parse_final_answer(text)
                     if answer is None:
                         protocol_error = "No final answer outside reasoning or protocol examples"
                 else:
@@ -517,8 +517,7 @@ def run_react_loop(
                     if _extract_action(forced_text) is not None:
                         reject_decision(forced, "Action received during forced final", forced=True)
                     else:
-                        answer = (_extract_answer(forced_text) or structured_final_answer(forced_text)
-                                  or unlabelled_final_answer(forced_text))
+                        answer = parse_final_answer(forced_text)
                         if answer is None:
                             reject_decision(forced, "Forced final contains only reasoning or protocol examples", forced=True)
                         else:
@@ -552,6 +551,7 @@ def run_react_loop(
         tool_records=tool_records, eval_records=eval_records,
     ).__dict__
     result.update(
+        answer_protocol_version=ANSWER_PROTOCOL_VERSION,
         tool_protocol=resolved_protocol, max_protocol_retries=max_protocol_retries,
         tuning_final_policy=tuning_final_policy, protocol_retries=protocol_retries,
         protocol_failures=protocol_failures, agent_steps=agent_steps,
@@ -737,8 +737,7 @@ def _parse_tool_return(result: ToolReturn) -> Tuple[Optional[float], float, Opti
 
 
 def _extract_answer(block: str) -> Optional[str]:
-    from expgym.tool_protocol import extract_text_answer
-    return extract_text_answer(block)
+    return parse_final_answer(block, allow_unlabelled=False)
 
 
 def _extract_action(block: str) -> Optional[Tuple[str, str]]:

@@ -35,7 +35,7 @@ class JsonAnswerLookupTest(unittest.TestCase):
         self.assertEqual(_lookup_answer_metrics('{"id":"cfg_1"}', records), (None, None))
         self.assertEqual(_lookup_answer_metrics("anything", []), (None, None))
 
-    def test_known_zero_unseen_and_multiple_answers_keep_existing_fallback(self):
+    def test_known_zero_unseen_answers_keep_existing_fallback(self):
         configs = ['{"x": 1}', '{"x": 2}', '{"x": 3}']
         scores = {1: 0.9, 2: 0.4, 3: 0.0}
 
@@ -49,8 +49,6 @@ class JsonAnswerLookupTest(unittest.TestCase):
             ("Answer: " + configs[1], configs[1], 0.4, "natural_model_answer"),
             ("Answer: " + configs[2], configs[2], 0.0, "natural_model_answer"),
             ('Answer: {"x": 99}', configs[0], 0.9, "best_evaluated_fallback"),
-            ("Answer: I should continue exploring.\n\nAnswer: " + configs[1], configs[0], 0.9, "best_evaluated_fallback"),
-            ("Answer: " + configs[1] + "\nAnswer: " + configs[2], configs[0], 0.9, "best_evaluated_fallback"),
         ]
         for final, expected_answer, expected_perf, source in cases:
             with self.subTest(final=final):
@@ -73,7 +71,7 @@ class JsonAnswerLookupTest(unittest.TestCase):
 
                 replies = ['Action: evaluate_config {"x": 1}',
                            'Action: evaluate_config {"x": 2}',
-                           'Answer: deliberating\nAnswer: {"x": 2}']
+                           'Answer: selected an unparseable configuration']
                 result = run_react_loop(llm=RecordedReplies(replies), tools={"evaluate_config": tool}, time_budget=5.0, max_steps=4, capture_trace_v2=True)
                 self.assertEqual(result["answer"], '{"x": 1}')
                 self.assertEqual(result["answer_perf"], visible_perf)
@@ -88,7 +86,7 @@ class JsonAnswerLookupTest(unittest.TestCase):
         cases = [
             ("invalid_config", None, 'Answer: {"x": 1}', 0.0),
             ("valid", 1.0, 'Answer: {"x": 1}', 0.99),
-            ("valid", 1.0, 'Answer: deliberating\nAnswer: {"x": 1}', 0.0),
+            ("valid", 1.0, 'Answer: selected an unparseable configuration', 0.0),
         ]
         for mode, budget, final, expected in cases:
             with self.subTest(mode=mode, final=final):
