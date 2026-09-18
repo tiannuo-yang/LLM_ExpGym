@@ -2,16 +2,18 @@
 
 本目录对应指定的 `ad03e8c42ca501016176ee1bc407b38499178506` 报告。正文、分析附件和来源选择固定于该版本；此次只整理发布布局，没有重跑实验或重评分。
 
+2026-09-18 主分支的[主报告原路径](../paper-analysis-20260916/README.zh.md)已合入 Gemini 的 16 个补齐结果。**本目录仍是 ad03 冻结数据**；当前完整的 4,698 项数据与采用关系见[Gemini 补齐数据入口](../gemini-openrouter-20260917/main/README.zh.md)。原报告五份被更新文档的原字节另存同目录 `*.ad03.*`，冻结清单保留原提交身份。
+
 ## 报告、CSV 与来源
 
 | 需要什么 | 当前入口 | 内容 |
 | --- | --- | --- |
-| 最终报告 | [中文正文](../paper-analysis-20260916/README.zh.md)、[数据与方法附件](../paper-analysis-20260916/APPENDIX.zh.md) | 指定版本原文，全部 70 件报告文件逐字节保留 |
+| 冻结报告 | [中文正文](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ad03e8c42ca501016176ee1bc407b38499178506/results/paper-analysis-20260916/README.zh.md)、[数据与方法附件](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ad03e8c42ca501016176ee1bc407b38499178506/results/paper-analysis-20260916/APPENDIX.zh.md) | 指定版本原文，全部 70 件原文件字节保留，更新文档以 `.ad03` 文件归档 |
 | 简明比较 | [MAIN_COMPARISON.csv](csv/MAIN_COMPARISON.csv) | 72 行主比较：N1 三预算、N4 同预算三策略 |
 | 完整比较 | [COMPARISON.csv](csv/COMPARISON.csv) | 1,298 行，保留任务/家族、次指标、差值与缺失 |
 | 分开查看实验臂 | [N1_BUDGET_COMPARISON.csv](csv/N1_BUDGET_COMPARISON.csv)、[N4_STRATEGY_COMPARISON.csv](csv/N4_STRATEGY_COMPARISON.csv) | 单智能体预算比较与四智能体策略比较 |
 | 冻结原始聚合表 | [absolute_settings.csv](../six-models-lineage-20260914/absolute_settings.csv)、[by_repeat.csv](../six-models-lineage-20260914/by_repeat.csv)、[contrasts.csv](../six-models-lineage-20260914/contrasts.csv) | 完整设置、重复层结果及原报告差值 |
-| 行为分析与案例 | [分析附件](../paper-analysis-20260916/APPENDIX.zh.md)、[案例索引](../paper-analysis-20260916/cases/CASE_INDEX.zh.md) | 排名、Search/HPO/Audit trajectory 指标、PoolAct 协调行为和案例数据 |
+| 冻结行为分析与案例 | [冻结分析附件](https://github.com/tiannuo-yang/LLM_ExpGym/blob/ad03e8c42ca501016176ee1bc407b38499178506/results/paper-analysis-20260916/APPENDIX.zh.md)、[案例索引](../paper-analysis-20260916/cases/CASE_INDEX.zh.md) | ad03 排名、Search/HPO/Audit trajectory 指标、PoolAct 协调行为和案例数据 |
 | 每项采用来源 | [selected_slots.csv](index/selected_slots.csv)、[SOURCE_SELECTION.csv](../six-models-lineage-20260914/SOURCE_SELECTION.csv) | 4,698 个计划槽位及最终采用关系；结果身份与本地原件位置 |
 | 重跑替换 | [superseded_slots.csv](index/superseded_slots.csv)、[实验日志](../six-models-lineage-20260914/EXPERIMENT_LOG.zh.md) | 解释 369 个旧池为何被替换；旧池不重复计分 |
 | 字段口径与文件身份 | [CSV 字典](csv/CSV_DICTIONARY.zh.md)、[CSV 清单](csv/GENERATED.json)、[来源与迁移说明](provenance/README.zh.md) | 单位、差值方向、缺失口径、SHA256 与新旧路径映射 |
