@@ -214,7 +214,10 @@ def verify(root=ROOT):
         "current_report_recorded": {
             key: manifest.get("current_report", {}).get(key)
             for key in ("path", "scoring_layer", "completed_slots",
-                        "strict_score_complete", "final_runtime_adoption_ready")
+                        "strict_score_complete", "final_runtime_adoption_ready",
+                        "rollback_complete", "retained_single_agent_slots",
+                        "restored_multi_agent_slots")
+            if key in manifest.get("current_report", {})
         },
         "model_calls": 0,
         "rescoring": False,

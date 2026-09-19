@@ -1,20 +1,23 @@
 # LLM ExpGym
 
-**正式主报告：协议修复、全量重评分与必要运行对照已采用**
+**当前主报告：POOLACT 恢复旧方案，单智能体修复与 Gemini 补齐保留**
 
-[完整主报告](results/paper-analysis-20260916/README.zh.md) · [数据与方法附件](results/paper-analysis-20260916/APPENDIX.zh.md) · [新版交付与全部 CSV](results/protocol-repair-20260918/README.zh.md) · [新旧评分层](results/protocol-repair-20260918/score_layers/README.zh.md) · [HPO 486 条行为表](results/protocol-repair-20260918/hpo_behavior/README.zh.md) · [Whois 预算分析](results/protocol-repair-20260918/whois/README.zh.md)
+[完整主报告](results/paper-analysis-20260916/README.zh.md) · [附件](results/paper-analysis-20260916/APPENDIX.zh.md) · [当前 CSV、来源和回退对照](results/poolact-rollback-20260919/README.zh.md) · [HPO 486 条行为统计](results/protocol-repair-20260918/hpo_behavior/README.zh.md) · [Whois 预算分析](results/protocol-repair-20260918/whois/README.zh.md)
 
-2026-09-18 更新终答提取和投票规则，对全部相关 N1/N4 与 sweep 重新评分，并采用 97 个 HPO 池、21 个 Search/Audit 主实验槽和独立 1 个 sweep 槽的必要补对照。主实验 4,698 个结果全部采用，严格评分完整 4,687 个；正常无答案继续使用原有全分母规则，不将基础设施失败补零。 排名、regret、证据质量、配对案例和 POOLACT 增益同步重算；评分层与实际运行来源清楚区分。
+2026-09-19 撤回本轮 POOLACT/N4 的图身份、投票接受及终答相关修改，恢复修复前、已补齐 Gemini 的 N4 实验与评分口径。三种 N4 策略（naive、cached、POOLACT）共 2,196 个结果及其来源完整恢复；2,502 个 N1 结果保留此前修复，HPO 行为仍为 486 条、每预算 162 条。主实验合计 4,698 个完成结果，严格评分完整 4,687 个。
 
-历史报告和数据保持原字节：[修复前 297c3d0 报告](results/paper-analysis-20260916/README.pre-repair-297c3d0.zh.md) · [ad03 冻结报告](results/paper-analysis-20260916/README.ad03.zh.md) · [ad03 数据入口](results/paper-ad03e8c-delivery-20260916/README.zh.md) · [此前 Gemini 补齐](results/gemini-openrouter-20260917/README.zh.md)。原始 API dump、完整 trajectory、失败或被替换尝试继续本地留档；公开包保留最小复算输入、来源和代码身份。
+本轮新运行中的 116 个 N4 来源退出正式采用；两条 N1 主实验对照及一条 Whois N1 对照继续采用。回退由完整分组及版本选择决定，不按单个结果的分数选择。主成绩、增益、证据与行为分析均从这份采用清单重建；本次没有新模型调用。
 
-`python3 tools/verify_lightweight.py` 校验所有公开文件及旧冻结版身份；`python3 tools/verify_protocol_repair.py --full` 重新执行新版评分与分析回放。见 [复算说明](tools/VERIFY_PROTOCOL_REPAIR.zh.md)、[LIGHTWEIGHT_MANIFEST.json](LIGHTWEIGHT_MANIFEST.json) 和 [SHA256SUMS](SHA256SUMS)。
+9月18日修复方案的代码、数据和检查记录保留在固定提交 [7776f70](https://github.com/tiannuo-yang/LLM_ExpGym/tree/7776f700902db194c69124b1a5f59d985379cfb3)。原报告另存为 [README.protocol-repair-7776f70.zh.md](results/paper-analysis-20260916/README.protocol-repair-7776f70.zh.md)。仓库中的 `results/protocol-repair-20260918/` 与对应冻结 runtime 保留原字节，其中 N4 候选结果不再代表当前正式采用；复算那个历史方案应切换到其固定提交。当前入口使用新的回退核验：
 
 ```bash
-git clone --single-branch --branch main --depth 1 https://github.com/tiannuo-yang/LLM_ExpGym.git
+python3 tools/verify_lightweight.py
+python3 tools/verify_poolact_rollback.py --output /tmp/expgym-poolact-rollback-check
 ```
 
-根目录包含正式 parser、投票与图身份修复；本次真实补跑所用原生客户端及冻结运行源码保存在 [studies/protocol-repair-20260918](studies/protocol-repair-20260918/README.zh.md)，版本不能与历史冻结结果混用。以下保留运行与安装说明。
+[公开核验记录](results/poolact-rollback-20260919/review/PUBLIC_VERIFICATION.json) · [文件清单](LIGHTWEIGHT_MANIFEST.json) · [SHA256](SHA256SUMS)。原始 API dump、完整 trajectory 和所有尝试继续本地留档。
+
+以下保留运行和安装说明。N1 默认使用修复后的终答规则，N4 入口显式使用历史规则，两者按每次运行分别选择。
 
 One repository, two experiment paths:
 
