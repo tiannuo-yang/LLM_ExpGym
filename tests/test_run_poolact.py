@@ -268,6 +268,7 @@ class PoolActCliTest(unittest.TestCase):
         self.assertEqual(loop.call_args.kwargs["tool_protocol"], "text")
         self.assertEqual(loop.call_args.kwargs["max_protocol_retries"], 0)
         self.assertEqual(loop.call_args.kwargs["tuning_final_policy"], "submitted")
+        self.assertEqual(loop.call_args.kwargs["answer_protocol"], "poolact-answer-297c3d0")
 
     def test_dry_run_requires_no_api_key(self):
         environment = dict(os.environ)

@@ -26,6 +26,7 @@ _SOURCE_FILES = frozenset({
     'expgym/llm_clients.py', 'expgym/task_tuning.py',
     'expgym/task_restricted_search.py', 'expgym/task_evidence_audit.py',
     'expgym/tool_protocol.py', 'expgym/evaluation_identity.py',
+    'expgym/poolact_legacy.py', 'expgym/poolact_legacy_tool_protocol.py',
     'expgym/execution_contract.py', 'expgym/extras/parallel_cache.py',
     'expgym/errors.py',
     'expgym/compact_nasbench101.py', 'expgym/compact_nasbench201.py',

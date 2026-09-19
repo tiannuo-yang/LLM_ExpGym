@@ -24,7 +24,7 @@ from demo_experiment import (  # noqa: E402
     _loop_options,
     _call_scenario,
     _resolve_context,
-    _resolve_answer_evaluator,
+    _resolve_answer_evaluator as _resolve_default_answer_evaluator,
     _resolve_system_prompt,
     _resolve_tools,
     build_llm,
@@ -43,6 +43,9 @@ from expgym.poolact import (  # noqa: E402
     run_agents_parallel,
 )
 from expgym.react_loop import build_system_prompt, run_react_loop  # noqa: E402
+from expgym.poolact_legacy import (  # noqa: E402
+    LEGACY_POOL_ANSWER_PROTOCOL, build_answer_evaluator as _legacy_audit_evaluator,
+)
 from scripts.run_paper_sweep import _score_check, _score_result  # noqa: E402
 from expgym.evaluation_identity import bind_evaluation_identity, evaluation_identity  # noqa: E402
 from expgym.trace_v2 import source_tree_sha256  # noqa: E402
@@ -53,6 +56,13 @@ from expgym.missing_final import (  # noqa: E402
 
 
 STRATEGIES = ("naive", "cached", "poolact")
+
+
+def _resolve_answer_evaluator(scenario, args):
+    """All pool strategies retain the historical individual/aggregate scorer."""
+    if scenario.get("name") == "evidence_audit":
+        scenario = {**scenario, "build_answer_evaluator": _legacy_audit_evaluator}
+    return _resolve_default_answer_evaluator(scenario, args)
 
 
 def aggregate_results(scenario, results, *, answer_evaluator=None):
@@ -224,6 +234,7 @@ def _pool_cache_namespace(args: argparse.Namespace) -> Optional[str]:
         },
         "protocol": {
             "poolact": POOLACT_PROTOCOL_VERSION,
+            "answer_protocol": LEGACY_POOL_ANSWER_PROTOCOL,
             "missing_final_policy": getattr(args, "missing_final_policy", "error"),
             **_loop_options(args),
         },
@@ -315,6 +326,7 @@ def _resolved_config(
 ) -> Dict[str, Any]:
     return {
         "poolact_protocol": POOLACT_PROTOCOL_VERSION,
+        "answer_protocol": LEGACY_POOL_ANSWER_PROTOCOL,
         "missing_final_policy": getattr(args, "missing_final_policy", "error"),
         "backend": args.backend,
         "model": args.model,
@@ -586,6 +598,7 @@ def _run_strategy(
             pre_tool_hook=pre_tool_hook,
             llm_lock=reasoning_lock,
             capture_trace_v2=False,
+            answer_protocol=LEGACY_POOL_ANSWER_PROTOCOL,
             **_loop_options(namespace),
         )
         result["wall_time_seconds"] = time.perf_counter() - started

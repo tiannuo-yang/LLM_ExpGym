@@ -339,7 +339,7 @@ class PoolActAggregationTest(unittest.TestCase):
             {"nda1": {"label": "E", "evidence_ids": [1]}},
         )
 
-    def test_audit_vote_keeps_literal_labels_and_legacy_evidence_ids(self):
+    def test_audit_vote_normalizes_labels_and_evidence_ids(self):
         results = [
             {
                 "answer": json.dumps(
@@ -360,7 +360,7 @@ class PoolActAggregationTest(unittest.TestCase):
         aggregate = aggregate_results("evidence_audit", results)
         self.assertEqual(
             json.loads(aggregate["answer"]),
-            {"nda1": {"label": "not_mentioned", "evidence_ids": [1, 2]}},
+            {"nda1": {"label": "NotMentioned", "evidence_ids": [1, 2]}},
         )
 
     def test_parallel_runner_preserves_agent_order(self):

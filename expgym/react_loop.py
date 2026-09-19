@@ -150,6 +150,7 @@ def run_react_loop(
     tool_protocol: str = "auto",
     max_protocol_retries: int = 0,
     tuning_final_policy: str = "legacy",
+    answer_protocol: str = ANSWER_PROTOCOL_VERSION,
 ) -> Dict[str, object]:
     """Run one agent; native and text transports share the same budget rules.
 
@@ -183,6 +184,21 @@ def run_react_loop(
         observation_augmenter=observation_augmenter, pre_tool_hook=pre_tool_hook,
         time_budget=time_budget, overhead_scale=overhead_scale,
     )
+    # Per-call selection keeps simultaneous N1 and N4 executions isolated.
+    # The legacy Action parser must also be selected: its protocol masking
+    # differs from v2, so replacing only final extraction is insufficient.
+    if answer_protocol == ANSWER_PROTOCOL_VERSION:
+        action_parser = _extract_action
+        answer_parser = _extract_answer
+        terminal_parser = parse_final_answer
+    else:
+        from expgym.poolact_legacy import LEGACY_POOL_ANSWER_PROTOCOL, parse_final_answer as legacy_final
+        from expgym import poolact_legacy_tool_protocol as legacy_protocol
+        if answer_protocol != LEGACY_POOL_ANSWER_PROTOCOL:
+            raise ValueError("Unknown answer protocol: " + str(answer_protocol))
+        action_parser = legacy_protocol.extract_text_action
+        answer_parser = legacy_protocol.extract_text_answer
+        terminal_parser = legacy_final
     resolved_protocol = resolve_tool_protocol(llm, tool_protocol)
     native = resolved_protocol == "native"
     schemas = native_tool_schemas(tools) if native else None
@@ -388,18 +404,18 @@ def run_react_loop(
                     except (ValueError, TypeError, OverflowError, RecursionError) as exc:
                         protocol_error = "Invalid native function arguments: " + str(exc)
             elif native:
-                if _extract_action(text) is not None:
+                if action_parser(text) is not None:
                     protocol_error = "Text Action is not a native function call"
                 elif text:
-                    answer = parse_final_answer(text)
+                    answer = terminal_parser(text)
                     if answer is None:
                         protocol_error = "No final answer outside reasoning or protocol examples"
                 else:
                     protocol_error = "LLM returned empty response"
             else:
-                action = _extract_action(text)
+                action = action_parser(text)
                 if action is None:
-                    answer = _extract_answer(text)
+                    answer = answer_parser(text)
                     if not answer:
                         protocol_error = "Missing Action directive" if text else "LLM returned empty response"
             if action is not None and action[0] not in tools:
@@ -514,10 +530,10 @@ def run_react_loop(
                     reject_decision(forced, "Forced final completion token limit reached", forced=True)
                 elif forced_text:
                     # A textual Action is not a forced answer either.
-                    if _extract_action(forced_text) is not None:
+                    if action_parser(forced_text) is not None:
                         reject_decision(forced, "Action received during forced final", forced=True)
                     else:
-                        answer = parse_final_answer(forced_text)
+                        answer = terminal_parser(forced_text)
                         if answer is None:
                             reject_decision(forced, "Forced final contains only reasoning or protocol examples", forced=True)
                         else:
@@ -551,7 +567,7 @@ def run_react_loop(
         tool_records=tool_records, eval_records=eval_records,
     ).__dict__
     result.update(
-        answer_protocol_version=ANSWER_PROTOCOL_VERSION,
+        answer_protocol_version=answer_protocol,
         tool_protocol=resolved_protocol, max_protocol_retries=max_protocol_retries,
         tuning_final_policy=tuning_final_policy, protocol_retries=protocol_retries,
         protocol_failures=protocol_failures, agent_steps=agent_steps,

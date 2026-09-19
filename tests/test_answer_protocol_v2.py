@@ -1,4 +1,4 @@
-"""Final-answer boundary and scorer/vote consistency, without model calls."""
+"""Single-agent final-answer boundary and scorer compatibility, without model calls."""
 import json
 import unittest
 from unittest.mock import patch
@@ -88,30 +88,16 @@ class AuditWrapperV2Test(unittest.TestCase):
                 patch('expgym.task_evidence_audit._get_labels', return_value={'nda-1': {}}):
             self.evaluator = build_answer_evaluator(0)
 
-    def test_scorer_and_vote_share_wrapper_acceptance(self):
+    def test_single_agent_scorer_retains_v2_wrapper_acceptance(self):
         for value in (PAYLOAD, PAYLOAD + ';', FENCED, FENCED + ';',
                       '```\n' + PAYLOAD + ';\n```;',
                       FENCED + '\nThe answer: follows the evidence in segment [1].',
                       FENCED + '\nReasoning: segment [1] is explicit.'):
             with self.subTest(value=value):
                 score = self.evaluator(value, [])
-                aggregate = aggregate_results('evidence_audit', [
-                    {'answer': value, 'answer_perf': score['label_acc']},
-                ], answer_evaluator=self.evaluator)
                 self.assertEqual(score['label_acc'], 1.)
                 self.assertEqual(score['evidence_acc'], 1.)
-                self.assertEqual(aggregate['answer_metrics'], score)
-                self.assertEqual(aggregate['diagnostics']['audit_parse_policy'],
-                                 AUDIT_ANSWER_PROTOCOL_VERSION)
 
-    def test_three_fenced_votes_beat_one_conflicting_plain_vote(self):
-        wrong = '{"nda-1":{"label":"Contradiction","evidence_ids":[2]}}'
-        aggregate = aggregate_results('evidence_audit', [
-            {'answer': answer} for answer in (FENCED, FENCED, FENCED, wrong)
-        ], answer_evaluator=self.evaluator)
-        self.assertEqual(aggregate['answer_metrics']['label_acc'], 1.)
-        self.assertEqual(aggregate['answer_metrics']['evidence_acc'], 1.)
-        self.assertEqual(aggregate['diagnostics']['audit_parse_status'], ['object'] * 4)
 
     def test_ambiguous_wrappers_are_rejected_in_both_paths(self):
         for value in ('For example: ' + PAYLOAD, '```json\n' + PAYLOAD,
@@ -143,42 +129,29 @@ class AuditWrapperV2Test(unittest.TestCase):
         self.assertEqual(score['label_acc'], 0.)  # Do not repair label spelling.
         self.assertEqual(score['evidence_acc'], 1.)  # Historical int coercion.
 
-    def test_votes_cannot_repair_individually_incorrect_label_spellings(self):
+    def test_single_agent_scorer_does_not_repair_incorrect_label_spellings(self):
         for label in ('entailed', 'entailment', ' Entailment ', 'neutral',
                       'not_mentioned', 'Entailment!', None, ['Entailment']):
             value = json.dumps({'nda-1': {'label': label, 'evidence_ids': [1]}})
             with self.subTest(label=label):
-                individual = self.evaluator(value, [])
-                aggregate = aggregate_results('evidence_audit', [{'answer': value}],
-                                              answer_evaluator=self.evaluator)
-                self.assertEqual(individual['label_acc'], 0.)
-                self.assertEqual(aggregate['answer_metrics'], individual)
-                self.assertEqual(aggregate['diagnostics']['audit_field_policy'],
-                                 AUDIT_FIELD_PROTOCOL_VERSION)
+                self.assertEqual(self.evaluator(value, [])['label_acc'], 0.)
 
-    def test_vote_evidence_keys_match_scorer_iterable_and_all_or_empty_semantics(self):
+    def test_single_agent_scorer_preserves_iterable_and_all_or_empty_semantics(self):
         for value, expected in ((['1', 1.9, True], (1,)), ('1', (1,)),
                                 ({'1': 'ignored'}, (1,)), ([1, 'bad'], ()),
                                 (None, ()), (1, ()), ([float('inf')], ())):
             with self.subTest(value=value):
                 self.assertEqual(audit_evidence_key(value), expected)
                 answer = json.dumps({'nda-1': {'label': 'Entailment', 'evidence_ids': value}})
-                individual = self.evaluator(answer, [])
-                aggregate = aggregate_results('evidence_audit', [{'answer': answer}],
-                                              answer_evaluator=self.evaluator)
-                self.assertEqual(aggregate['answer_metrics'], individual)
+                self.assertEqual(self.evaluator(answer, [])['evidence_acc'], float(expected == (1,)))
 
 
 class SearchAcceptanceV2Test(unittest.TestCase):
-    def test_vote_uses_scorer_name_set_including_long_prose_filter(self):
+    def test_single_agent_scorer_preserves_long_prose_filter(self):
         plain = 'Ada Lovelace'
         prose = 'Ada Lovelace\nThis explanatory sentence has more than five separate words'
         self.assertEqual(_extract_names(plain), _extract_names(prose))
-        aggregate = aggregate_results('restricted_search', [
-            {'answer': 'Grace Hopper'}, {'answer': plain}, {'answer': prose},
-        ], answer_evaluator=lambda prediction: _name_f1(prediction, ['Ada Lovelace']))
-        self.assertEqual(aggregate['answer'], plain)
-        self.assertEqual(aggregate['answer_perf'], 1.)
+        self.assertEqual(_name_f1(prose, ['Ada Lovelace']), 1.)
 
     def test_parser_preserves_historical_json_array_and_text_rules(self):
         cases = {
