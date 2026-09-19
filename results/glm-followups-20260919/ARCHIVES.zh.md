@@ -9,3 +9,5 @@
 恢复某个原件时，先用study-relative路径查MEMBERS的path，按shard_id连接SHARDS取得分片path，再取本地对应分片，以记录的bytes/SHA验证，只恢复所需成员。不同job的科学slot与参数可在[1334行非敏感参数](reproduce/PARAMETERS.public.jsonl)查到。不要因报告更新重复解压或重评分所有raw。已封本地总索引SHA为 `04af2ec3f6f429ef356c2cd56fad00976598aa09dae2d11a6ab5ec271b46b456`；公开投影自己的SHA另列，不能冒称与原件逐字相同。
 
 本地归档已完成单次seal与完整stream verify，原三包未重封。本地记录与本公开投影的范围、来源和身份见[来源说明](PROVENANCE.md)；原始包继续local-only。
+
+后续[图件修订v2](FIGURES.zh.md)不反写上述四个冻结包：新增SVG、绘图脚本、逐点CSV、图注和复核记录随Git修订保存，身份列于[当前图件索引](figures/FIGURE_INDEX.json)与[公开文件索引](PUBLICATION_INDEX.json)。本地PDF/PNG及其SHA另存study-relative `analysis/paper-figures-v2/FIGURE_INDEX.json`；未把它们描述为旧92个分片的成员。

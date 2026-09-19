@@ -2,7 +2,7 @@
 
 [主报告](README.zh.md) · [详细报告](DETAILS.zh.md) · [公开参数身份](reproduce/SOURCE.md)
 
-科学数值沿用已复核本地报告。该公开分支基于main提交`7776f700902db194c69124b1a5f59d985379cfb3`，它是发布基线，不是实验执行或历史评分版本。
+科学数值沿用已复核本地报告。四张图在本次修订中由冻结CSV重绘，naive N1复用已有EA_MI，ExpGym N1作为单独参考；见[图件修订与定义](FIGURES.zh.md)。下表旧图SHA始终指旧原件，指向figures的链接现为修订图，当前SHA见[图件索引](figures/FIGURE_INDEX.json)。该公开分支基于main提交`7776f700902db194c69124b1a5f59d985379cfb3`，它是发布基线，不是实验执行或历史评分版本。
 
 下表是原件身份；未选择为公开文件的原件仍在本地存档中。公开文件自己的路径、bytes和SHA见PUBLICATION_INDEX.json，原SHA不被改写为公开文件SHA。
 

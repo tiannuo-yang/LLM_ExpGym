@@ -1,6 +1,6 @@
 # GLM 完整研究详细报告
 
-> 公开版本只适配链接与本地路径，复用原成稿55项独立复核；实验分数、表格和已复核SVG不变。原始dump、私有配置及压缩包留在本地；完整成员定位见[公开档案索引](ARCHIVES.zh.md)。公开图使用SVG，本地同时保留PDF/PNG。原件与公开投影的身份分别列在[来源说明](PROVENANCE.md)。
+> 图件修订版：四张图已重绘，并补充已有数据的 N=1 点；原实验分数、210设置总表及存档保持不变。新增点的口径、英文图注、逐点数据和复现入口见[论文图件说明](FIGURES.zh.md)。原55项复核对应初版成稿，本次图形另作有限复核；原件与公开修订身份见[来源说明](PROVENANCE.md)。
 
 [主报告](README.zh.md) · [210设置总表](metrics/unified_settings.csv) · [417项同版配对](metrics/same_version_pairs.csv) · [12对具体轨迹](TRAJECTORIES.zh.md) · [原917 dump索引](archive/MEMBERS.csv) · [新增Max dump索引](archive/MEMBERS.csv) · [完整分包与恢复入口](ARCHIVES.zh.md)
 
@@ -53,14 +53,16 @@
 
 Scaling Moderate/Tight × naive/cached/PoolAct × N2/4/6/8，每设置13文档。naive N8每题28/70/28/1个N2/4/6/8子集，共3302条子集记录；先每子集按原agent ID顺序执行legacy MV，再对同题子集均值，再13题均值。对MI也逐子集按同N计算，没有以N8 MI替代小N。子集依赖共同N8 agents，不是独立重复或新模型采样。
 
-| 预算 | 方法 | N2 | N4 | N6 | N8 |
-| --- | --- | --- | --- | --- | --- |
-| Moderate | naive | 82.579 | 84.286 | 84.454 | 84.163 |
-| Moderate | cached | 86.878 | 90.045 | 92.308 | 91.855 |
-| Moderate | poolact | 92.760 | 97.738 | 100.000 | 100.000 |
-| Tight | naive | 63.203 | 63.129 | 62.815 | 63.348 |
-| Tight | cached | 61.991 | 66.968 | 66.063 | 66.063 |
-| Tight | poolact | 64.253 | 80.995 | 87.330 | 92.308 |
+| 预算 | 方法 | N1（个体均分） | N2 | N4 | N6 | N8 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Moderate | naive | 77.602 | 82.579 | 84.286 | 84.454 | 84.163 |
+| Moderate | cached | 未运行 | 86.878 | 90.045 | 92.308 | 91.855 |
+| Moderate | poolact | 未运行 | 92.760 | 97.738 | 100.000 | 100.000 |
+| Tight | naive | 59.106 | 63.203 | 63.129 | 62.815 | 63.348 |
+| Tight | cached | 未运行 | 61.991 | 66.968 | 66.063 | 66.063 |
+| Tight | poolact | 未运行 | 64.253 | 80.995 | 87.330 | 92.308 |
+
+N1复用naive N8池中的个体评分均值 EA_MI：每文档8个agent先平均，再13文档等权；N≥2仍为原EA-MV，未重新投票或增加实验。独立ExpGym Max N1为Moderate **81.750%**、Tight **57.919%**，在图中用空心菱形标出；它采用3种order且context/cache设置不同，不作为三条曲线的共同起点。Cached/PoolAct的N1保持未运行。详见[定义与图注](FIGURES.zh.md#n1-的定义与可比性)。
 
 | 指标 | naive | cached | peer_context | graph_no_lock | poolact |
 | --- | --- | --- | --- | --- | --- |
@@ -517,7 +519,7 @@ graph_no_lock仅移除整个LLM reasoning/claim外层临界区，内部claims/ca
 
 ## 图件、档案与交付身份
 
-主图为[同版Low/Max](PROVENANCE.md#ref-67036a89a4957f01)、[Audit scaling与Tight消融](PROVENANCE.md#ref-cbfad88af265f011)中的前两组；该旧图索引还保留旧历史图，不作为当前历史参照。最新历史图见[更正图索引](PROVENANCE.md#ref-4ee22c24cd9be87b)。所有正式图均PDF/SVG/PNG，三个任务量纲分面。
+当前四张图统一重绘，并补充naive N1个体均分和ExpGym Max N1参考。见[论文图件与英文图注](FIGURES.zh.md)、[当前图件索引](figures/FIGURE_INDEX.json)及[79个显示数值](figures/PLOT_DATA.csv)。旧图及旧SHA仍保留在原存档与上一Git提交中；原图索引不是当前重绘图的身份。公开SVG，本地另存PDF/PNG，三个任务量纲分面。
 
 [ARCHIVES.md](ARCHIVES.zh.md)给出原始dump→路径/大小/SHA→成员/分片和选择恢复入口；[INPUTS.json](provenance/REVIEWED_REPORT_INPUTS.json)锁定本报告直接读取的小型输入。原917与Max封包均单次全stream verify、restore0；后续整理先读CSV/index，不反复展开raw。旧v1/v2报告和历史分数保持不动，本报告作为新版本。
 
